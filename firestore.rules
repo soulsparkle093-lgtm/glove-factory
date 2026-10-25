@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Gloves Factory ERP Collections: read & write allowed
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

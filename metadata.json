@@ -1,0 +1,6 @@
+{
+  "name": "Gloves Factory ERP",
+  "description": "Leather glove manufacturing ERP with cutting management, automated stock tracking, customer orders, and financial ledgers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,143 @@
+{
+  "entities": {
+    "CustomerOrder": {
+      "title": "Customer Order",
+      "description": "Customer purchase orders for leather gloves with size matrix and production tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNo": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "orderDate": { "type": "string" },
+        "deliveryDate": { "type": "string" },
+        "items": { "type": "array" },
+        "totalPairs": { "type": "number" },
+        "totalQty": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "status": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["customerName", "orderDate", "deliveryDate", "items", "totalPairs", "status"]
+    },
+    "Party": {
+      "title": "Party",
+      "description": "Suppliers, customers, and outside cutter makers in Khata ledger",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "type": { "type": "string" },
+        "openingBalance": { "type": "number" },
+        "currentBalance": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "type"]
+    },
+    "Staff": {
+      "title": "Staff Worker",
+      "description": "Factory cutting and stitching workers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "perPairRate": { "type": "number" },
+        "currentBalance": { "type": "number" }
+      },
+      "required": ["name", "role"]
+    },
+    "Product": {
+      "title": "Glove Product",
+      "description": "Inventory product models and gloves styles",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "gloveName": { "type": "string" },
+        "currentStock": { "type": "number" },
+        "lowStockLimit": { "type": "number" }
+      },
+      "required": ["gloveName"]
+    },
+    "Cutting": {
+      "title": "Cutting Assignment",
+      "description": "Work orders assigned to internal cutting workers or outside cutter makers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderId": { "type": "string" },
+        "cuttingType": { "type": "string" },
+        "personId": { "type": "string" },
+        "personName": { "type": "string" },
+        "qty": { "type": "number" },
+        "status": { "type": "string" }
+      },
+      "required": ["orderId", "cuttingType", "personId", "qty", "status"]
+    },
+    "StockLedgerEntry": {
+      "title": "Stock Ledger Entry",
+      "description": "Automatic inventory in/out audit ledger",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "productId": { "type": "string" },
+        "type": { "type": "string" },
+        "qty": { "type": "number" },
+        "date": { "type": "string" }
+      },
+      "required": ["productId", "type", "qty", "date"]
+    },
+    "SaleInvoice": {
+      "title": "Sale Invoice",
+      "description": "Sale bills with automatic stock deduction and customer ledger posting",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNo": { "type": "string" },
+        "orderId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "items": { "type": "array" },
+        "grandTotal": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "remaining": { "type": "number" }
+      },
+      "required": ["invoiceNo", "customerName", "grandTotal"]
+    }
+  },
+  "firestore": {
+    "/customer_orders/{orderId}": {
+      "schema": "CustomerOrder",
+      "description": "Customer purchase orders"
+    },
+    "/parties/{partyId}": {
+      "schema": "Party",
+      "description": "Customers, suppliers, and contractor parties"
+    },
+    "/staff/{staffId}": {
+      "schema": "Staff",
+      "description": "Factory workers"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Finished gloves inventory catalog"
+    },
+    "/cuttings/{cuttingId}": {
+      "schema": "Cutting",
+      "description": "Cutting assignments"
+    },
+    "/stock_ledger/{entryId}": {
+      "schema": "StockLedgerEntry",
+      "description": "Stock movements ledger"
+    },
+    "/sales_invoices/{invoiceId}": {
+      "schema": "SaleInvoice",
+      "description": "Sale invoices"
+    }
+  }
+}
