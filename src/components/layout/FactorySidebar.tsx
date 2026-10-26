@@ -85,7 +85,7 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
             </div>
             <div>
               <h1 className="font-bold text-sm tracking-tight text-white leading-tight">
-                Gloves Factory ERP
+                Glove Factory ERP - Updated
               </h1>
               <p className="text-[11px] font-medium text-blue-200 tracking-wide">
                 Auto Manufacturing System
