@@ -7,6 +7,7 @@ import {
   getFirestore, 
   Firestore,
   collection, 
+  collectionGroup,
   doc, 
   getDoc,
   getDocs, 
@@ -19,6 +20,9 @@ import {
   orderBy, 
   onSnapshot,
   writeBatch,
+  runTransaction,
+  increment,
+  arrayUnion,
   serverTimestamp
 } from 'firebase/firestore';
 import appletConfig from '../firebase-applet-config.json';
@@ -64,6 +68,7 @@ export {
   db, 
   isFirebaseOnline,
   collection, 
+  collectionGroup,
   doc, 
   getDoc,
   getDocs, 
@@ -76,6 +81,9 @@ export {
   orderBy, 
   onSnapshot,
   writeBatch,
+  runTransaction,
+  increment,
+  arrayUnion,
   serverTimestamp
 };
 export default app;

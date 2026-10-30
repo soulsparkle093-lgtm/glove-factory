@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
+    "dev:clean": "node -e \"try{require('fs').rmSync('node_modules/.vite',{recursive:true,force:true})}catch(e){} try{require('fs').rmSync('.vite',{recursive:true,force:true})}catch(e){}\" && vite --port=3000 --host=0.0.0.0",
+    "kill:3000": "powershell -Command \"Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }\"",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

@@ -17,6 +17,7 @@ import { OrderDetailPage } from './pages/OrderDetailPage';
 import { CuttingsPage } from './pages/CuttingsPage';
 import { StitchingPage } from './pages/StitchingPage';
 import { StockPage } from './pages/StockPage';
+import { StockManagementPage } from './pages/StockManagementPage';
 import { SalesPage } from './pages/SalesPage';
 import { PurchasePage } from './pages/PurchasePage';
 import { KhataPage } from './pages/KhataPage';
@@ -143,6 +144,8 @@ const FactoryAppContent: React.FC = () => {
           {activeModule === 'stitching' && <StitchingPage />}
 
           {activeModule === 'stock' && <StockPage />}
+
+          {activeModule === 'stock_management' && <StockManagementPage />}
           
           {activeModule === 'sales' && (
             <SalesPage

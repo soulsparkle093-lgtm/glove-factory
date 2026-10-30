@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { 
@@ -29,6 +29,7 @@ import {
 import { useFactory } from '../context/FactoryContext';
 import { formatDate } from '../utils/factoryFormatters';
 import { Cutter, CutterCategory, CuttingEntry, CuttingTransaction } from '../types/factory';
+import { collection, db, deleteDoc, doc, onSnapshot, runTransaction, serverTimestamp } from '../firebase';
 
 const formatConfirmationDate = (value: string): string => {
   const date = new Date(`${value}T00:00:00`);
@@ -50,7 +51,75 @@ interface CuttingsPageProps {
   onOpenCreateCutting?: () => void;
 }
 
-export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
+type LedgerPaymentMethod = 'Cash' | 'Easypaisa' | 'JazzCash' | 'Bank Transfer';
+
+interface NasimLedgerPayment {
+  id: string;
+  cutterId: string;
+  cutterName: string;
+  date: string;
+  amount: number;
+  paymentMethod: LedgerPaymentMethod;
+  billNo: string;
+  type: 'cash_in' | 'cash_out';
+  createdAt: string;
+}
+
+const paymentIdempotencyId = (value: string): string => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const safeParse = (value: string | number | null | undefined): number => {
+  const parsed = Number.parseFloat(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+type LedgerDateFilter = 'All Time' | 'Today' | 'Last 7 Days' | 'Last 30 Days' | 'This Month' | 'Last Month' | 'Others';
+
+const dateKey = (date: Date): string =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+const getLedgerDateRange = (filter: LedgerDateFilter, fromDate: string, toDate: string): { from: string; to: string } | null => {
+  const today = new Date();
+  const todayKey = dateKey(today);
+  if (filter === 'All Time') return null;
+  if (filter === 'Today') return { from: todayKey, to: todayKey };
+  if (filter === 'Others') return { from: fromDate, to: toDate };
+  if (filter === 'This Month') {
+    return { from: dateKey(new Date(today.getFullYear(), today.getMonth(), 1)), to: todayKey };
+  }
+  if (filter === 'Last Month') {
+    return {
+      from: dateKey(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+      to: dateKey(new Date(today.getFullYear(), today.getMonth(), 0))
+    };
+  }
+  const days = filter === 'Last 7 Days' ? 7 : 30;
+  const from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - days + 1);
+  return { from: dateKey(from), to: todayKey };
+};
+
+const isDateInRange = (value: string, range: { from: string; to: string } | null): boolean =>
+  !range || (!!(range.from || range.to) && (!range.from || value >= range.from) && (!range.to || value <= range.to));
+
+const formatLedgerRange = (filter: LedgerDateFilter, from: string, to: string): string => {
+  if (filter === 'Others') {
+    return `Date Range: ${from ? formatConfirmationDate(from) : 'Start'} to ${to ? formatConfirmationDate(to) : 'End'}`;
+  }
+  if (filter === 'All Time') return 'All Time';
+  const range = getLedgerDateRange(filter, from, to);
+  return range ? `${filter}: ${formatConfirmationDate(range.from)} to ${formatConfirmationDate(range.to)}` : filter;
+};
+
+const formatLedgerTitleFilter = (filter: LedgerDateFilter, from: string, to: string): string =>
+  filter === 'Others' ? formatLedgerRange(filter, from, to) : `Filter ${formatLedgerRange(filter, from, to)}`;
+
+const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const { 
     cutters, 
     cuttingTransactions, 
@@ -61,9 +130,14 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     setCutterActive,
     deleteCutter, 
     saveCuttingTransaction, 
-    cuttingEntries,
+    cuttingEntries = [],
+    articlesMaster,
+    createArticleMaster,
     updateCuttingEntry,
     deleteCuttingEntry,
+    updateCuttingReturn,
+    deleteCuttingReturn,
+    returnCutting,
     showToast 
   } = useFactory();
 
@@ -110,7 +184,9 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
   // 7. Factory / Notes (e.g. "Shoaib Factory")
   const [formFactoryNotes, setFormFactoryNotes] = useState('');
   // 8. Checkbox "Add to Stock Ledger?" (Receive only)
-  const [formAddToStock, setFormAddToStock] = useState(false);
+  const [deliveryChoice, setDeliveryChoice] = useState<'customer' | 'stock'>('customer');
+  const [showNewArticleForm, setShowNewArticleForm] = useState(false);
+  const [newArticleForm, setNewArticleForm] = useState({ articleName: '', sizeName: '', pairs: '' });
 
   const [isSubmittingTx, setIsSubmittingTx] = useState(false);
   const [editingEntry, setEditingEntry] = useState<CuttingEntry | null>(null);
@@ -119,12 +195,52 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
   const [deletingEntry, setDeletingEntry] = useState<CuttingEntry | null>(null);
   const [isDeletingEntry, setIsDeletingEntry] = useState(false);
   const [inlineEdit, setInlineEdit] = useState<{ entry: CuttingEntry; field: 'pairs' | 'rate'; value: string } | null>(null);
+  const [returnTarget, setReturnTarget] = useState<CuttingEntry | null>(null);
+  const [returnForm, setReturnForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    quantity: '',
+    reason: 'Damaged' as 'Damaged' | 'Wrong Size' | 'Quality'
+  });
+  const [isSavingReturn, setIsSavingReturn] = useState(false);
   const [ledgerSearch, setLedgerSearch] = useState('');
-  const [pdfExportMode, setPdfExportMode] = useState<'date' | 'customer' | null>(null);
+  const [pdfExportMode, setPdfExportMode] = useState<'date' | null>(null);
   const [pdfFromDate, setPdfFromDate] = useState('');
   const [pdfToDate, setPdfToDate] = useState('');
-  const [pdfCustomer, setPdfCustomer] = useState('');
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [ledgerDateFilter, setLedgerDateFilter] = useState<LedgerDateFilter>('All Time');
+  const [filterFromDate, setFilterFromDate] = useState('');
+  const [filterToDate, setFilterToDate] = useState('');
+  const [ledgerPayments, setLedgerPayments] = useState<NasimLedgerPayment[]>([]);
+  const [paymentModalType, setPaymentModalType] = useState<'cash_in' | 'cash_out' | null>(null);
+  const [paymentForm, setPaymentForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    amount: '',
+    paymentMethod: 'Cash' as 'Cash' | 'Easypaisa' | 'JazzCash' | 'Bank Transfer',
+    billNo: ''
+  });
+  const [isSavingPayment, setIsSavingPayment] = useState(false);
+  const savingPaymentRef = useRef(false);
+  const [articleSearch, setArticleSearch] = useState('');
+  const [isArticlePickerOpen, setIsArticlePickerOpen] = useState(false);
+  const articlePickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isArticlePickerOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && !articlePickerRef.current?.contains(event.target)) {
+        setIsArticlePickerOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsArticlePickerOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isArticlePickerOpen]);
 
   // Filter cutters for selected category
   const categoryCutters = useMemo(() => {
@@ -190,18 +306,143 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       return { ...entry, pairs, rate, lotTotal, totalBalance: lotTotal, runningBalance };
     });
   }, [activeCutterTransactions, cuttingEntries, activeCutterId]);
+
+  useEffect(() => {
+    if (!db || !activeCutterId) {
+      setLedgerPayments([]);
+      return;
+    }
+    return onSnapshot(collection(db, 'nasim_ledger_payments'), snapshot => {
+      const entries = snapshot.docs.flatMap(document => {
+        const data = document.data();
+        if (data.cutterId !== activeCutterId) return [];
+        const method = ['Cash', 'Easypaisa', 'JazzCash', 'Bank Transfer'].includes(data.paymentMethod)
+          ? data.paymentMethod as LedgerPaymentMethod
+          : 'Cash';
+        const createdAt = data.createdAt as { toDate?: () => Date; toMillis?: () => number } | string | undefined;
+        return [{
+          id: document.id,
+          cutterId: String(data.cutterId),
+          cutterName: String(data.cutterName || ''),
+          date: String(data.date || ''),
+          amount: Number(data.amount) || 0,
+          paymentMethod: method,
+          billNo: String(data.billNo || ''),
+          type: data.type === 'cash_in' ? 'cash_in' as const : 'cash_out' as const,
+          createdAt: typeof createdAt === 'string'
+            ? createdAt
+            : createdAt?.toDate?.().toISOString() || ''
+        }];
+      });
+      const createdAtMillis = (entry: NasimLedgerPayment): number => {
+        const value = Date.parse(entry.createdAt);
+        return Number.isNaN(value) ? 0 : value;
+      };
+      const duplicateGroups = new Map<string, NasimLedgerPayment[]>();
+      entries.forEach(entry => {
+        const key = JSON.stringify([entry.cutterId, entry.date, entry.type, entry.billNo.trim().toLocaleLowerCase(), entry.amount]);
+        duplicateGroups.set(key, [...(duplicateGroups.get(key) || []), entry]);
+      });
+      const distinctEntries: NasimLedgerPayment[] = [];
+      const duplicateIds: string[] = [];
+      duplicateGroups.forEach(group => {
+        group.sort((a, b) => createdAtMillis(b) - createdAtMillis(a));
+        const kept: NasimLedgerPayment[] = [];
+        group.forEach(entry => {
+          const entryTime = createdAtMillis(entry);
+          const latestMatch = kept.find(existing => {
+            const existingTime = createdAtMillis(existing);
+            return entryTime > 0 && existingTime > 0 && existingTime - entryTime <= 5000;
+          });
+          if (latestMatch) duplicateIds.push(entry.id);
+          else kept.push(entry);
+        });
+        distinctEntries.push(...kept);
+      });
+      distinctEntries.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+      setLedgerPayments(distinctEntries);
+      duplicateIds.forEach(id => {
+        void deleteDoc(doc(db, 'nasim_ledger_payments', id)).catch(error => {
+          console.error(`Unable to remove duplicate ledger payment ${id}:`, error);
+        });
+      });
+    }, error => console.error('Unable to load Nasim ledger payments:', error));
+  }, [activeCutterId]);
+
+  const dateFilteredEntries = useMemo(() => {
+    const range = getLedgerDateRange(ledgerDateFilter, filterFromDate, filterToDate);
+    return activeCutterEntries.filter(entry => {
+      return isDateInRange(entry.date || '', range);
+    });
+  }, [activeCutterEntries, ledgerDateFilter, filterFromDate, filterToDate]);
+
+  const dateFilteredPayments = useMemo(() => {
+    const range = getLedgerDateRange(ledgerDateFilter, filterFromDate, filterToDate);
+    return ledgerPayments.filter(payment => {
+      return isDateInRange(payment.date || '', range);
+    });
+  }, [ledgerPayments, ledgerDateFilter, filterFromDate, filterToDate]);
+
+  const totalCuttingAmount = dateFilteredEntries.reduce((sum, entry) =>
+    sum + (Number(entry.pairs) || 0) * (Number(entry.rate) || 0), 0);
+  const totalPaid = dateFilteredPayments
+    .filter(payment => payment.type === 'cash_in')
+    .reduce((sum, payment) => sum + payment.amount, 0);
+  const remainingBalance = totalCuttingAmount - totalPaid;
+  const extraPaid = Math.max(0, -remainingBalance);
+  const allArticleOptions = useMemo(() => {
+    const options = new Map<string, { id: string; articleName: string; articleCode?: string }>();
+    articlesMaster.forEach(article => {
+      const key = article.articleName.trim().toLocaleLowerCase();
+      if (key) options.set(key, { id: article.id, articleName: article.articleName.trim(), articleCode: article.articleCode });
+    });
+    const addName = (value?: string) => {
+      const articleName = value?.trim();
+      if (!articleName) return;
+      const key = articleName.toLocaleLowerCase();
+      if (!options.has(key)) options.set(key, { id: `history-${key}`, articleName });
+    };
+    orders.forEach(order => {
+      addName(order.article);
+      order.items.forEach(item => {
+        addName(item.article);
+        addName(item.title);
+        addName(item.gloveType);
+      });
+    });
+    cuttingEntries.forEach(entry => {
+      addName(entry.articleTitle);
+      addName(entry.article);
+    });
+    cuttingTransactions.forEach(entry => {
+      addName(entry.articleTitle);
+      addName(entry.article);
+    });
+    return [...options.values()].sort((a, b) => a.articleName.localeCompare(b.articleName));
+  }, [articlesMaster, orders, cuttingEntries, cuttingTransactions]);
+  const filteredArticleOptions = useMemo(() => {
+    const query = articleSearch.trim().toLocaleLowerCase();
+    return allArticleOptions.filter(article =>
+      !query ||
+      article.articleName.toLocaleLowerCase().includes(query) ||
+      (article.articleCode || '').toLocaleLowerCase().includes(query)
+    );
+  }, [allArticleOptions, articleSearch]);
+
   const visibleLedgerEntries = useMemo(() => {
     const query = ledgerSearch.trim().toLowerCase();
     return query
-      ? activeCutterEntries.filter(entry => (entry.customerName || '').toLowerCase().includes(query))
-      : activeCutterEntries;
-  }, [activeCutterEntries, ledgerSearch]);
+      ? dateFilteredEntries.filter(entry => (entry.customerName || '').toLowerCase().includes(query))
+      : dateFilteredEntries;
+  }, [dateFilteredEntries, ledgerSearch]);
 
   // Dynamically filter customer orders that contain the selected Article
   const filteredOrdersForArticle = useMemo(() => {
     if (!formArticle) return [];
-    return orders.filter(o => 
-      o.items.some(i => 
+    return orders.filter(o =>
+      o.article?.toLowerCase() === formArticle.toLowerCase() ||
+      o.items.some(i =>
+        (i.article?.toLowerCase() === formArticle.toLowerCase()) ||
         (i.title?.toLowerCase() === formArticle.toLowerCase()) || 
         (i.gloveType?.toLowerCase() === formArticle.toLowerCase())
       )
@@ -226,7 +467,54 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     setFormCustomerName('');
     setFormBillNo('');
     setFormFactoryNotes(activeCutter?.name ? `${activeCutter.name} Unit` : '');
-    setFormAddToStock(false);
+    setDeliveryChoice('customer');
+    setShowNewArticleForm(false);
+    setNewArticleForm({ articleName: '', sizeName: '', pairs: '' });
+    setArticleSearch('');
+    setIsArticlePickerOpen(false);
+  };
+
+  const handleArticleSelection = (articleName: string) => {
+    if (articleName === '__other__') {
+      setFormArticle('');
+      setArticleSearch('');
+      setIsArticlePickerOpen(false);
+      setShowNewArticleForm(true);
+      setNewArticleForm({ articleName: '', sizeName: '', pairs: '' });
+      return;
+    }
+    setFormArticle(articleName);
+    setArticleSearch('');
+    setIsArticlePickerOpen(false);
+    setShowNewArticleForm(false);
+    const article = articlesMaster.find(item => item.articleName === articleName);
+    const size = article?.sizes[0];
+    if (size) {
+      setFormSize(size.sizeName);
+      if (size.pairs > 0) setFormQty(String(size.pairs));
+    }
+  };
+
+  const handleSaveNewArticle = async () => {
+    const pairs = Number(newArticleForm.pairs);
+    if (!newArticleForm.articleName.trim() || !newArticleForm.sizeName.trim() || !Number.isFinite(pairs) || pairs < 0) {
+      showToast('Enter an article number, size name, and valid size quantity.', 'error');
+      return;
+    }
+    try {
+      const article = await createArticleMaster({
+        articleName: newArticleForm.articleName.trim(),
+        sizes: [{ sizeName: newArticleForm.sizeName.trim(), pairs }]
+      });
+      setFormArticle(article.articleName);
+      setFormSize(article.sizes[0].sizeName);
+      setFormQty(String(article.sizes[0].pairs));
+      setShowNewArticleForm(false);
+      showToast(`${article.articleName} added to the article list.`);
+    } catch (error) {
+      console.error('Unable to add article to master:', error);
+      showToast(error instanceof Error ? error.message : 'The article could not be saved.', 'error');
+    }
   };
 
   // Close transaction modal
@@ -239,8 +527,9 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     e.preventDefault();
     if (!activeCutter || !txModalType) return;
 
-    const parsedQty = Number(formQty);
-    const parsedRate = Number(formRate);
+    const parsedQty = safeParse(formQty);
+    const parsedAverage = safeParse(formAverage);
+    const parsedRate = safeParse(formRate);
     if (!formDate) {
       showToast('Enter a date.', 'error');
       return;
@@ -265,11 +554,15 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       showToast('Enter a valid rate.', 'error');
       return;
     }
+    if (txModalType === 'RECEIVE' && deliveryChoice === 'customer' && !formOrderId) {
+      showToast('Select a customer order for direct delivery.', 'error');
+      return;
+    }
 
     setIsSubmittingTx(true);
     try {
       // Find selected order
-      const targetOrder = orders.find(o => o.id === formOrderId);
+      const targetOrder = deliveryChoice === 'customer' ? orders.find(o => o.id === formOrderId) : undefined;
       const totalBalance = parsedQty * parsedRate;
 
       await saveCuttingTransaction({
@@ -283,17 +576,17 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
         rate: parsedRate,
         article: formArticle.trim(),
         articleTitle: formArticle.trim(),
-        orderId: formOrderId || undefined,
+        orderId: deliveryChoice === 'customer' ? formOrderId || undefined : undefined,
         orderNo: targetOrder?.orderNo || undefined,
         customerName: targetOrder?.customerName || formCustomerName.trim() || 'PRO4',
         size: formSize.trim(),
         sizeName: formSize.trim(),
-        average: formAverage.trim(),
+        average: parsedAverage > 0 ? String(parsedAverage) : formAverage.trim(),
         totalBalance,
         customerOrder: targetOrder?.customerName || formCustomerName.trim() || 'PRO4',
         billNo: formBillNo.trim() || undefined,
         factoryName: formFactoryNotes.trim() || undefined,
-        addToStock: txModalType === 'RECEIVE' ? formAddToStock : false,
+        addToStock: txModalType === 'RECEIVE' ? deliveryChoice === 'stock' : false,
         notes: formFactoryNotes.trim() || undefined
       });
       setFormQty('');
@@ -308,7 +601,7 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       handleCloseTxModal();
     } catch (err) {
       console.error('Error saving transaction:', err);
-      showToast('The cutting entry could not be saved. Please try again.', 'error');
+      showToast(err instanceof Error ? err.message : 'The cutting entry could not be saved. Please try again.', 'error');
     } finally {
       setIsSubmittingTx(false);
     }
@@ -323,7 +616,7 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       size: entry.size || '',
       average: entry.average || '',
       remarks: entry.remarks || '',
-      pairs: String(entry.pairs),
+      pairs: String(Math.abs(entry.pairs)),
       rate: String(entry.rate),
       billNo: entry.billNo || ''
     });
@@ -340,7 +633,7 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     }
     setIsSavingEdit(true);
     try {
-      await updateCuttingEntry(editingEntry.id, {
+      const updates = {
         date: editForm.date,
         customerName: editForm.customerName.trim(),
         article: editForm.article.trim(),
@@ -350,7 +643,17 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
         pairs,
         rate,
         billNo: editForm.billNo.trim()
-      });
+      };
+      if (editingEntry.type === 'RETURN') {
+        await updateCuttingReturn(editingEntry.id, {
+          date: updates.date,
+          remarks: updates.remarks,
+          pairs: updates.pairs,
+          rate: updates.rate
+        });
+      } else {
+        await updateCuttingEntry(editingEntry.id, updates);
+      }
       setEditingEntry(null);
       showToast('Cutting entry updated successfully.');
     } catch (err) {
@@ -361,11 +664,46 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     }
   };
 
+  class CuttingLedgerErrorBoundary extends React.Component<
+    { children: React.ReactNode },
+    { hasError: boolean }
+  > {
+    state = { hasError: false };
+
+    static getDerivedStateFromError(): { hasError: boolean } {
+      return { hasError: true };
+    }
+
+    render() {
+      if (this.state.hasError) {
+        return (
+          <div role="alert" className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+            <h2 className="text-lg font-black text-slate-900">Cutting ledger could not be displayed</h2>
+            <p className="mt-2 text-sm text-slate-600">Return to the cutting roster or reload the page to try again.</p>
+            <button type="button" onClick={() => window.location.reload()} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white">
+              Reload page
+            </button>
+          </div>
+        );
+      }
+      return this.props.children;
+    }
+  }
+
+  export const CuttingsPage: React.FC<CuttingsPageProps> = props => (
+    <CuttingLedgerErrorBoundary>
+      <React.Suspense fallback={<div className="p-8 text-center text-sm font-semibold text-slate-500">Loading cutting ledger…</div>}>
+        <CuttingsPageContent {...props} />
+      </React.Suspense>
+    </CuttingLedgerErrorBoundary>
+  );
+
   const handleDeleteEntry = async () => {
     if (!deletingEntry) return;
     setIsDeletingEntry(true);
     try {
-      await deleteCuttingEntry(deletingEntry.id);
+      if (deletingEntry.type === 'RETURN') await deleteCuttingReturn(deletingEntry.id);
+      else await deleteCuttingEntry(deletingEntry.id);
       setDeletingEntry(null);
       showToast('Cutting entry deleted successfully.');
     } catch (err) {
@@ -373,6 +711,47 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       showToast('The cutting entry could not be deleted. Please try again.', 'error');
     } finally {
       setIsDeletingEntry(false);
+    }
+  };
+
+  const openReturnModal = (entry: CuttingEntry) => {
+    const alreadyReturned = activeCutterEntries
+      .filter(item => item.type === 'RETURN' && item.returnReferenceId === entry.id)
+      .reduce((sum, item) => sum + Math.abs(item.pairs), 0);
+    if (alreadyReturned >= entry.pairs) {
+      showToast('All pairs from this cutting entry have already been returned.', 'error');
+      return;
+    }
+    setReturnTarget(entry);
+    setReturnForm({
+      date: new Date().toISOString().slice(0, 10),
+      quantity: '',
+      reason: 'Damaged'
+    });
+  };
+
+  const handleSaveReturn = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!returnTarget || isSavingReturn) return;
+    const quantity = Number(returnForm.quantity);
+    if (!returnForm.date || !Number.isInteger(quantity) || quantity <= 0) {
+      showToast('Enter a valid return date and whole-number quantity.', 'error');
+      return;
+    }
+    setIsSavingReturn(true);
+    try {
+      await returnCutting({
+        originalEntryId: returnTarget.id,
+        quantity,
+        reason: returnForm.reason,
+        date: returnForm.date
+      });
+      setReturnTarget(null);
+    } catch (error) {
+      console.error('Error recording cutting return:', error);
+      showToast(error instanceof Error ? error.message : 'The cutting return could not be saved.', 'error');
+    } finally {
+      setIsSavingReturn(false);
     }
   };
 
@@ -405,34 +784,35 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     }
   };
 
-  const exportLedgerPdf = (entries: CuttingEntry[], title: string, fileName: string, rangeLabel: string) => {
+  const exportLedgerPdf = (
+    entries: CuttingEntry[],
+    payments: NasimLedgerPayment[],
+    title: string,
+    fileName: string,
+    rangeLabel: string
+  ) => {
     const chronologicalEntries = [...entries].sort((a, b) =>
       (a.date || '').localeCompare(b.date || '') ||
       (a.createdAt || '').localeCompare(b.createdAt || '') ||
       a.id.localeCompare(b.id)
     );
-    let runningBalance = 0;
-    const totalPairs = chronologicalEntries.reduce((sum, entry) => sum + (Number(entry.pairs ?? entry.totalQty) || 0), 0);
-    const totalAmount = chronologicalEntries.reduce((sum, entry) => {
+    const totalCutting = chronologicalEntries.reduce((sum, entry) => {
       const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
       const rate = Number(entry.rate) || 0;
-      return sum + (Number(entry.totalBalance) || Number(entry.lotTotal) || pairs * rate);
+      return sum + pairs * rate;
     }, 0);
+    const paid = payments.filter(payment => payment.type === 'cash_in').reduce((sum, payment) => sum + payment.amount, 0);
     const rows = chronologicalEntries.map(entry => {
       const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
       const rate = Number(entry.rate) || 0;
-      const total = Number(entry.totalBalance) || Number(entry.lotTotal) || pairs * rate;
-      runningBalance += total;
+      const total = pairs * rate;
       return [
         formatConfirmationDate(entry.date),
-        entry.customerName || entry.customerOrder || 'Direct',
         entry.articleTitle || entry.article || '-',
         entry.sizeName || entry.size || '-',
         String(pairs),
-        entry.average || '-',
         `Rs. ${rate}`,
-        `Rs. ${total}`,
-        `Rs. ${runningBalance}`
+        `Rs. ${total}`
       ];
     });
     const doc = new jsPDF({ orientation: 'landscape' });
@@ -441,13 +821,39 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
     doc.setFontSize(9);
     doc.text(`${rangeLabel} | Total Entries: ${chronologicalEntries.length}`, 14, 22);
     autoTable(doc, {
-      head: [['Date', 'Customer Name', 'Article', 'Size', 'Pairs', 'Average', 'Rate', 'Total Balance', 'Balance']],
+      head: [['DATE', 'ARTICLE', 'SIZE', 'PAIRS', 'RATE', 'TOTAL AMOUNT']],
       body: rows,
-      foot: [['TOTAL', '', '', '', String(totalPairs), '', '', `Rs. ${totalAmount}`, `Rs. ${runningBalance}`]],
       startY: 27,
       styles: { fontSize: 8 },
       headStyles: { fillColor: [30, 64, 175] },
-      footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold' }
+    });
+    const tableEnd = (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || 30;
+    let summaryY = tableEnd + 20;
+    if (summaryY + 36 > doc.internal.pageSize.getHeight() - 12) {
+      doc.addPage();
+      summaryY = 18;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    const remaining = totalCutting - paid;
+    const extra = Math.max(0, -remaining);
+    doc.text(`Total Bill: Rs. ${totalCutting.toLocaleString()}`, 14, summaryY);
+    doc.text(`Total Paid: Rs. ${paid.toLocaleString()}`, 14, summaryY + 6);
+    doc.text(`Baqaya / Remaining: Rs. ${remaining.toLocaleString()}`, 14, summaryY + 12);
+    if (extra > 0) doc.text(`Extra Paid: Rs. ${extra.toLocaleString()}`, 14, summaryY + 18);
+    autoTable(doc, {
+      head: [['Date', 'Type', 'Amount', 'Method', 'Bill No']],
+      body: payments.map(payment => [
+        formatConfirmationDate(payment.date),
+        payment.type === 'cash_in' ? 'Cash In' : 'Cash Out',
+        `Rs. ${payment.amount}`,
+        payment.paymentMethod,
+        payment.billNo || '-'
+      ]),
+      startY: summaryY + (extra > 0 ? 27 : 21),
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [30, 64, 175] },
+      didDrawPage: () => undefined
     });
     doc.save(fileName);
     showToast('PDF downloaded successfully.');
@@ -456,24 +862,38 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
   const handleDateWisePdf = () => {
     setPdfFromDate('');
     setPdfToDate('');
-    setPdfCustomer('');
     setPdfExportMode('date');
   };
 
-  const handleCustomerWisePdf = () => {
-    setPdfFromDate('');
-    setPdfToDate('');
-    setPdfCustomer('');
-    setPdfExportMode('customer');
+  const handleFullLedgerPdf = () => {
+    const filterName = ledgerDateFilter === 'Others'
+      ? `${filterFromDate || 'start'}-to-${filterToDate || 'end'}`
+      : ledgerDateFilter.replace(/\s+/g, '_');
+    const dateSuffix = new Date().toISOString().slice(0, 10);
+    const customerName = activeCutter?.name || 'Cutting';
+    const safeCustomerName = customerName.replace(/[<>:"/\\|?*]+/g, '_');
+    exportLedgerPdf(
+      dateFilteredEntries,
+      dateFilteredPayments,
+      `${customerName} Cutting Ledger - ${formatLedgerTitleFilter(ledgerDateFilter, filterFromDate, filterToDate)}`,
+      `${safeCustomerName}_FullLedger_${filterName}_${dateSuffix}.pdf`,
+      formatLedgerRange(ledgerDateFilter, filterFromDate, filterToDate)
+    );
   };
 
-  const handleFullLedgerPdf = () => {
-    const cutterName = activeCutter?.name || '';
+  const handleCashbookPdf = () => {
+    const filterName = ledgerDateFilter === 'Others'
+      ? `${filterFromDate || 'start'}-to-${filterToDate || 'end'}`
+      : ledgerDateFilter.replace(/\s+/g, '_');
+    const dateSuffix = new Date().toISOString().slice(0, 10);
+    const customerName = activeCutter?.name || 'Cutting';
+    const safeCustomerName = customerName.replace(/[<>:"/\\|?*]+/g, '_');
     exportLedgerPdf(
-      activeCutterEntries,
-      `Gloves Factory - Cutting Ledger - ${cutterName}`,
-      `Cutting-Ledger-${cutterName.replace(/[^a-z0-9]+/gi, '-')}-Full-Ledger.pdf`,
-      'Full Ledger'
+      dateFilteredEntries,
+      dateFilteredPayments,
+      `${customerName} Cutting Cashbook - ${formatLedgerTitleFilter(ledgerDateFilter, filterFromDate, filterToDate)}`,
+      `${safeCustomerName}_Cashbook_${filterName}_${dateSuffix}.pdf`,
+      `Cashbook | ${formatLedgerRange(ledgerDateFilter, filterFromDate, filterToDate)}`
     );
   };
 
@@ -483,30 +903,26 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       showToast('Enter a valid start and end date.', 'error');
       return;
     }
-    if (pdfExportMode === 'customer' && !pdfCustomer) {
-      showToast('Select a customer.', 'error');
-      return;
-    }
     setIsGeneratingPdf(true);
     try {
       const entries = activeCutterEntries.filter(entry =>
         entry.date >= pdfFromDate &&
-        entry.date <= pdfToDate &&
-        (pdfExportMode !== 'customer' || (entry.customerName || 'Direct') === pdfCustomer)
+        entry.date <= pdfToDate
       );
-      if (entries.length === 0) {
+      const payments = ledgerPayments.filter(payment => payment.date >= pdfFromDate && payment.date <= pdfToDate);
+      if (entries.length === 0 && payments.length === 0) {
         showToast('No entries were found in this date range.', 'error');
         return;
       }
-      const cutterName = activeCutter?.name || '';
-      const isCustomerPdf = pdfExportMode === 'customer';
-      const subject = isCustomerPdf ? `Customer: ${pdfCustomer}` : 'Date Wise';
       const range = `${formatConfirmationDate(pdfFromDate)} to ${formatConfirmationDate(pdfToDate)}`;
+      const customerName = activeCutter?.name || 'Cutting';
+      const safeCustomerName = customerName.replace(/[<>:"/\\|?*]+/g, '_');
       exportLedgerPdf(
         entries,
-        `Gloves Factory - Cutting Ledger - ${cutterName}`,
-        `Cutting-Ledger-${cutterName.replace(/[^a-z0-9]+/gi, '-')}-${pdfFromDate}-to-${pdfToDate}.pdf`,
-        `${subject} | Date: ${range}`
+        payments,
+        `${customerName} Cutting Ledger - ${range}`,
+        `${safeCustomerName}_FullLedger_${pdfFromDate}-to-${pdfToDate}.pdf`,
+        `Date: ${range}`
       );
       setPdfExportMode(null);
     } catch (error) {
@@ -514,6 +930,121 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
       showToast('The PDF could not be generated. Please try again.', 'error');
     } finally {
       setIsGeneratingPdf(false);
+    }
+  };
+
+  const openPaymentModal = (type: 'cash_in' | 'cash_out') => {
+    setPaymentForm({
+      date: new Date().toISOString().slice(0, 10),
+      amount: '',
+      paymentMethod: 'Cash',
+      billNo: ''
+    });
+    setPaymentModalType(type);
+  };
+
+  const handleSavePayment = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!activeCutter || !paymentModalType || savingPaymentRef.current) return;
+    const amount = Number(paymentForm.amount);
+    if (!paymentForm.date || !Number.isFinite(amount) || amount <= 0) {
+      showToast('Enter a valid payment date and amount.', 'error');
+      return;
+    }
+    if (!db) {
+      showToast('Firestore is not available. The payment was not saved.', 'error');
+      return;
+    }
+
+    savingPaymentRef.current = true;
+    setIsSavingPayment(true);
+    try {
+      const billNo = paymentForm.billNo.trim();
+      const createdAtMillis = Date.now();
+      const paymentRef = doc(collection(db, 'nasim_ledger_payments'));
+      const idempotencyRef = doc(
+        db,
+        'nasim_ledger_payment_idempotency',
+        paymentIdempotencyId(JSON.stringify([
+          activeCutter.id,
+          paymentModalType,
+          paymentForm.date,
+          billNo.toLocaleLowerCase(),
+          amount
+        ]))
+      );
+      const result = await runTransaction(db, async transaction => {
+        const idempotencySnapshot = await transaction.get(idempotencyRef);
+        const existingPaymentId = String(idempotencySnapshot.data()?.paymentId || '');
+        const existingCreatedAtMillis = Number(idempotencySnapshot.data()?.createdAtMillis) || 0;
+        if (existingPaymentId && createdAtMillis - existingCreatedAtMillis >= 0 && createdAtMillis - existingCreatedAtMillis <= 5000) {
+          const existingPaymentRef = doc(db, 'nasim_ledger_payments', existingPaymentId);
+          const existingPaymentSnapshot = await transaction.get(existingPaymentRef);
+          if (existingPaymentSnapshot.exists()) return { id: existingPaymentId, duplicate: true };
+        }
+
+        transaction.set(paymentRef, {
+          id: paymentRef.id,
+          transactionId: paymentRef.id,
+          cutterId: activeCutter.id,
+          cutterName: activeCutter.name,
+          date: paymentForm.date,
+          amount,
+          paymentMethod: paymentForm.paymentMethod,
+          billNo,
+          type: paymentModalType,
+          createdAt: serverTimestamp()
+        });
+        transaction.set(idempotencyRef, {
+          paymentId: paymentRef.id,
+          createdAtMillis,
+          billNo,
+          amount,
+          cutterId: activeCutter.id
+        });
+        return { id: paymentRef.id, duplicate: false };
+      });
+
+      if (result.duplicate) {
+        setPaymentModalType(null);
+        showToast('This payment was already saved.');
+        return;
+      }
+
+      setLedgerPayments(previous => [{
+        id: result.id,
+        cutterId: activeCutter.id,
+        cutterName: activeCutter.name,
+        date: paymentForm.date,
+        amount,
+        paymentMethod: paymentForm.paymentMethod,
+        billNo,
+        type: paymentModalType,
+        createdAt: new Date(createdAtMillis).toISOString()
+      }, ...previous.filter(payment => payment.id !== result.id)]);
+      setPaymentModalType(null);
+      showToast(paymentModalType === 'cash_in' ? 'Cash-in recorded.' : 'Cash-out recorded.');
+    } catch (error) {
+      console.error('Unable to save Nasim ledger payment:', error);
+      showToast(error instanceof Error ? error.message : 'The payment could not be saved.', 'error');
+    } finally {
+      savingPaymentRef.current = false;
+      setIsSavingPayment(false);
+    }
+  };
+
+  const handleDeletePayment = async (paymentId: string) => {
+    if (!db) {
+      showToast('Firestore is not available. The payment was not deleted.', 'error');
+      return;
+    }
+    try {
+      await deleteDoc(doc(db, 'nasim_ledger_payments', paymentId));
+      setLedgerPayments(previous => previous.filter(payment => payment.id !== paymentId));
+      showToast('Payment deleted.');
+    } catch (error) {
+      console.error('Unable to delete Nasim ledger payment:', error);
+      showToast(error instanceof Error ? error.message : 'The payment could not be deleted.', 'error');
     }
   };
 
@@ -940,39 +1471,39 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
               </div>
             </div>
 
-            {/* 3 Summary Cards: Total Given | Total Received | Pending Balance */}
+            {/* Amounts and outstanding balance follow the active date filter. */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 mt-6 pt-5 border-t border-slate-100">
-              {/* Card 1: Total Cutting Di / Given (Orange) */}
               <div className="p-4 rounded-xl bg-amber-50/80 border border-amber-200">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 block">
-                  Total Cutting Issued
+                  Total Cutting Amount
                 </span>
                 <div className="text-2xl font-black text-amber-700 font-mono mt-1">
-                  {activeCutter.totalGiven || 0} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                  Rs. {totalCuttingAmount.toLocaleString()}
                 </div>
-                <p className="text-[11px] text-amber-900/70 mt-1">All batches given to {activeCutter.name}</p>
+                <p className="text-[11px] text-amber-900/70 mt-1">Based on cutting entries in this date range</p>
               </div>
 
-              {/* Card 2: Total Cutting Received (Green) */}
               <div className="p-4 rounded-xl bg-emerald-50/80 border border-emerald-200">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 block">
-                  Total Cutting Received
+                  Total Paid
                 </span>
                 <div className="text-2xl font-black text-emerald-700 font-mono mt-1">
-                  {activeCutter.totalReceived || 0} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                  Rs. {totalPaid.toLocaleString()}
                 </div>
-                <p className="text-[11px] text-emerald-900/70 mt-1">Finished pairs returned to factory</p>
+                <p className="text-[11px] text-emerald-900/70 mt-1">Cash-in payments in this date range</p>
               </div>
 
-              {/* Card 3: Pending Balance */}
               <div className="p-4 rounded-xl bg-blue-50/80 border border-blue-200">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 block">
                   Pending Balance
                 </span>
-                <div className="text-2xl font-black text-blue-700 font-mono mt-1">
-                  {Math.max(0, (activeCutter.totalGiven || 0) - (activeCutter.totalReceived || 0))} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                <div className={`text-2xl font-black font-mono mt-1 ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-700'}`}>
+                  Rs. {remainingBalance.toLocaleString()}
                 </div>
-                <p className="text-[11px] text-blue-900/70 mt-1">Remaining with cutter right now</p>
+                <p className="text-[11px] text-blue-900/70 mt-1">Cutting amount minus total paid</p>
+                {extraPaid > 0 && (
+                  <p className="mt-2 text-sm font-black text-emerald-700">Extra Paid: Rs. {extraPaid.toLocaleString()}</p>
+                )}
               </div>
             </div>
           </div>
@@ -991,21 +1522,36 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
               </div>
               <div className="flex flex-wrap gap-2">
                 <button onClick={handleDateWisePdf} className="rounded-lg bg-orange-500 px-3 py-2 text-xs font-bold text-white hover:bg-orange-600">Date-Range Ledger PDF</button>
-                <button onClick={handleCustomerWisePdf} className="rounded-lg bg-sky-100 px-3 py-2 text-xs font-bold text-sky-800 hover:bg-sky-200">Customer Ledger PDF</button>
-                <button onClick={handleFullLedgerPdf} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700">Full Ledger PDF</button>
+                <button onClick={handleFullLedgerPdf} className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700">Full Ledger PDF</button>
+                <button onClick={handleCashbookPdf} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800">Cashbook PDF</button>
+                <button onClick={() => openPaymentModal('cash_in')} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700">Cash In</button>
+                <button onClick={() => openPaymentModal('cash_out')} className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700">Cash Out</button>
               </div>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <input
-                  type="search"
-                  value={ledgerSearch}
-                  onChange={e => setLedgerSearch(e.target.value)}
-                  placeholder="Search by customer name"
-                  className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                />
-                <span className="text-xs font-bold text-slate-600 bg-slate-100 px-3 py-1 rounded-full">
-                  {visibleLedgerEntries.length} Entries
-                </span>
+                <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                  <input
+                    type="search"
+                    value={ledgerSearch}
+                    onChange={e => setLedgerSearch(e.target.value)}
+                    placeholder="Search by customer name"
+                    className="w-full max-w-sm rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  />
+                  <select value={ledgerDateFilter} onChange={event => setLedgerDateFilter(event.target.value as LedgerDateFilter)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm">
+                    {['All Time', 'Today', 'Last 7 Days', 'Last 30 Days', 'This Month', 'Last Month', 'Others'].map(filter => <option key={filter} value={filter}>{filter}</option>)}
+                  </select>
+                  {ledgerDateFilter === 'Others' && (
+                    <>
+                      <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                        From <input type="date" value={filterFromDate} onChange={event => setFilterFromDate(event.target.value)} className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
+                      </label>
+                      <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                        To <input type="date" value={filterToDate} onChange={event => setFilterToDate(event.target.value)} className="rounded-lg border border-slate-300 px-2 py-2 text-sm" />
+                      </label>
+                    </>
+                  )}
+                </div>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{visibleLedgerEntries.length} Entries</span>
               </div>
             </div>
 
@@ -1037,17 +1583,20 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                   <tbody className="divide-y divide-slate-100 font-medium">
                     {visibleLedgerEntries.map(entry => {
                       return (
-                        <tr key={entry.id} className="hover:bg-slate-50/70 transition">
+                        <tr key={entry.id} className={entry.type === 'RETURN' ? 'bg-[#ffe6e6] font-bold text-[#cc0000]' : 'hover:bg-slate-50/70 transition'}>
                           <td className="py-3.5 px-4 font-mono">{formatDate(entry.date)}</td>
                           <td className="py-3.5 px-4">{entry.customerName || 'PRO4'}</td>
-                          <td className="py-3.5 px-4 font-bold text-slate-900">{entry.articleTitle || entry.article}</td>
+                          <td className="py-3.5 px-4 font-bold text-slate-900">
+                            {entry.articleTitle || entry.article}
+                            {entry.type === 'RETURN' && <span className="mt-1 block text-[10px] font-semibold text-[#cc0000]">{entry.remarks}</span>}
+                          </td>
                           <td className="py-3.5 px-4">{entry.sizeName || entry.size || '-'}</td>
                           {(['pairs'] as const).map(field => (
                             <td
                               key={field}
                               className="py-3.5 px-4 text-right font-mono"
-                              title="Double-click to quick edit"
-                              onDoubleClick={() => setInlineEdit({
+                              title={entry.type === 'RETURN' ? undefined : 'Double-click to quick edit'}
+                              onDoubleClick={entry.type === 'RETURN' ? undefined : () => setInlineEdit({
                                 entry,
                                 field,
                                 value: String(entry[field])
@@ -1075,15 +1624,17 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                                   className="w-20 px-2 py-1 text-right rounded border border-amber-400 outline-none"
                                 />
                               ) : (
-                                <span className="cursor-text">{entry[field]}</span>
+                                <span className={entry.type === 'RETURN' ? 'font-black text-[#cc0000]' : 'cursor-text'}>
+                                  {entry.type === 'RETURN' ? '-' : ''}{Math.abs(entry[field])}
+                                </span>
                               )}
                             </td>
                           ))}
                           <td className="py-3.5 px-4">{entry.average || '-'}</td>
                           <td
                             className="py-3.5 px-4 text-right font-mono"
-                            title="Double-click to quick edit"
-                            onDoubleClick={() => setInlineEdit({ entry, field: 'rate', value: String(entry.rate) })}
+                            title={entry.type === 'RETURN' ? undefined : 'Double-click to quick edit'}
+                            onDoubleClick={entry.type === 'RETURN' ? undefined : () => setInlineEdit({ entry, field: 'rate', value: String(entry.rate) })}
                           >
                             {inlineEdit?.entry.id === entry.id && inlineEdit.field === 'rate' ? (
                               <input
@@ -1112,27 +1663,39 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                               </span>
                             )}
                           </td>
-                          <td className="py-3.5 px-4 text-right font-mono font-bold text-emerald-700">
+                          <td className={`py-3.5 px-4 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-emerald-700'}`}>
                             Rs. {Number(entry.totalBalance) || Number(entry.lotTotal) || entry.pairs * entry.rate}
                           </td>
-                          <td className="py-3.5 px-4 text-right font-mono font-bold text-blue-800 bg-blue-50">
+                          <td className={`py-3.5 px-4 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-blue-800 bg-blue-50'}`}>
                             Rs. {entry.runningBalance}
                           </td>
                           <td className="py-3.5 px-4 text-center">
-                            <button
-                              onClick={() => openEditEntry(entry)}
-                              className="p-1 rounded text-slate-400 hover:text-blue-600 transition cursor-pointer"
-                              title="Edit entry"
-                            >
-                              <Pencil className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => setDeletingEntry(entry)}
-                              className="p-1 rounded text-slate-400 hover:text-rose-600 transition cursor-pointer"
-                              title="Delete entry"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                            <>
+                                <button
+                                  onClick={() => openEditEntry(entry)}
+                                  className="p-1 rounded text-slate-400 hover:text-blue-600 transition cursor-pointer"
+                                  title="Edit entry"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => setDeletingEntry(entry)}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-600 transition cursor-pointer"
+                                  title="Delete entry"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                                {entry.type === 'RECEIVE' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openReturnModal(entry)}
+                                    className="ml-1 rounded-lg bg-rose-100 px-2 py-1 text-[10px] font-black text-rose-700 hover:bg-rose-200"
+                                    title="Return cutting pairs"
+                                  >
+                                    ↩ Return
+                                  </button>
+                                )}
+                            </>
                           </td>
                         </tr>
                       );
@@ -1144,15 +1707,74 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                       <td className="px-4 py-3 text-right">{visibleLedgerEntries.reduce((sum, entry) => sum + entry.pairs, 0)}</td>
                       <td colSpan={2}></td>
                       <td className="px-4 py-3 text-right text-emerald-700">
-                        Rs. {visibleLedgerEntries.reduce((sum, entry) => sum + (Number(entry.totalBalance) || Number(entry.lotTotal) || entry.pairs * entry.rate), 0)}
+                        Rs. {visibleLedgerEntries.reduce((sum, entry) => sum + entry.pairs * entry.rate, 0).toLocaleString()}
                       </td>
-                      <td colSpan={2}></td>
+                      <td className="px-4 py-3 text-right text-blue-800" colSpan={2}>
+                        Pending: Rs. {remainingBalance.toLocaleString()}
+                      </td>
                     </tr>
                   </tfoot>
                 </table>
               )}
             </div>
           </div>
+
+          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
+            <div className="border-b border-slate-200 px-4 py-4 sm:px-5">
+              <h3 className="font-bold text-slate-900">Payment History</h3>
+              <p className="mt-1 text-xs text-slate-500">Cash in and cash out records for {activeCutter.name}, filtered by the selected date range.</p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-sm">
+                <thead className="bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600">
+                  <tr>
+                    <th className="px-4 py-3">Date</th>
+                    <th className="px-4 py-3 text-right">Amount</th>
+                    <th className="px-4 py-3">Method</th>
+                    <th className="px-4 py-3">Bill No</th>
+                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {dateFilteredPayments.map(payment => (
+                    <tr key={payment.id}>
+                      <td className="px-4 py-3">{formatDate(payment.date)}</td>
+                      <td className="px-4 py-3 text-right font-mono font-bold">Rs. {payment.amount.toLocaleString()}</td>
+                      <td className="px-4 py-3">{payment.paymentMethod}</td>
+                      <td className="px-4 py-3">{payment.billNo || '-'}</td>
+                      <td className={`px-4 py-3 font-bold ${payment.type === 'cash_in' ? 'text-emerald-700' : 'text-rose-700'}`}>{payment.type === 'cash_in' ? 'Cash In' : 'Cash Out'}</td>
+                      <td className="px-4 py-3 text-right">
+                        <button type="button" onClick={() => void handleDeletePayment(payment.id)} className="rounded-lg p-2 text-rose-600 hover:bg-rose-50" aria-label="Delete payment">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {dateFilteredPayments.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">No payments in this date range.</td></tr>}
+                </tbody>
+                <tfoot className="border-t-2 border-slate-300 bg-slate-50 text-sm font-black">
+                  <tr>
+                    <td className="px-4 py-3">Total Bill</td>
+                    <td className="px-4 py-3 text-right font-mono text-amber-700">Rs. {totalCuttingAmount.toLocaleString()}</td>
+                    <td className="px-4 py-3" colSpan={4}>Cutting entries in this date range</td>
+                  </tr>
+                  <tr>
+                    <td className="px-4 py-3">Total Paid</td>
+                    <td className="px-4 py-3 text-right font-mono text-emerald-700">Rs. {totalPaid.toLocaleString()}</td>
+                    <td className="px-4 py-3" colSpan={4}>Cash In payments in this date range</td>
+                  </tr>
+                  <tr>
+                    <td className="px-4 py-3">Baqaya</td>
+                    <td className={`px-4 py-3 text-right font-mono ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-800'}`}>Rs. {remainingBalance.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-emerald-700" colSpan={4}>
+                      {extraPaid > 0 ? `Extra Paid: Rs. ${extraPaid.toLocaleString()}` : ' '}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </section>
         </div>
       )}
 
@@ -1324,26 +1946,116 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                 />
               </div>
 
-              {/* Field 2: Article (free text) */}
+              {/* Field 2: Article */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  2. Article / Glove Title *
+                  2. Article / Shoes Filter *
                 </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Average, PUJA, Foam"
-                  value={formArticle}
-                  onChange={e => {
-                    setFormArticle(e.target.value);
-                  }}
-                  className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20"
-                />
+                {txModalType === 'RECEIVE' ? (
+                  <div className="relative" ref={articlePickerRef}>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="search"
+                        required
+                        role="combobox"
+                        aria-expanded={isArticlePickerOpen}
+                        aria-controls="receive-article-options"
+                        placeholder={formArticle || 'Search all articles by name or code'}
+                        value={articleSearch || formArticle}
+                        onFocus={() => {
+                          setArticleSearch('');
+                          setIsArticlePickerOpen(true);
+                        }}
+                        onChange={event => {
+                          setArticleSearch(event.target.value);
+                          setIsArticlePickerOpen(true);
+                          if (formArticle && event.target.value !== formArticle) setFormArticle('');
+                        }}
+                        className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20 sm:text-sm"
+                      />
+                      {(formArticle || articleSearch) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFormArticle('');
+                            setArticleSearch('');
+                            setIsArticlePickerOpen(true);
+                          }}
+                          className="rounded-lg border border-slate-200 p-2 text-slate-500 hover:bg-slate-100"
+                          aria-label="Clear selected article"
+                          title="Clear article"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                    {isArticlePickerOpen && (
+                      <div id="receive-article-options" role="listbox" className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+                        {filteredArticleOptions.map(article => (
+                          <button
+                            key={`${article.id}-${article.articleName}`}
+                            type="button"
+                            role="option"
+                            aria-selected={formArticle === article.articleName}
+                            onClick={() => handleArticleSelection(article.articleName)}
+                            className="block w-full rounded-lg px-3 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-900"
+                          >
+                            {article.articleName}{article.articleCode ? ` (${article.articleCode})` : ''}
+                          </button>
+                        ))}
+                        {filteredArticleOptions.length === 0 && <p className="px-3 py-2 text-xs text-slate-500">No active articles found.</p>}
+                        <button type="button" role="option" onClick={() => handleArticleSelection('__other__')} className="block w-full rounded-lg px-3 py-2 text-left text-xs font-bold text-blue-700 hover:bg-blue-50">Other — add article</button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Average, PUJA, Foam"
+                    value={formArticle}
+                    onChange={e => setFormArticle(e.target.value)}
+                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                  />
+                )}
+                {showNewArticleForm && txModalType === 'RECEIVE' && (
+                  <div className="mt-3 space-y-3 rounded-xl border border-blue-200 bg-blue-50 p-3">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Article Number
+                      <input required value={newArticleForm.articleName} onChange={event => setNewArticleForm(form => ({ ...form, articleName: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal" />
+                    </label>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block text-xs font-bold text-slate-700">
+                        Size Name
+                        <input required value={newArticleForm.sizeName} onChange={event => setNewArticleForm(form => ({ ...form, sizeName: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal" />
+                      </label>
+                      <label className="block text-xs font-bold text-slate-700">
+                        Size / Pairs
+                        <input required type="number" min="0" value={newArticleForm.pairs} onChange={event => setNewArticleForm(form => ({ ...form, pairs: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal" />
+                      </label>
+                    </div>
+                    <button type="button" onClick={() => void handleSaveNewArticle()} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-700">Save Article</button>
+                  </div>
+                )}
               </div>
+
+              {txModalType === 'RECEIVE' && (
+                <fieldset className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <legend className="px-1 text-xs font-bold text-slate-700">Delivery Choice *</legend>
+                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <input type="radio" name="receive-destination" checked={deliveryChoice === 'customer'} onChange={() => setDeliveryChoice('customer')} />
+                    Direct Deliver to Customer Order
+                  </label>
+                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                    <input type="radio" name="receive-destination" checked={deliveryChoice === 'stock'} onChange={() => setDeliveryChoice('stock')} />
+                    Send to Stock Management
+                  </label>
+                </fieldset>
+              )}
 
               {/* Field 3: Order (Dropdown, filtered dynamically to show ONLY Customer Orders containing selected Article)
                   Format: "Customer Name - Order Date - Order ID" */}
-              <div>
+              {(txModalType !== 'RECEIVE' || deliveryChoice === 'customer') && <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
                   <span>3. Customer Order</span>
                   <span className="text-[10px] text-slate-400 font-normal">Optional / Direct Cutting</span>
@@ -1365,7 +2077,7 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                     </option>
                   ))}
                 </select>
-              </div>
+              </div>}
 
               {/* Field 5: Independent size, average, quantity, rate, balance and remarks */}
               <div className="rounded-xl bg-[#f0f6ff] p-[15px]">
@@ -1388,15 +2100,18 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                   </div>
                   <div className="min-w-0">
                     <label className="mb-1 block text-[10px] font-bold text-blue-700">SIZE</label>
-                    <input
-                      id="sizeName"
-                      type="text"
-                      required
-                      placeholder=""
-                      value={formSize}
-                      onChange={e => setFormSize(e.target.value)}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
-                    />
+                    {txModalType === 'RECEIVE' && articlesMaster.find(article => article.articleName === formArticle)?.sizes.length ? (
+                      <select id="sizeName" required value={formSize} onChange={event => {
+                        const selected = articlesMaster.find(article => article.articleName === formArticle)?.sizes.find(size => size.sizeName === event.target.value);
+                        setFormSize(event.target.value);
+                        if (selected) setFormQty(String(selected.pairs));
+                      }} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm">
+                        <option value="">Select size</option>
+                        {articlesMaster.find(article => article.articleName === formArticle)?.sizes.map(size => <option key={size.sizeName} value={size.sizeName}>{size.sizeName} ({size.pairs})</option>)}
+                      </select>
+                    ) : (
+                      <input id="sizeName" type="text" required value={formSize} onChange={e => setFormSize(e.target.value)} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm" />
+                    )}
                   </div>
                   <div className="min-w-0">
                     <label className="mb-1 block text-[10px] font-bold text-blue-700">AVERAGE</label>
@@ -1465,25 +2180,10 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                 />
               </div>
 
-              {/* Field 8: Checkbox "Add to Stock Ledger?" (Receive only) */}
+              {/* Receipts always update article stock; the destination controls the legacy stock widget only. */}
               {txModalType === 'RECEIVE' && (
-                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                  <label className="flex items-center gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={formAddToStock}
-                      onChange={e => setFormAddToStock(e.target.checked)}
-                      className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <div>
-                      <span className="text-xs font-bold text-emerald-900 block">
-                        Add to Stock Widget? (Automatically increments finished ready stock)
-                      </span>
-                      <span className="text-[11px] text-emerald-700">
-                        When checked, ready stock for "{formArticle || 'Glove'}" will auto-increment in Warehouse Ledger.
-                      </span>
-                    </div>
-                  </label>
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
+                  This cutting receipt automatically increases article stock and appears in stock history.
                 </div>
               )}
 
@@ -1531,31 +2231,13 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
           <form onSubmit={handleFilteredPdfDownload} className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h3 className="text-lg font-bold text-slate-900">
-                  {pdfExportMode === 'date' ? 'Generate Date-Range PDF' : 'Generate Customer Ledger PDF'}
-                </h3>
+                <h3 className="text-lg font-bold text-slate-900">Generate Date-Range PDF</h3>
                 <p className="mt-1 text-sm text-slate-500">The PDF will download directly to your device.</p>
               </div>
               <button type="button" onClick={() => setPdfExportMode(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100" aria-label="Close PDF options">
                 <X className="h-5 w-5" />
               </button>
             </div>
-            {pdfExportMode === 'customer' && (
-              <label className="mt-4 block text-sm font-semibold text-slate-700">
-                Customer
-                <select
-                  required
-                  value={pdfCustomer}
-                  onChange={event => setPdfCustomer(event.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                >
-                  <option value="">Select a customer</option>
-                  {[...new Set(activeCutterEntries.map(entry => entry.customerName || 'Direct'))]
-                    .sort((a, b) => a.localeCompare(b))
-                    .map(customer => <option key={customer} value={customer}>{customer}</option>)}
-                </select>
-              </label>
-            )}
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="text-sm font-semibold text-slate-700">
                 From Date
@@ -1591,6 +2273,105 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
         </div>
       )}
 
+      {returnTarget && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-4">
+          <form onSubmit={handleSaveReturn} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-rose-100 pb-3">
+              <div>
+                <h3 className="text-lg font-bold text-rose-700">Return Cutting</h3>
+                <p className="mt-1 text-sm text-slate-500">{returnTarget.articleTitle || returnTarget.article} · {returnTarget.sizeName || returnTarget.size || '—'}</p>
+              </div>
+              <button type="button" onClick={() => setReturnTarget(null)} disabled={isSavingReturn} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100" aria-label="Close return modal">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <label className="block text-sm font-semibold text-slate-700">
+              Original Cutting Date
+              <input readOnly value={formatDate(returnTarget.date)} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2" />
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Original Qty
+              <input readOnly value={`${returnTarget.pairs} pairs`} className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2" />
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Return Qty *
+              <input
+                required
+                type="number"
+                min="1"
+                max={Math.max(0, returnTarget.pairs - activeCutterEntries
+                  .filter(entry => entry.type === 'RETURN' && entry.returnReferenceId === returnTarget.id)
+                  .reduce((sum, entry) => sum + Math.abs(entry.pairs), 0))}
+                step="1"
+                value={returnForm.quantity}
+                onChange={event => setReturnForm(form => ({ ...form, quantity: event.target.value }))}
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2"
+              />
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Reason *
+              <select required value={returnForm.reason} onChange={event => setReturnForm(form => ({ ...form, reason: event.target.value as typeof form.reason }))} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2">
+                <option value="Damaged">Damaged</option>
+                <option value="Wrong Size">Wrong Size</option>
+                <option value="Quality">Quality</option>
+              </select>
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Return Date *
+              <input required type="date" value={returnForm.date} onChange={event => setReturnForm(form => ({ ...form, date: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
+            </label>
+            <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button type="button" onClick={() => setReturnTarget(null)} disabled={isSavingReturn} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
+              <button type="submit" disabled={isSavingReturn} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60">
+                {isSavingReturn ? 'Saving...' : 'Confirm Return'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {paymentModalType && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4">
+          <form onSubmit={handleSavePayment} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className={`text-lg font-bold ${paymentModalType === 'cash_in' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                  {paymentModalType === 'cash_in' ? 'Cash In' : 'Cash Out'}
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">{activeCutter?.name || 'Selected'} ledger payment</p>
+              </div>
+              <button type="button" onClick={() => setPaymentModalType(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100" aria-label="Close payment modal">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <label className="block text-sm font-semibold text-slate-700">
+              Date
+              <input required type="date" value={paymentForm.date} onChange={event => setPaymentForm(form => ({ ...form, date: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Amount
+              <input required min="0.01" step="any" type="number" value={paymentForm.amount} onChange={event => setPaymentForm(form => ({ ...form, amount: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Payment Method
+              <select required value={paymentForm.paymentMethod} onChange={event => setPaymentForm(form => ({ ...form, paymentMethod: event.target.value as LedgerPaymentMethod }))} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2">
+                {(['Cash', 'Easypaisa', 'JazzCash', 'Bank Transfer'] as const).map(method => <option key={method} value={method}>{method}</option>)}
+              </select>
+            </label>
+            <label className="block text-sm font-semibold text-slate-700">
+              Bill No / Transaction No
+              <input type="text" value={paymentForm.billNo} onChange={event => setPaymentForm(form => ({ ...form, billNo: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
+            </label>
+            <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button type="button" onClick={() => setPaymentModalType(null)} disabled={isSavingPayment} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
+              <button type="submit" disabled={isSavingPayment} className={`rounded-xl px-4 py-2 text-sm font-bold text-white disabled:opacity-60 ${paymentModalType === 'cash_in' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'}`}>
+                {isSavingPayment ? 'Saving…' : 'Save Payment'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {editingEntry && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60">
           <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
@@ -1619,6 +2400,7 @@ export const CuttingsPage: React.FC<CuttingsPageProps> = () => {
                     type={type}
                     min={field === 'pairs' ? '1' : field === 'rate' ? '0' : undefined}
                     step={field === 'rate' ? 'any' : undefined}
+                    disabled={editingEntry.type === 'RETURN' && !(['date', 'remarks', 'pairs', 'rate'] as const).includes(field as 'date' | 'remarks' | 'pairs' | 'rate')}
                     value={editForm[field]}
                     onChange={e => setEditForm(current => ({ ...current, [field]: e.target.value }))}
                     className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"

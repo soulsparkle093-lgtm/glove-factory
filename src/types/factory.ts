@@ -49,6 +49,7 @@ export interface SizeMatrix {
 export interface OrderItem {
   id: string;
   productId?: string;
+  article?: string;
   title: string; // Custom Glove Name
   gloveType: string; // Mirror of title
   size?: string; // Optional display string e.g. "S: 10, M: 20..."
@@ -77,6 +78,7 @@ export type OrderStatus =
 export interface CustomerOrder {
   id: string;
   orderNo: string; // ORD-001
+  article?: string;
   customerId?: string;
   customerName: string;
   customerPhone?: string;
@@ -85,6 +87,11 @@ export interface CustomerOrder {
   totalPairs: number; // Sum of all glove items total pairs
   originalTotalPairs?: number; // Sum of originalQty (Immutable)
   totalQty: number; // Compatibility mirror
+  totalOrder?: number;
+  totalCuttingReceived?: number;
+  totalDelivered?: number;
+  stockBalance?: number;
+  remaining?: number;
   totalAmount?: number;
   status: OrderStatus;
   items: OrderItem[];
@@ -138,11 +145,14 @@ export interface CuttingTransaction {
   customerOrder?: string;
   orderId?: string;
   orderNo?: string;
-  customerName?: string;
+  customerName: string;
   sizes?: SizeMatrix;
   billNo?: string;
   factoryName?: string;
   addToStock?: boolean;
+  allocatedToOrder?: number;
+  sentToStock?: number;
+  linkedStockId?: string;
   notes?: string;
   createdAt: string;
 }
@@ -151,7 +161,7 @@ export interface CuttingEntry {
   id: string;
   cutterId: string;
   cutterName: string;
-  type: 'GIVE' | 'RECEIVE';
+  type: 'GIVE' | 'RECEIVE' | 'RETURN';
   date: string;
   customerName: string;
   article: string;
@@ -172,6 +182,11 @@ export interface CuttingEntry {
   orderNo?: string;
   runningBalance: number;
   billNo: string;
+  linkedStockId?: string;
+  returnReferenceId?: string;
+  returnReason?: 'Damaged' | 'Wrong Size' | 'Quality';
+  stockAdjustedQty?: number;
+  articleStockAdjustedQty?: number;
   createdAt: string;
   editedAt?: unknown;
   editedBy?: string;
@@ -430,6 +445,97 @@ export interface CashbookEntry {
   createdAt: string;
 }
 
+export interface CashTransaction {
+  id: string;
+  cutterId?: string;
+  cutterName?: string;
+  customerName: string;
+  type: 'PAYMENT' | 'PAYMENT_RETURN' | 'ADVANCE' | 'RECEIPT';
+  date: string;
+  amount: number;
+  billNo: string;
+  paymentMethod: string;
+  createdAt: string;
+}
+
+export interface FactoryStockItem {
+  id: string;
+  article: string;
+  articleName: string;
+  size: string;
+  qty: number;
+  totalStock: number;
+  totalCuttingReceived: number;
+  totalDelivered: number;
+  balance: number;
+  rate: number;
+  updatedAt?: string;
+  receiveIds?: string[];
+  deliveryIds?: string[];
+}
+
+export interface DeliveryHistoryEntry {
+  id: string;
+  orderId?: string;
+  customerOrderId?: string;
+  orderNo?: string;
+  linkedStockId?: string;
+  stockId?: string;
+  dispatchHistoryId?: string;
+  orderHistoryId?: string;
+  date: string;
+  deliveryDate?: string;
+  customerName: string;
+  partyName?: string;
+  article: string;
+  size: string;
+  quantity: number;
+  createdAt: string;
+}
+
+export interface FactoryArticle {
+  id: string;
+  name: string;
+}
+
+export interface FactoryArticleMaster {
+  id: string;
+  articleName: string;
+  articleCode?: string;
+  sizes: Array<{ sizeName: string; pairs: number }>;
+  createdAt: string;
+}
+
+export interface ArticleStockCuttingHistoryEntry {
+  date: string;
+  pairs: number;
+  receiveId: string;
+  source: string;
+  totalBalance?: number;
+  reason?: string;
+  returnReferenceId?: string;
+}
+
+export interface ArticleStockDeliveryHistoryEntry {
+  date: string;
+  orderNo: string;
+  customerName: string;
+  pairs: number;
+  remainingAfter: number;
+  deliveryId?: string;
+}
+
+export interface ArticleStockItem {
+  id: string;
+  articleName: string;
+  totalReceived: number;
+  totalAvailable: number;
+  totalDelivered: number;
+  lastUpdated?: string | { toDate?: () => Date };
+  cuttingHistory: ArticleStockCuttingHistoryEntry[];
+  deliveryHistory: ArticleStockDeliveryHistoryEntry[];
+}
+
 export interface StaffAttendance {
   id: string;
   staffId: string;
@@ -446,6 +552,7 @@ export type FactoryModule =
   | 'order_detail'
   | 'cuttings' 
   | 'stitching'
+  | 'stock_management'
   | 'stock' 
   | 'sales' 
   | 'purchase' 

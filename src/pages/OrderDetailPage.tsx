@@ -26,6 +26,7 @@ import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate, getOrderStatusBadge } from '../utils/factoryFormatters';
 import { db, collection, doc, onSnapshot, updateDoc } from '../firebase';
 import { OrderItem, SizeMatrix, StitchingHistoryEntry, StitchingOrderStatus } from '../types/factory';
+import { OrderHistoryDetailReport } from '../components/orders/OrderHistoryDetailReport';
 
 interface OrderDetailPageProps {
   orderId: string;
@@ -43,7 +44,7 @@ interface CuttingHistoryRow {
   qty: number;
   rate: number;
   amount: number;
-  type: 'GIVE' | 'RECEIVE';
+  type: 'GIVE' | 'RECEIVE' | 'RETURN';
   status: string;
   notes: string;
   isLegacyCut?: boolean;
@@ -207,7 +208,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         rate: Number(entry.rate) || Number(entry.boxRate) || 0,
         amount: Number(entry.totalBalance) || Number(entry.lotTotal) || (Number(entry.pairs) || 0) * (Number(entry.rate) || 0),
         type: entry.type,
-        status: entry.type === 'GIVE' ? 'Cutting Issued' : 'Cutting Received',
+        status: entry.type === 'GIVE' ? 'Cutting Issued' : entry.type === 'RETURN' ? 'Cutting Returned' : 'Cutting Received',
         notes: entry.remarks || ''
       });
     });
@@ -732,6 +733,12 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           </table>
         </div>
       </section>
+
+      <OrderHistoryDetailReport
+        orderId={order.id}
+        articleName={[...new Set(order.items.map(item => item.article || item.title || item.gloveType).filter(Boolean))].join(', ')}
+        totalOrder={totalOriginalPairs}
+      />
 
       {/* =========================================================================
           SECTION B - ORDER PROGRESS / LIVE STATUS (MIDDLE):

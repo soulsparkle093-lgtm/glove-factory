@@ -27,7 +27,11 @@ import {
   StitchingOrder,
   StitcherKhataTransaction,
   StitchingOrderStatus,
-  StitchingHistoryEntry
+  StitchingHistoryEntry,
+  ArticleStockItem,
+  DeliveryHistoryEntry,
+  FactoryStockItem,
+  FactoryArticleMaster
 } from '../types/factory';
 import { 
   defaultFactorySettings, 
@@ -46,7 +50,10 @@ import {
   deleteDoc, 
   onSnapshot,
   writeBatch,
-  serverTimestamp
+  serverTimestamp,
+  runTransaction,
+  increment,
+  arrayUnion
 } from '../firebase';
 
 const STORAGE_KEYS = {
@@ -93,6 +100,9 @@ function saveLocal<T>(key: string, val: T): void {
   }
 }
 
+const normalizeStockDocumentId = (value: string): string =>
+  value.trim().toLocaleLowerCase().replace(/[\\/]/g, '-');
+
 interface ToastMessage {
   id: string;
   type: 'success' | 'error' | 'info';
@@ -122,6 +132,10 @@ interface FactoryContextType {
   cuttingEntries: CuttingEntry[];
   orderDispatchHistory: OrderDispatchHistory[];
   stockLedger: StockLedgerEntry[];
+  stockManagement: FactoryStockItem[];
+  articleStock: ArticleStockItem[];
+  deliveryHistory: DeliveryHistoryEntry[];
+  articlesMaster: FactoryArticleMaster[];
   invoices: SaleInvoice[];
   partyTransactions: PartyTransaction[];
   staffLedger: StaffLedgerEntry[];
@@ -171,7 +185,21 @@ interface FactoryContextType {
   deleteCuttingTransaction: (id: string) => Promise<void>;
   updateCuttingEntry: (id: string, updates: Pick<CuttingEntry, 'date' | 'customerName' | 'article' | 'size' | 'average' | 'remarks' | 'pairs' | 'rate' | 'billNo'>) => Promise<void>;
   deleteCuttingEntry: (id: string) => Promise<void>;
+  updateCuttingReturn: (id: string, updates: Pick<CuttingEntry, 'date' | 'remarks' | 'pairs' | 'rate'>) => Promise<void>;
+  deleteCuttingReturn: (id: string) => Promise<void>;
   clearCuttingData: () => Promise<void>;
+  returnCutting: (data: {
+    originalEntryId: string;
+    quantity: number;
+    reason: 'Damaged' | 'Wrong Size' | 'Quality';
+    date: string;
+  }) => Promise<CuttingEntry>;
+  createArticleMaster: (data: Omit<FactoryArticleMaster, 'id' | 'createdAt'>) => Promise<FactoryArticleMaster>;
+  deliverFromStock: (data: { stockId: string; orderId: string; customerName: string; quantity: number; date: string }) => Promise<void>;
+  addStockReceipt: (data: { article: string; size: string; quantity: number; date: string; totalBalance?: number; source?: string }) => Promise<void>;
+  deleteFactoryStock: (id: string) => Promise<void>;
+  updateStockDelivery: (id: string, updates: Pick<DeliveryHistoryEntry, 'date' | 'quantity' | 'customerName'>) => Promise<void>;
+  deleteStockDelivery: (id: string) => Promise<void>;
 
   // Stitching orders and stitcher khata
   addStitcher: (data: { name: string; phone?: string; city?: string; perPairRate?: number; stitcherType?: Stitcher['stitcherType']; isActive?: boolean }) => Promise<Stitcher>;
@@ -348,6 +376,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [stitchingHistory, setStitchingHistory] = useState<StitchingHistoryEntry[]>(() => loadLocal(STORAGE_KEYS.STITCHING_HISTORY, []));
   const [orderDispatchHistory, setOrderDispatchHistory] = useState<OrderDispatchHistory[]>(() => loadLocal(STORAGE_KEYS.ORDER_HISTORY, []));
   const [stockLedger, setStockLedger] = useState<StockLedgerEntry[]>(() => loadLocal(STORAGE_KEYS.STOCK_LEDGER, []));
+  const [stockManagement, setStockManagement] = useState<FactoryStockItem[]>([]);
+  const [articleStock, setArticleStock] = useState<ArticleStockItem[]>([]);
+  const [deliveryHistory, setDeliveryHistory] = useState<DeliveryHistoryEntry[]>([]);
+  const [articlesMaster, setArticlesMaster] = useState<FactoryArticleMaster[]>([]);
+  const [articleCatalog, setArticleCatalog] = useState<FactoryArticleMaster[]>([]);
+  const [legacyArticleMaster, setLegacyArticleMaster] = useState<FactoryArticleMaster[]>([]);
   const [invoices, setInvoices] = useState<SaleInvoice[]>(() => loadLocal(STORAGE_KEYS.INVOICES, []));
   const [partyTransactions, setPartyTransactions] = useState<PartyTransaction[]>(() => loadLocal(STORAGE_KEYS.PARTY_TXS, []));
   const [staffLedger, setStaffLedger] = useState<StaffLedgerEntry[]>(() => loadLocal(STORAGE_KEYS.STAFF_LEDGER, []));
@@ -577,6 +611,105 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setStockLedger(list);
         saveLocal(STORAGE_KEYS.STOCK_LEDGER, list);
       }, err => console.error('Firestore onSnapshot error (stock_ledger):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'stock_management'), snap => {
+        const list = snap.docs.map(d => {
+          const data = d.data();
+          return {
+            ...data,
+            id: d.id,
+            article: String(data.article || data.articleName || ''),
+            articleName: String(data.articleName || data.article || ''),
+            size: String(data.size || ''),
+            qty: Number(data.qty) || Number(data.totalCuttingReceived) || 0,
+            totalStock: Number(data.totalStock) || Number(data.totalCuttingReceived) || 0,
+            totalCuttingReceived: Number(data.totalCuttingReceived) || 0,
+            totalDelivered: Number(data.totalDelivered) || 0,
+            balance: Number(data.balance) || 0,
+            rate: Number(data.rate) || 0,
+            receiveIds: Array.isArray(data.receiveIds) ? data.receiveIds : [],
+            deliveryIds: Array.isArray(data.deliveryIds) ? data.deliveryIds : []
+          } as FactoryStockItem;
+        });
+        list.sort((a, b) => a.article.localeCompare(b.article) || a.size.localeCompare(b.size));
+        setStockManagement(list);
+      }, err => console.error('Firestore onSnapshot error (stock_management):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'article_stock'), snap => {
+        const list = snap.docs.map(d => {
+          const data = d.data();
+          return {
+            ...data,
+            id: d.id,
+            articleName: String(data.articleName || ''),
+            totalReceived: Number(data.totalReceived) || 0,
+            totalAvailable: Number(data.totalAvailable) || 0,
+            totalDelivered: Number(data.totalDelivered) || 0,
+            cuttingHistory: Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [],
+            deliveryHistory: Array.isArray(data.deliveryHistory) ? data.deliveryHistory : []
+          } as ArticleStockItem;
+        });
+        list.sort((a, b) => a.articleName.localeCompare(b.articleName));
+        setArticleStock(list);
+      }, err => console.error('Firestore onSnapshot error (article_stock):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'stock_delivery_history'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as DeliveryHistoryEntry));
+        list.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
+        setDeliveryHistory(list);
+      }, err => console.error('Firestore onSnapshot error (stock_delivery_history):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'articles_master'), snap => {
+        const list = snap.docs.flatMap(d => {
+          const data = d.data();
+          const articleName = String(data.articleName || data.name || data.title || '').trim();
+          const status = String(data.status || '').toLocaleLowerCase();
+          if (!articleName || data.isActive === false || (status && status !== 'active')) return [];
+          return [{
+            id: d.id,
+            articleName,
+            articleCode: String(data.articleCode || data.articleNumber || data.articleNo || data.code || data.sku || ''),
+            sizes: Array.isArray(data.sizes) ? data.sizes : [],
+            createdAt: String(data.createdAt || '')
+          } satisfies FactoryArticleMaster];
+        });
+        list.sort((a, b) => a.articleName.localeCompare(b.articleName));
+        setArticlesMaster(list);
+      }, err => console.error('Firestore onSnapshot error (articles_master):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'articles'), snap => {
+        const list = snap.docs.flatMap(d => {
+          const data = d.data();
+          const articleName = String(data.articleName || data.name || data.title || '').trim();
+          const status = String(data.status || '').toLocaleLowerCase();
+          if (!articleName || data.isActive === false || (status && status !== 'active')) return [];
+          return [{
+            id: d.id,
+            articleName,
+            articleCode: String(data.articleCode || data.articleNumber || data.articleNo || data.code || data.sku || ''),
+            sizes: Array.isArray(data.sizes) ? data.sizes : [],
+            createdAt: String(data.createdAt || '')
+          } satisfies FactoryArticleMaster];
+        });
+        setArticleCatalog(list);
+      }, err => console.error('Firestore onSnapshot error (articles):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'article_master'), snap => {
+        const list = snap.docs.flatMap(d => {
+          const data = d.data();
+          const articleName = String(data.articleName || data.article_name || data.name || data.title || '').trim();
+          const status = String(data.status || '').toLocaleLowerCase();
+          if (!articleName || data.isActive === false || (status && status !== 'active')) return [];
+          return [{
+            id: d.id,
+            articleName,
+            articleCode: String(data.articleCode || data.articleNumber || data.articleNo || data.code || data.sku || ''),
+            sizes: Array.isArray(data.sizes) ? data.sizes : [],
+            createdAt: String(data.createdAt || '')
+          } satisfies FactoryArticleMaster];
+        });
+        setLegacyArticleMaster(list);
+      }, err => console.error('Firestore onSnapshot error (article_master):', err)));
 
       // 10. sales_invoices
       unsubs.push(onSnapshot(collection(db, 'sales_invoices'), snap => {
@@ -1150,6 +1283,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       lotTotal: data.qty * (Number(data.rate) || 0),
       totalBalance: data.totalBalance ?? data.qty * (Number(data.rate) || 0),
       customerOrder: data.customerOrder || (data.orderId ? data.orderNo || '' : 'Direct Cutting'),
+      orderId: data.orderId || '',
+      orderNo: data.orderNo || '',
       runningBalance: 0,
       billNo: data.billNo || '',
       createdAt: now
@@ -1189,6 +1324,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
 
     const targetCutter = cutters.find(c => c.id === data.cutterId);
+    const targetOrder = data.orderId ? orders.find(order => order.id === data.orderId) : undefined;
+    const directDelivery = data.type === 'RECEIVE' && !!data.orderId && !data.addToStock;
+    if (data.orderId && !targetOrder) throw new Error('The selected customer order no longer exists.');
     const currentGiven = targetCutter?.totalGiven || 0;
     const currentReceived = targetCutter?.totalReceived || 0;
 
@@ -1198,6 +1336,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // Dual Entry Batched Write
     if (!db) throw new Error('Firestore is not available. The cutting entry was not saved.');
+    const directDispatchHistoryRef = directDelivery ? doc(collection(db, 'order_dispatch_history')) : null;
+    const directOrderHistoryRef = directDelivery && data.orderId
+      ? doc(collection(db, 'customer_orders', data.orderId, 'order_history'))
+      : null;
     {
       try {
         const batch = writeBatch(db);
@@ -1252,6 +1394,30 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             notes: data.notes || '',
             createdAt: now
           });
+          if (directDispatchHistoryRef && directOrderHistoryRef) {
+            batch.set(directDispatchHistoryRef, {
+              orderId: data.orderId,
+              orderNo: data.orderNo || targetOrder?.orderNo || '',
+              date: data.date,
+              actionType: 'dispatched_to_customer',
+              quantity: data.qty,
+              personName: data.cutterName,
+              article: data.article,
+              sizes: { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 },
+              notes: `Direct cutting delivery · ${data.sizeName || data.size || ''}`,
+              createdAt: now
+            });
+            batch.set(directOrderHistoryRef, {
+              date: data.date,
+              actionType: 'dispatched_to_customer',
+              quantity: data.qty,
+              personName: data.cutterName,
+              article: data.article,
+              size: data.sizeName || data.size || '',
+              notes: 'Directly delivered from cutting receive',
+              createdAt: now
+            });
+          }
 
           // Mirror in cuttings collection
           const cuttingRef = doc(db, 'cuttings', txId);
@@ -1277,8 +1443,78 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           });
         }
 
-        // 5. If type === 'RECEIVE' and addToStock, create stock_ledger entry
-        if (data.type === 'RECEIVE' && data.addToStock) {
+        if (data.type === 'RECEIVE') {
+          const articleName = data.article.trim();
+          const articleId = normalizeStockDocumentId(articleName);
+          const sizeName = (data.sizeName || data.size || 'Unspecified').trim();
+          const stockItemId = `${articleId}__${normalizeStockDocumentId(sizeName)}`;
+          const deliveredQty = directDelivery ? data.qty : 0;
+          const articleAvailable = articleStock.find(item =>
+            item.articleName.trim().toLocaleLowerCase() === articleName.toLocaleLowerCase()
+          )?.totalAvailable || 0;
+          const deliveryHistoryRef = directDelivery ? doc(collection(db, 'stock_delivery_history')) : null;
+          const deliveryRecord: DeliveryHistoryEntry | null = directDelivery && deliveryHistoryRef ? {
+            id: deliveryHistoryRef.id,
+            orderId: data.orderId,
+            customerOrderId: data.orderId,
+            orderNo: data.orderNo || targetOrder?.orderNo || '',
+            linkedStockId: stockItemId,
+            stockId: stockItemId,
+            dispatchHistoryId: directDispatchHistoryRef?.id,
+            orderHistoryId: directOrderHistoryRef?.id,
+            date: data.date,
+            deliveryDate: data.date,
+            customerName: targetOrder?.customerName || data.customerName || '',
+            partyName: targetOrder?.customerName || data.customerName || '',
+            article: articleName,
+            size: sizeName,
+            quantity: deliveredQty,
+            createdAt: now
+          } : null;
+          const receivedHistory = {
+            date: data.date,
+            pairs: data.qty,
+            receiveId: txId,
+            source: 'Nasim Cutting'
+          };
+          const stockRef = doc(db, 'stock_management', stockItemId);
+          batch.set(stockRef, {
+            article: articleName,
+            articleName,
+            size: sizeName,
+            qty: increment(data.qty),
+            totalStock: increment(data.qty),
+            totalCuttingReceived: increment(data.qty),
+            totalDelivered: increment(deliveredQty),
+            balance: increment(data.qty - deliveredQty),
+            rate: 0,
+            receiveIds: arrayUnion(txId),
+            ...(deliveryRecord ? { deliveryIds: arrayUnion(deliveryRecord.id) } : {}),
+            updatedAt: now
+          }, { merge: true });
+
+          const articleRef = doc(db, 'article_stock', articleId);
+          const articleDelivery = deliveryRecord ? {
+            date: data.date,
+            orderNo: deliveryRecord.orderNo || '',
+            customerName: deliveryRecord.customerName,
+            pairs: deliveredQty,
+            remainingAfter: articleAvailable + data.qty - deliveredQty,
+            deliveryId: deliveryRecord.id
+          } : null;
+          batch.set(articleRef, {
+            articleName,
+            totalReceived: increment(data.qty),
+            totalAvailable: increment(data.qty - deliveredQty),
+            totalDelivered: increment(deliveredQty),
+            cuttingHistory: arrayUnion(receivedHistory),
+            ...(articleDelivery ? { deliveryHistory: arrayUnion(articleDelivery) } : {})
+          }, { merge: true });
+          if (deliveryRecord && deliveryHistoryRef) batch.set(deliveryHistoryRef, deliveryRecord);
+        }
+
+        // Every cutting receive is tracked as incoming stock, including direct order deliveries.
+        if (data.type === 'RECEIVE') {
           const stkId = 'stk-' + Date.now();
           const stkRef = doc(db, 'stock_ledger', stkId);
           batch.set(stkRef, {
@@ -1294,6 +1530,22 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             notes: `Cutting received from ${data.cutterName}${data.billNo ? ` (Bill #${data.billNo})` : ''}`,
             createdAt: now
           });
+          if (directDelivery) {
+            const deliveryStkId = `${stkId}-delivery`;
+            batch.set(doc(db, 'stock_ledger', deliveryStkId), {
+              id: deliveryStkId,
+              productId: 'prod-' + data.article.toLowerCase().replace(/\s+/g, '-'),
+              productName: data.article,
+              orderId: data.orderId || '',
+              orderNo: data.orderNo || '',
+              type: 'out',
+              qty: data.qty,
+              date: data.date,
+              referenceId: txId,
+              notes: `Direct cutting delivery to ${targetOrder?.orderNo || data.orderNo || 'customer order'}`,
+              createdAt: now
+            });
+          }
         }
 
         await batch.commit();
@@ -1351,6 +1603,279 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return txDoc;
   };
 
+  const updateCuttingReturn = async (
+    id: string,
+    updates: Pick<CuttingEntry, 'date' | 'remarks' | 'pairs' | 'rate'>
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore is not available. The return was not updated.');
+    const current = cuttingEntries.find(entry => entry.id === id);
+    if (!current || current.type !== 'RETURN' || !current.returnReferenceId) {
+      throw new Error('The cutting return no longer exists.');
+    }
+    const original = cuttingEntries.find(entry => entry.id === current.returnReferenceId);
+    if (!original) throw new Error('The original cutting entry no longer exists.');
+    const quantity = Math.abs(Number(updates.pairs));
+    const rate = Number(updates.rate);
+    if (!updates.date || !Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(rate) || rate < 0) {
+      throw new Error('Enter a valid return date, whole-number quantity, and rate.');
+    }
+
+    const articleName = (original.articleTitle || original.article).trim();
+    const sizeName = (original.sizeName || original.size || 'Unspecified').trim();
+    const [stockDocuments, articleDocuments] = await Promise.all([
+      getDocs(collection(db, 'stock_management')),
+      getDocs(collection(db, 'article_stock'))
+    ]);
+    const matchedStock = stockDocuments.docs.find(snapshot => {
+      const stock = snapshot.data();
+      return String(stock.article || stock.articleName || '').trim().toLocaleLowerCase() === articleName.toLocaleLowerCase() &&
+        String(stock.size || '').trim().toLocaleLowerCase() === sizeName.toLocaleLowerCase();
+    });
+    const matchedArticle = articleDocuments.docs.find(snapshot =>
+      String(snapshot.data().articleName || '').trim().toLocaleLowerCase() === articleName.toLocaleLowerCase()
+    );
+    const stockRef = matchedStock ? doc(db, 'stock_management', matchedStock.id) : null;
+    const articleRef = matchedArticle ? doc(db, 'article_stock', matchedArticle.id) : null;
+    const returnRef = doc(db, 'cuttingEntries', id);
+    const totalsRef = doc(db, 'cutting_return_totals', current.returnReferenceId);
+    const cutterRef = doc(db, 'cutters', current.cutterId);
+    const oldQuantity = Math.abs(current.pairs);
+    const updated: CuttingEntry = {
+      ...current,
+      date: updates.date,
+      pairs: -quantity,
+      quantity: -quantity,
+      totalQty: -quantity,
+      rate,
+      lotTotal: -quantity * rate,
+      totalBalance: -quantity * rate,
+      remarks: updates.remarks,
+      editedAt: new Date().toISOString(),
+      editedBy: 'User'
+    };
+    const nextEntries = cuttingEntries.map(entry => entry.id === id ? updated : entry);
+    const balanced = nextEntries
+      .filter(entry => entry.cutterId === current.cutterId)
+      .sort((a, b) => (a.date || '').localeCompare(b.date || '') ||
+        (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+    let runningBalance = 0;
+    const balancedEntries = balanced.map(entry => {
+      runningBalance += entry.lotTotal;
+      return { ...entry, runningBalance };
+    });
+    const totalGiven = balancedEntries.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
+    const totalReceived = balancedEntries
+      .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
+      .reduce((sum, entry) => sum + entry.pairs, 0);
+    let updatedStockAdjustment = 0;
+    let updatedArticleAdjustment = 0;
+
+    await runTransaction(db, async transaction => {
+      const [returnSnapshot, totalsSnapshot, stockSnapshot, articleSnapshot] = await Promise.all([
+        transaction.get(returnRef),
+        transaction.get(totalsRef),
+        stockRef ? transaction.get(stockRef) : Promise.resolve(null),
+        articleRef ? transaction.get(articleRef) : Promise.resolve(null)
+      ]);
+      if (!returnSnapshot.exists()) throw new Error('The cutting return no longer exists.');
+      const trackedReturns = Number(totalsSnapshot.data()?.returnedPairs) || oldQuantity;
+      if (trackedReturns - oldQuantity + quantity > original.pairs) {
+        throw new Error(`Only ${Math.max(0, original.pairs - trackedReturns + oldQuantity)} pairs remain eligible for return.`);
+      }
+
+      const oldStockAdjustment = Number(returnSnapshot.data().stockAdjustedQty) || 0;
+      const oldArticleAdjustment = Number(returnSnapshot.data().articleStockAdjustedQty) || 0;
+      const currentStockBalance = stockSnapshot?.exists()
+        ? Number(stockSnapshot.data().balance ?? stockSnapshot.data().qty ?? 0) || 0
+        : 0;
+      const currentArticleBalance = articleSnapshot?.exists()
+        ? Number(articleSnapshot.data().totalAvailable) || 0
+        : 0;
+      const newStockAdjustment = stockSnapshot?.exists()
+        ? Math.min(quantity, Math.max(0, currentStockBalance + oldStockAdjustment))
+        : 0;
+      const newArticleAdjustment = articleSnapshot?.exists()
+        ? Math.min(quantity, Math.max(0, currentArticleBalance + oldArticleAdjustment))
+        : 0;
+      updatedStockAdjustment = newStockAdjustment;
+      updatedArticleAdjustment = newArticleAdjustment;
+      const updatedWithAdjustments: CuttingEntry = {
+        ...updated,
+        stockAdjustedQty: newStockAdjustment,
+        articleStockAdjustedQty: newArticleAdjustment
+      };
+      transaction.update(returnRef, {
+        ...updatedWithAdjustments,
+        runningBalance: balancedEntries.find(entry => entry.id === id)?.runningBalance || 0,
+        editedAt: serverTimestamp(),
+        editedBy: 'User'
+      });
+      transaction.set(totalsRef, {
+        returnedPairs: trackedReturns - oldQuantity + quantity,
+        updatedAt: new Date().toISOString()
+      });
+
+      if (stockSnapshot?.exists() && stockRef) {
+        const adjustmentDelta = newStockAdjustment - oldStockAdjustment;
+        const stock = stockSnapshot.data();
+        transaction.update(stockRef, {
+          qty: Math.max(0, (Number(stock.qty) || 0) - adjustmentDelta),
+          totalStock: Math.max(0, (Number(stock.totalStock) || 0) - adjustmentDelta),
+          totalCuttingReceived: Math.max(0, (Number(stock.totalCuttingReceived) || 0) - adjustmentDelta),
+          balance: Math.max(0, currentStockBalance - adjustmentDelta),
+          updatedAt: new Date().toISOString()
+        });
+      }
+      if (articleSnapshot?.exists() && articleRef) {
+        const adjustmentDelta = newArticleAdjustment - oldArticleAdjustment;
+        const article = articleSnapshot.data();
+        const history = (Array.isArray(article.cuttingHistory) ? article.cuttingHistory : [])
+          .filter((entry: { receiveId?: string }) => entry.receiveId !== id);
+        history.push({
+          date: updates.date,
+          pairs: -quantity,
+          receiveId: id,
+          source: 'Nasim Cutting Return',
+          reason: current.returnReason,
+          returnReferenceId: current.returnReferenceId,
+          totalBalance: -quantity * rate
+        });
+        transaction.update(articleRef, {
+          totalReceived: Math.max(0, (Number(article.totalReceived) || 0) - adjustmentDelta),
+          totalAvailable: Math.max(0, currentArticleBalance - adjustmentDelta),
+          cuttingHistory: history,
+          updatedAt: new Date().toISOString()
+        });
+      }
+      transaction.update(cutterRef, {
+        totalGiven,
+        totalReceived,
+        pendingBalance: Math.max(0, totalGiven - totalReceived),
+        updatedAt: new Date().toISOString()
+      });
+      balancedEntries.forEach(entry => {
+        if (entry.id !== id) {
+          transaction.update(doc(db, 'cuttingEntries', entry.id), { runningBalance: entry.runningBalance });
+        }
+      });
+    });
+
+    const committedEntries = balancedEntries.map(entry => entry.id === id
+      ? { ...entry, stockAdjustedQty: updatedStockAdjustment, articleStockAdjustedQty: updatedArticleAdjustment }
+      : entry);
+    setCuttingEntries(previous => [
+      ...previous.filter(entry => entry.cutterId !== current.cutterId),
+      ...committedEntries
+    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
+      ...cutter,
+      totalGiven,
+      totalReceived,
+      pendingBalance: Math.max(0, totalGiven - totalReceived)
+    } : cutter));
+  };
+
+  const deleteCuttingReturn = async (id: string): Promise<void> => {
+    if (!db) throw new Error('Firestore is not available. The return was not deleted.');
+    const current = cuttingEntries.find(entry => entry.id === id);
+    if (!current || current.type !== 'RETURN' || !current.returnReferenceId) {
+      throw new Error('The cutting return no longer exists.');
+    }
+    const articleName = (current.articleTitle || current.article).trim();
+    const sizeName = (current.sizeName || current.size || 'Unspecified').trim();
+    const [stockDocuments, articleDocuments] = await Promise.all([
+      getDocs(collection(db, 'stock_management')),
+      getDocs(collection(db, 'article_stock'))
+    ]);
+    const matchedStock = stockDocuments.docs.find(snapshot => {
+      const stock = snapshot.data();
+      return String(stock.article || stock.articleName || '').trim().toLocaleLowerCase() === articleName.toLocaleLowerCase() &&
+        String(stock.size || '').trim().toLocaleLowerCase() === sizeName.toLocaleLowerCase();
+    });
+    const matchedArticle = articleDocuments.docs.find(snapshot =>
+      String(snapshot.data().articleName || '').trim().toLocaleLowerCase() === articleName.toLocaleLowerCase()
+    );
+    const stockRef = matchedStock ? doc(db, 'stock_management', matchedStock.id) : null;
+    const articleRef = matchedArticle ? doc(db, 'article_stock', matchedArticle.id) : null;
+    const returnRef = doc(db, 'cuttingEntries', id);
+    const totalsRef = doc(db, 'cutting_return_totals', current.returnReferenceId);
+    const quantity = Math.abs(current.pairs);
+    const nextEntries = cuttingEntries.filter(entry => entry.id !== id);
+    const balanced = nextEntries
+      .filter(entry => entry.cutterId === current.cutterId)
+      .sort((a, b) => (a.date || '').localeCompare(b.date || '') ||
+        (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+    let runningBalance = 0;
+    const balancedEntries = balanced.map(entry => {
+      runningBalance += entry.lotTotal;
+      return { ...entry, runningBalance };
+    });
+    const totalGiven = balancedEntries.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
+    const totalReceived = balancedEntries
+      .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
+      .reduce((sum, entry) => sum + entry.pairs, 0);
+
+    await runTransaction(db, async transaction => {
+      const [returnSnapshot, totalsSnapshot, stockSnapshot, articleSnapshot] = await Promise.all([
+        transaction.get(returnRef),
+        transaction.get(totalsRef),
+        stockRef ? transaction.get(stockRef) : Promise.resolve(null),
+        articleRef ? transaction.get(articleRef) : Promise.resolve(null)
+      ]);
+      if (!returnSnapshot.exists()) throw new Error('The cutting return no longer exists.');
+      const returnData = returnSnapshot.data();
+      const trackedReturns = Number(totalsSnapshot.data()?.returnedPairs) || quantity;
+      const stockAdjustment = Number(returnData.stockAdjustedQty) || 0;
+      const articleAdjustment = Number(returnData.articleStockAdjustedQty) || 0;
+      transaction.delete(returnRef);
+      if (trackedReturns - quantity > 0) {
+        transaction.set(totalsRef, { returnedPairs: trackedReturns - quantity, updatedAt: new Date().toISOString() });
+      } else {
+        transaction.delete(totalsRef);
+      }
+      if (stockSnapshot?.exists() && stockRef && stockAdjustment > 0) {
+        const stock = stockSnapshot.data();
+        transaction.update(stockRef, {
+          qty: (Number(stock.qty) || 0) + stockAdjustment,
+          totalStock: (Number(stock.totalStock) || 0) + stockAdjustment,
+          totalCuttingReceived: (Number(stock.totalCuttingReceived) || 0) + stockAdjustment,
+          balance: (Number(stock.balance) || 0) + stockAdjustment,
+          updatedAt: new Date().toISOString()
+        });
+      }
+      if (articleSnapshot?.exists() && articleRef) {
+        const article = articleSnapshot.data();
+        transaction.update(articleRef, {
+          totalReceived: (Number(article.totalReceived) || 0) + articleAdjustment,
+          totalAvailable: (Number(article.totalAvailable) || 0) + articleAdjustment,
+          cuttingHistory: (Array.isArray(article.cuttingHistory) ? article.cuttingHistory : [])
+            .filter((entry: { receiveId?: string }) => entry.receiveId !== id),
+          updatedAt: new Date().toISOString()
+        });
+      }
+      transaction.update(doc(db, 'cutters', current.cutterId), {
+        totalGiven,
+        totalReceived,
+        pendingBalance: Math.max(0, totalGiven - totalReceived),
+        updatedAt: new Date().toISOString()
+      });
+      balancedEntries.forEach(entry => {
+        transaction.update(doc(db, 'cuttingEntries', entry.id), { runningBalance: entry.runningBalance });
+      });
+    });
+
+    setCuttingEntries(previous => [
+      ...previous.filter(entry => entry.cutterId !== current.cutterId),
+      ...balancedEntries
+    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
+      ...cutter,
+      totalGiven,
+      totalReceived,
+      pendingBalance: Math.max(0, totalGiven - totalReceived)
+    } : cutter));
+  };
+
   const updateCuttingEntry = async (
     id: string,
     updates: Pick<CuttingEntry, 'date' | 'customerName' | 'article' | 'size' | 'average' | 'remarks' | 'pairs' | 'rate' | 'billNo'>
@@ -1376,6 +1901,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       createdAt: legacyTx.createdAt
     } satisfies CuttingEntry : undefined);
     if (!current) throw new Error('Cutting entry no longer exists.');
+    if (current.type === 'RETURN') {
+      await updateCuttingReturn(id, {
+        date: updates.date,
+        remarks: updates.remarks,
+        pairs: updates.pairs,
+        rate: updates.rate
+      });
+      return;
+    }
 
     const updated: CuttingEntry = {
       ...current,
@@ -1422,7 +1956,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
     const balancedById = new Map(balanced.map(entry => [entry.id, entry]));
     const totalGiven = balanced.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
-    const totalReceived = balanced.filter(entry => entry.type === 'RECEIVE').reduce((sum, entry) => sum + entry.pairs, 0);
+    const totalReceived = balanced
+      .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
+      .reduce((sum, entry) => sum + entry.pairs, 0);
 
     if (!db) throw new Error('Firestore is not available. The entry was not updated.');
     if (!currentEntry) await setDoc(doc(db, 'cuttingEntries', id), current);
@@ -1518,6 +2054,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       createdAt: legacyTx.createdAt
     } satisfies CuttingEntry : undefined);
     if (!entry) throw new Error('Cutting entry no longer exists.');
+    if (entry.type === 'RETURN') {
+      await deleteCuttingReturn(id);
+      return;
+    }
+    if (cuttingEntries.some(saved => saved.type === 'RETURN' && saved.returnReferenceId === entry.id)) {
+      throw new Error('This cutting entry has recorded returns and cannot be deleted.');
+    }
     if (!db) throw new Error('Firestore is not available. The entry was not deleted.');
 
     const remaining = cuttingEntries.filter(entry => entry.id !== id);
@@ -1551,7 +2094,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return { ...entry, runningBalance: balance };
     });
     const totalGiven = affected.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
-    const totalReceived = affected.filter(entry => entry.type === 'RECEIVE').reduce((sum, entry) => sum + entry.pairs, 0);
+    const totalReceived = affected
+      .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
+      .reduce((sum, entry) => sum + entry.pairs, 0);
 
     await deleteDoc(doc(db, 'cuttingEntries', id));
     await deleteDoc(doc(db, 'cutting_transactions', id));
@@ -1582,6 +2127,502 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       totalReceived,
       pendingBalance: Math.max(0, totalGiven - totalReceived)
     } : cutter));
+  };
+
+  const returnCutting = async (data: {
+    originalEntryId: string;
+    quantity: number;
+    reason: 'Damaged' | 'Wrong Size' | 'Quality';
+    date: string;
+  }): Promise<CuttingEntry> => {
+    if (!db) throw new Error('Firestore is not available. The return was not saved.');
+    const original = cuttingEntries.find(entry => entry.id === data.originalEntryId);
+    if (!original || original.type !== 'RECEIVE' || original.pairs <= 0) {
+      throw new Error('The original received cutting entry could not be found.');
+    }
+    if (!Number.isInteger(data.quantity) || data.quantity <= 0 || !data.date) {
+      throw new Error('Enter a valid return date and whole-number quantity.');
+    }
+
+    const articleName = (original.articleTitle || original.article).trim();
+    const articleKey = articleName.toLocaleLowerCase();
+    const sizeName = (original.sizeName || original.size || 'Unspecified').trim();
+    const sizeKey = sizeName.toLocaleLowerCase();
+    const [stockDocuments, articleDocuments] = await Promise.all([
+      getDocs(collection(db, 'stock_management')),
+      getDocs(collection(db, 'article_stock'))
+    ]);
+    const matchedStock = stockDocuments.docs.find(snapshot => {
+      const stock = snapshot.data();
+      return String(stock.article || stock.articleName || '').trim().toLocaleLowerCase() === articleKey &&
+        String(stock.size || '').trim().toLocaleLowerCase() === sizeKey;
+    });
+    const matchedArticle = articleDocuments.docs.find(snapshot =>
+      String(snapshot.data().articleName || '').trim().toLocaleLowerCase() === articleKey
+    );
+    const stockItemId = `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(sizeName)}`;
+    const stockRef = doc(db, 'stock_management', matchedStock?.id || stockItemId);
+    const articleRef = doc(db, 'article_stock', matchedArticle?.id || normalizeStockDocumentId(articleName));
+    const originalRef = doc(db, 'cuttingEntries', original.id);
+    const returnTotalsRef = doc(db, 'cutting_return_totals', original.id);
+    const returnRef = doc(collection(db, 'cuttingEntries'));
+    const existingReturns = cuttingEntries
+      .filter(entry => entry.type === 'RETURN' && entry.returnReferenceId === original.id)
+      .reduce((sum, entry) => sum + Math.abs(entry.pairs), 0);
+    let stockUnavailableForReturn = false;
+
+    const returnedEntry: CuttingEntry = {
+      ...original,
+      id: returnRef.id,
+      type: 'RETURN',
+      date: data.date,
+      pairs: -data.quantity,
+      quantity: -data.quantity,
+      totalQty: -data.quantity,
+      lotTotal: -data.quantity * original.rate,
+      totalBalance: -data.quantity * original.rate,
+      runningBalance: 0,
+      remarks: `Return: ${data.quantity} pairs ${data.reason} - Ref: ${original.date}`,
+      returnReferenceId: original.id,
+      returnReason: data.reason,
+      createdAt: new Date().toISOString()
+    };
+    let stockAdjustedQty = 0;
+    let articleStockAdjustedQty = 0;
+
+    await runTransaction(db, async transaction => {
+      const [originalSnapshot, stockSnapshot, articleSnapshot, totalsSnapshot] = await Promise.all([
+        transaction.get(originalRef),
+        transaction.get(stockRef),
+        transaction.get(articleRef),
+        transaction.get(returnTotalsRef)
+      ]);
+      if (!originalSnapshot.exists()) throw new Error('The original cutting entry no longer exists.');
+
+      const stock = stockSnapshot.exists() ? stockSnapshot.data() : null;
+      const articleStockData = articleSnapshot.exists() ? articleSnapshot.data() : null;
+      const trackedReturns = Number(totalsSnapshot.data()?.returnedPairs) || existingReturns;
+      if (trackedReturns + data.quantity > original.pairs) {
+        throw new Error(`Only ${Math.max(0, original.pairs - trackedReturns)} pairs remain eligible for return.`);
+      }
+
+      const now = new Date().toISOString();
+      transaction.set(returnTotalsRef, { returnedPairs: trackedReturns + data.quantity, updatedAt: now });
+      if (stock) {
+        const stockBalance = Number(stock.balance ?? stock.qty ?? stock.totalStock) || 0;
+        if (stockBalance < data.quantity) stockUnavailableForReturn = true;
+        stockAdjustedQty = Math.min(data.quantity, Math.max(0, stockBalance));
+        transaction.update(stockRef, {
+          qty: Math.max(0, (Number(stock.qty) || 0) - stockAdjustedQty),
+          totalStock: Math.max(0, (Number(stock.totalStock) || 0) - stockAdjustedQty),
+          totalCuttingReceived: Math.max(0, (Number(stock.totalCuttingReceived) || 0) - stockAdjustedQty),
+          balance: Math.max(0, stockBalance - stockAdjustedQty),
+          updatedAt: now
+        });
+      }
+      if (articleStockData) {
+        const available = Number(articleStockData.totalAvailable) || 0;
+        const received = Number(articleStockData.totalReceived) || 0;
+        if (available < data.quantity) stockUnavailableForReturn = true;
+        articleStockAdjustedQty = Math.min(data.quantity, Math.max(0, available));
+        transaction.update(articleRef, {
+          totalReceived: Math.max(0, received - articleStockAdjustedQty),
+          totalAvailable: Math.max(0, available - articleStockAdjustedQty),
+          cuttingHistory: arrayUnion({
+          date: data.date,
+          pairs: -articleStockAdjustedQty,
+          receiveId: returnRef.id,
+          source: 'Nasim Cutting Return',
+          reason: data.reason,
+          returnReferenceId: original.id,
+          totalBalance: -data.quantity * original.rate
+          }),
+          updatedAt: now
+        });
+      }
+      transaction.set(returnRef, {
+        ...returnedEntry,
+        stockAdjustedQty,
+        articleStockAdjustedQty,
+        createdAt: serverTimestamp(),
+        source: 'Cutting Return'
+      });
+
+      const cutterEntries = cuttingEntries.filter(entry => entry.cutterId === original.cutterId);
+      const totalGiven = cutterEntries.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
+      const totalReceived = cutterEntries
+        .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
+        .reduce((sum, entry) => sum + entry.pairs, 0) - data.quantity;
+      transaction.update(doc(db, 'cutters', original.cutterId), {
+        totalGiven,
+        totalReceived,
+        pendingBalance: Math.max(0, totalGiven - totalReceived),
+        updatedAt: now
+      });
+    });
+    const savedReturnedEntry = { ...returnedEntry, stockAdjustedQty, articleStockAdjustedQty };
+    const nextEntries = [...cuttingEntries, savedReturnedEntry].sort((a, b) =>
+      (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || '')
+    );
+    setCuttingEntries(nextEntries);
+    setCutters(previous => previous.map(cutter => {
+      if (cutter.id !== original.cutterId) return cutter;
+      const totalReceived = nextEntries
+        .filter(entry => entry.cutterId === cutter.id && (entry.type === 'RECEIVE' || entry.type === 'RETURN'))
+        .reduce((sum, entry) => sum + entry.pairs, 0);
+      return {
+        ...cutter,
+        totalReceived,
+        pendingBalance: Math.max(0, (cutter.totalGiven || 0) - totalReceived)
+      };
+    }));
+    const stockWasAvailable = Boolean(matchedStock && matchedArticle) && !stockUnavailableForReturn;
+    showToast(stockWasAvailable
+      ? `${data.quantity} pairs returned and stock updated.`
+      : `Stock did not have this full balance; ${data.quantity} pairs were recorded in the ledger and stock was reduced to zero where available.`,
+    stockWasAvailable ? 'success' : 'info');
+    return savedReturnedEntry;
+  };
+
+  const createArticleMaster = async (data: Omit<FactoryArticleMaster, 'id' | 'createdAt'>): Promise<FactoryArticleMaster> => {
+    const articleName = data.articleName.trim();
+    const sizes = data.sizes
+      .map(size => ({ sizeName: size.sizeName.trim(), pairs: Number(size.pairs) }))
+      .filter(size => size.sizeName && Number.isFinite(size.pairs) && size.pairs >= 0);
+    if (!articleName || sizes.length === 0) throw new Error('Article name and at least one valid size are required.');
+    if (!db) throw new Error('Firestore is not available. The article was not saved.');
+    if ([...articlesMaster, ...articleCatalog, ...legacyArticleMaster].some(article => article.articleName.toLocaleLowerCase() === articleName.toLocaleLowerCase())) {
+      throw new Error(`Article "${articleName}" already exists.`);
+    }
+
+    const createdAt = new Date().toISOString();
+    const articleRef = await addDoc(collection(db, 'articles_master'), { articleName, sizes, createdAt });
+    await updateDoc(articleRef, { id: articleRef.id });
+    const created = { id: articleRef.id, articleName, articleCode: data.articleCode || '', sizes, createdAt };
+    setArticlesMaster(previous => [...previous, created].sort((a, b) => a.articleName.localeCompare(b.articleName)));
+    return created;
+  };
+
+  const deliverFromStock = async (data: {
+    stockId: string;
+    orderId: string;
+    customerName: string;
+    quantity: number;
+    date: string;
+  }): Promise<void> => {
+    const stockItem = stockManagement.find(item => item.id === data.stockId);
+    const order = orders.find(item => item.id === data.orderId);
+    if (!stockItem || !order) throw new Error('The selected stock or customer order no longer exists.');
+    if (!Number.isFinite(data.quantity) || data.quantity <= 0 || !data.date || !data.customerName.trim()) {
+      throw new Error('Enter a valid delivery quantity, date, and customer.');
+    }
+    if (!db) throw new Error('Firestore is not available. The delivery was not saved.');
+
+    const articleId = normalizeStockDocumentId(stockItem.article);
+    const stockRef = doc(db, 'stock_management', stockItem.id);
+    const articleRef = doc(db, 'article_stock', articleId);
+    const deliveryRef = doc(collection(db, 'stock_delivery_history'));
+    const dispatchHistoryRef = doc(collection(db, 'order_dispatch_history'));
+    const orderHistoryRef = doc(collection(db, 'customer_orders', order.id, 'order_history'));
+    const now = new Date().toISOString();
+
+    await runTransaction(db, async transaction => {
+      const [stockSnapshot, articleSnapshot] = await Promise.all([
+        transaction.get(stockRef),
+        transaction.get(articleRef)
+      ]);
+      if (!stockSnapshot.exists() || !articleSnapshot.exists()) {
+        throw new Error('Stock records are unavailable. Refresh and try again.');
+      }
+      const stockData = stockSnapshot.data();
+      const articleData = articleSnapshot.data();
+      const currentBalance = Number(stockData.balance) || 0;
+      if (data.quantity > currentBalance) throw new Error('Delivery quantity exceeds available stock.');
+
+      const remainingAfter = (Number(articleData.totalAvailable) || 0) - data.quantity;
+      const delivery: DeliveryHistoryEntry = {
+        id: deliveryRef.id,
+        orderId: order.id,
+        customerOrderId: order.id,
+        orderNo: order.orderNo,
+        linkedStockId: stockItem.id,
+        stockId: stockItem.id,
+        dispatchHistoryId: dispatchHistoryRef.id,
+        orderHistoryId: orderHistoryRef.id,
+        date: data.date,
+        deliveryDate: data.date,
+        customerName: data.customerName.trim(),
+        partyName: data.customerName.trim(),
+        article: stockItem.article,
+        size: stockItem.size,
+        quantity: data.quantity,
+        createdAt: now
+      };
+      const articleDelivery = {
+        date: data.date,
+        orderNo: order.orderNo,
+        customerName: data.customerName.trim(),
+        pairs: data.quantity,
+        remainingAfter,
+        deliveryId: deliveryRef.id
+      };
+
+      transaction.update(stockRef, {
+        totalDelivered: increment(data.quantity),
+        balance: increment(-data.quantity),
+        deliveryIds: arrayUnion(deliveryRef.id),
+        updatedAt: now
+      });
+      transaction.update(articleRef, {
+        totalAvailable: increment(-data.quantity),
+        totalDelivered: increment(data.quantity),
+        deliveryHistory: arrayUnion(articleDelivery)
+      });
+      transaction.set(deliveryRef, delivery);
+      transaction.set(dispatchHistoryRef, {
+        orderId: order.id,
+        orderNo: order.orderNo,
+        date: data.date,
+        actionType: 'dispatched_to_customer',
+        quantity: data.quantity,
+        article: stockItem.article,
+        notes: `Stock delivery · ${stockItem.size}`,
+        createdAt: now
+      });
+      transaction.set(orderHistoryRef, {
+        date: data.date,
+        actionType: 'dispatched_to_customer',
+        quantity: data.quantity,
+        article: stockItem.article,
+        size: stockItem.size,
+        notes: 'Delivered from Stock Management',
+        createdAt: now
+      });
+    });
+  };
+
+  const addStockReceipt = async (data: {
+    article: string;
+    size: string;
+    quantity: number;
+    date: string;
+    totalBalance?: number;
+    source?: string;
+  }): Promise<void> => {
+    const articleName = data.article.trim();
+    const size = data.size.trim() || 'Unspecified';
+    if (!articleName || !data.date || !Number.isFinite(data.quantity) || data.quantity <= 0) {
+      throw new Error('Enter an article, date, and a valid positive pair quantity.');
+    }
+    if (!db) throw new Error('Firestore is not available. The stock receipt was not saved.');
+
+    const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(articleName));
+    const stockRef = doc(db, 'stock_management', `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(size)}`);
+    const receiveRef = doc(collection(db, 'cuttingEntries'));
+    const now = new Date().toISOString();
+    await runTransaction(db, async transaction => {
+      const [articleSnapshot, stockSnapshot] = await Promise.all([
+        transaction.get(articleRef),
+        transaction.get(stockRef)
+      ]);
+      const articleData = articleSnapshot.exists() ? articleSnapshot.data() : {};
+      transaction.set(articleRef, {
+        articleName,
+        totalReceived: increment(data.quantity),
+        totalAvailable: increment(data.quantity),
+        totalDelivered: increment(0),
+        cuttingHistory: arrayUnion({
+          date: data.date,
+          pairs: data.quantity,
+          receiveId: receiveRef.id,
+          totalBalance: Number(data.totalBalance) || 0,
+          source: data.source || 'Nasim'
+        }),
+        lastUpdated: serverTimestamp(),
+        updatedAt: now
+      }, { merge: true });
+      transaction.set(stockRef, {
+        article: articleName,
+        articleName,
+        size,
+        qty: increment(data.quantity),
+        totalStock: increment(data.quantity),
+        totalCuttingReceived: increment(data.quantity),
+        totalDelivered: increment(0),
+        balance: increment(data.quantity),
+        rate: Number(stockSnapshot.data()?.rate) || 0,
+        receiveIds: arrayUnion(receiveRef.id),
+        updatedAt: now
+      }, { merge: true });
+    });
+  };
+
+  const updateStockDelivery = async (
+    id: string,
+    updates: Pick<DeliveryHistoryEntry, 'date' | 'quantity' | 'customerName'>
+  ): Promise<void> => {
+    const current = deliveryHistory.find(entry => entry.id === id);
+    if (!current?.linkedStockId) throw new Error('The stock delivery no longer exists.');
+    if (!Number.isFinite(updates.quantity) || updates.quantity <= 0 || !updates.date || !updates.customerName.trim()) {
+      throw new Error('Enter a valid delivery quantity, date, and customer.');
+    }
+    if (!db) throw new Error('Firestore is not available. The delivery was not updated.');
+
+    const stockRef = doc(db, 'stock_management', current.linkedStockId);
+    const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(current.article));
+    const deliveryRef = doc(db, 'stock_delivery_history', id);
+    const dispatchHistoryRef = current.dispatchHistoryId
+      ? doc(db, 'order_dispatch_history', current.dispatchHistoryId)
+      : null;
+    const orderHistoryRef = current.orderHistoryId && current.orderId
+      ? doc(db, 'customer_orders', current.orderId, 'order_history', current.orderHistoryId)
+      : null;
+    const now = new Date().toISOString();
+    await runTransaction(db, async transaction => {
+      const [stockSnapshot, articleSnapshot, deliverySnapshot, dispatchSnapshot, orderHistorySnapshot] = await Promise.all([
+        transaction.get(stockRef),
+        transaction.get(articleRef),
+        transaction.get(deliveryRef),
+        dispatchHistoryRef ? transaction.get(dispatchHistoryRef) : Promise.resolve(null),
+        orderHistoryRef ? transaction.get(orderHistoryRef) : Promise.resolve(null)
+      ]);
+      if (!stockSnapshot.exists() || !articleSnapshot.exists() || !deliverySnapshot.exists()) {
+        throw new Error('Stock delivery records are unavailable. Refresh and try again.');
+      }
+      const stockData = stockSnapshot.data();
+      const articleData = articleSnapshot.data();
+      const savedDelivery = deliverySnapshot.data() as DeliveryHistoryEntry;
+      const oldQuantity = Number(savedDelivery.quantity) || 0;
+      const nextBalance = (Number(stockData.balance) || 0) + oldQuantity - updates.quantity;
+      const articleRemaining = (Number(articleData.totalAvailable) || 0) + oldQuantity - updates.quantity;
+      if (nextBalance < 0) throw new Error('Delivery quantity exceeds available stock.');
+      const updatedDelivery: DeliveryHistoryEntry = {
+        ...savedDelivery,
+        id,
+        date: updates.date,
+        deliveryDate: updates.date,
+        quantity: updates.quantity,
+        customerName: updates.customerName.trim(),
+        partyName: updates.customerName.trim()
+      };
+      const nextArticleHistory = (Array.isArray(articleData.deliveryHistory) ? articleData.deliveryHistory : [])
+        .filter((entry: { deliveryId?: string }) => entry.deliveryId !== id);
+      nextArticleHistory.push({
+        date: updates.date,
+        orderNo: savedDelivery.orderNo || '',
+        customerName: updates.customerName.trim(),
+        pairs: updates.quantity,
+        remainingAfter: articleRemaining,
+        deliveryId: id
+      });
+
+      transaction.update(stockRef, {
+        totalDelivered: increment(updates.quantity - oldQuantity),
+        balance: increment(oldQuantity - updates.quantity),
+        updatedAt: now
+      });
+      transaction.update(articleRef, {
+        totalAvailable: increment(oldQuantity - updates.quantity),
+        totalDelivered: increment(updates.quantity - oldQuantity),
+        deliveryHistory: nextArticleHistory
+      });
+      transaction.update(deliveryRef, updatedDelivery);
+      if (dispatchHistoryRef && dispatchSnapshot?.exists()) {
+        transaction.update(dispatchHistoryRef, {
+          date: updates.date,
+          quantity: updates.quantity,
+          customerName: updates.customerName.trim()
+        });
+      }
+      if (orderHistoryRef && orderHistorySnapshot?.exists()) {
+        transaction.update(orderHistoryRef, {
+          date: updates.date,
+          quantity: updates.quantity,
+          customerName: updates.customerName.trim()
+        });
+      }
+    });
+  };
+
+  const deleteStockDelivery = async (id: string): Promise<void> => {
+    const current = deliveryHistory.find(entry => entry.id === id);
+    if (!current?.linkedStockId) throw new Error('The stock delivery no longer exists.');
+    if (!db) throw new Error('Firestore is not available. The delivery was not deleted.');
+
+    const stockRef = doc(db, 'stock_management', current.linkedStockId);
+    const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(current.article));
+    const deliveryRef = doc(db, 'stock_delivery_history', id);
+    const now = new Date().toISOString();
+    await runTransaction(db, async transaction => {
+      const [stockSnapshot, articleSnapshot, deliverySnapshot] = await Promise.all([
+        transaction.get(stockRef),
+        transaction.get(articleRef),
+        transaction.get(deliveryRef)
+      ]);
+      if (!stockSnapshot.exists() || !articleSnapshot.exists() || !deliverySnapshot.exists()) {
+        throw new Error('Stock delivery records are unavailable. Refresh and try again.');
+      }
+      const quantity = Number(deliverySnapshot.data().quantity) || 0;
+      const savedDelivery = deliverySnapshot.data() as DeliveryHistoryEntry;
+      const articleData = articleSnapshot.data();
+      transaction.update(stockRef, {
+        totalDelivered: increment(-quantity),
+        balance: increment(quantity),
+        deliveryIds: (Array.isArray(stockSnapshot.data().deliveryIds) ? stockSnapshot.data().deliveryIds : [])
+          .filter((deliveryId: string) => deliveryId !== id),
+        updatedAt: now
+      });
+      transaction.update(articleRef, {
+        totalAvailable: increment(quantity),
+        totalDelivered: increment(-quantity),
+        deliveryHistory: (Array.isArray(articleData.deliveryHistory) ? articleData.deliveryHistory : [])
+          .filter((entry: { deliveryId?: string }) => entry.deliveryId !== id)
+      });
+      transaction.delete(deliveryRef);
+      if (savedDelivery.dispatchHistoryId) {
+        transaction.delete(doc(db, 'order_dispatch_history', savedDelivery.dispatchHistoryId));
+      }
+      if (savedDelivery.orderHistoryId && savedDelivery.orderId) {
+        transaction.delete(doc(db, 'customer_orders', savedDelivery.orderId, 'order_history', savedDelivery.orderHistoryId));
+      }
+    });
+  };
+
+  const deleteFactoryStock = async (id: string): Promise<void> => {
+    const stock = stockManagement.find(item => item.id === id);
+    if (!stock) throw new Error('The stock record no longer exists.');
+    if (!db) throw new Error('Firestore is not available. The stock record was not deleted.');
+
+    const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(stock.article));
+    const stockRef = doc(db, 'stock_management', id);
+    const relatedDeliveries = deliveryHistory.filter(entry => entry.linkedStockId === id);
+    const now = new Date().toISOString();
+    await runTransaction(db, async transaction => {
+      const articleSnapshot = await transaction.get(articleRef);
+      if (!articleSnapshot.exists()) throw new Error('The article stock record is unavailable.');
+      const articleData = articleSnapshot.data();
+      const receiveIds = new Set(stock.receiveIds || []);
+      const deliveryIds = new Set(stock.deliveryIds || relatedDeliveries.map(entry => entry.id));
+      transaction.update(articleRef, {
+        totalReceived: increment(-stock.totalCuttingReceived),
+        totalAvailable: increment(-stock.balance),
+        totalDelivered: increment(-stock.totalDelivered),
+        cuttingHistory: (Array.isArray(articleData.cuttingHistory) ? articleData.cuttingHistory : [])
+          .filter((entry: { receiveId?: string }) => !entry.receiveId || !receiveIds.has(entry.receiveId)),
+        deliveryHistory: (Array.isArray(articleData.deliveryHistory) ? articleData.deliveryHistory : [])
+          .filter((entry: { deliveryId?: string }) => !entry.deliveryId || !deliveryIds.has(entry.deliveryId))
+      });
+      transaction.delete(stockRef);
+      relatedDeliveries.forEach(delivery => {
+        transaction.delete(doc(db, 'stock_delivery_history', delivery.id));
+        if (delivery.dispatchHistoryId) {
+          transaction.delete(doc(db, 'order_dispatch_history', delivery.dispatchHistoryId));
+        }
+        if (delivery.orderHistoryId && delivery.orderId) {
+          transaction.delete(doc(db, 'customer_orders', delivery.orderId, 'order_history', delivery.orderHistoryId));
+        }
+      });
+    });
   };
 
   const deleteCuttingTransaction = async (id: string): Promise<void> => {
@@ -1719,7 +2760,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       cuttingEntries
         .filter(entry => entry.orderId === order.id)
         .forEach(entry => cuttingRows.set(entry.id, {
-          type: entry.type,
+          type: entry.type === 'GIVE' ? 'GIVE' : 'RECEIVE',
           qty: Number(entry.totalQty) || Number(entry.quantity) || Number(entry.pairs) || 0
         }));
       cuttings
@@ -3022,6 +4063,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         cuttingEntries,
         orderDispatchHistory,
         stockLedger,
+        stockManagement,
+        articleStock,
+        deliveryHistory,
+        articlesMaster: [...new Map(
+          [...articlesMaster, ...articleCatalog, ...legacyArticleMaster]
+            .map(article => [article.articleName.trim().toLocaleLowerCase(), article] as const)
+        ).values()].sort((a, b) => a.articleName.localeCompare(b.articleName)),
         invoices,
         partyTransactions,
         staffLedger,
@@ -3042,7 +4090,16 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         deleteCuttingTransaction,
         updateCuttingEntry,
         deleteCuttingEntry,
+        updateCuttingReturn,
+        deleteCuttingReturn,
         clearCuttingData,
+        returnCutting,
+        createArticleMaster,
+        deliverFromStock,
+        addStockReceipt,
+        deleteFactoryStock,
+        updateStockDelivery,
+        deleteStockDelivery,
         addStitcher,
         updateStitcher,
         deleteStitcher,

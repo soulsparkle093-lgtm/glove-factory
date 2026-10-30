@@ -40,7 +40,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
   onClose,
   orderToEdit
 }) => {
-  const { parties, createCustomerOrder, updateCustomerOrder } = useFactory();
+  const { parties, articleStock, createCustomerOrder, updateCustomerOrder } = useFactory();
 
   const customers = parties.filter(p => p.type === 'customer' || p.type === 'buyer');
 
@@ -362,6 +362,16 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                         onChange={e => handleUpdateRow(idx, { title: e.target.value })}
                         className="w-full px-3 py-2 text-xs sm:text-sm font-semibold rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white"
                       />
+                      {row.title.trim() && (() => {
+                        const stock = articleStock.find(item =>
+                          item.articleName.trim().toLocaleLowerCase() === row.title.trim().toLocaleLowerCase()
+                        );
+                        return stock ? (
+                          <p className="mt-1 text-xs font-semibold text-emerald-700">
+                            Available in stock: {stock.totalAvailable.toLocaleString()} pairs
+                          </p>
+                        ) : null;
+                      })()}
                     </div>
 
                     {/* B. Color Box: BLANK by default, optional */}
