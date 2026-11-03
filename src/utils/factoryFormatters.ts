@@ -9,19 +9,90 @@ export const formatCurrency = (amount: number, currency: string = 'Rs.'): string
   return `${isNegative ? '-' : ''}${currency} ${formatted}`;
 };
 
-export const formatDate = (dateString?: string): string => {
+export const toComparableString = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return String(value);
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? '' : value.toISOString();
+  }
+  if (typeof value === 'object') {
+    const obj = value as { toDate?: () => Date; toMillis?: () => number; seconds?: number };
+    if (typeof obj.toDate === 'function') {
+      try {
+        const d = obj.toDate();
+        return isNaN(d.getTime()) ? '' : d.toISOString();
+      } catch {
+        // fallback
+      }
+    }
+    if (typeof obj.toMillis === 'function') {
+      try {
+        const d = new Date(obj.toMillis());
+        return isNaN(d.getTime()) ? '' : d.toISOString();
+      } catch {
+        // fallback
+      }
+    }
+    if (typeof obj.seconds === 'number') {
+      const d = new Date(obj.seconds * 1000);
+      return isNaN(d.getTime()) ? '' : d.toISOString();
+    }
+  }
+  return String(value);
+};
+
+export const safeStringCompare = (a: unknown, b: unknown): number => {
+  return toComparableString(a).localeCompare(toComparableString(b));
+};
+
+export const formatDate = (dateString?: unknown): string => {
   if (!dateString) return '';
+  const dateStr = toComparableString(dateString);
   try {
-    const d = new Date(dateString);
-    if (isNaN(d.getTime())) return dateString;
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
     return d.toLocaleDateString('en-GB', {
       day: '2-digit',
       month: 'short',
       year: 'numeric'
     });
   } catch {
-    return dateString;
+    return String(dateStr);
   }
+};
+
+export const formatStockInDateTime = (dateString?: string, createdAt?: unknown): { dateFormatted: string; timeFormatted: string; fullFormatted: string } => {
+  const dStr = dateString || toComparableString(createdAt) || new Date().toISOString().slice(0, 10);
+  let d = new Date(dStr.includes('T') ? dStr : `${dStr}T12:00:00`);
+  if (isNaN(d.getTime())) {
+    d = new Date();
+  }
+
+  const weekday = d.toLocaleDateString('en-GB', { weekday: 'short' });
+  const day = d.getDate();
+  const month = d.toLocaleDateString('en-GB', { month: 'short' });
+  const year2 = String(d.getFullYear()).slice(-2);
+  const dateFormatted = `${weekday}, ${day} ${month} ${year2}`;
+
+  let timeFormatted = '';
+  if (createdAt) {
+    const cStr = toComparableString(createdAt);
+    const cDate = new Date(cStr);
+    if (!isNaN(cDate.getTime()) && cStr.includes('T')) {
+      timeFormatted = cDate.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true
+      });
+    }
+  }
+
+  const fullFormatted = timeFormatted 
+    ? `${dateFormatted} • ${timeFormatted}`
+    : dateFormatted;
+
+  return { dateFormatted, timeFormatted, fullFormatted };
 };
 
 export const getOrderStatusBadge = (status: string) => {

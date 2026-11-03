@@ -404,7 +404,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                         <input
                           type="number"
                           min="0"
-                          placeholder="0"
+                          placeholder=""
                           value={row.sizes.small === 0 ? '' : row.sizes.small}
                           onChange={e => handleUpdateSize(idx, 'small', e.target.value)}
                           className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
@@ -419,7 +419,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                         <input
                           type="number"
                           min="0"
-                          placeholder="0"
+                          placeholder=""
                           value={row.sizes.medium === 0 ? '' : row.sizes.medium}
                           onChange={e => handleUpdateSize(idx, 'medium', e.target.value)}
                           className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
@@ -434,7 +434,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                         <input
                           type="number"
                           min="0"
-                          placeholder="0"
+                          placeholder=""
                           value={row.sizes.large === 0 ? '' : row.sizes.large}
                           onChange={e => handleUpdateSize(idx, 'large', e.target.value)}
                           className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
@@ -449,7 +449,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                         <input
                           type="number"
                           min="0"
-                          placeholder="0"
+                          placeholder=""
                           value={row.sizes.xl === 0 ? '' : row.sizes.xl}
                           onChange={e => handleUpdateSize(idx, 'xl', e.target.value)}
                           className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
@@ -464,7 +464,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                         <input
                           type="number"
                           min="0"
-                          placeholder="0"
+                          placeholder=""
                           value={row.sizes.xxl === 0 ? '' : row.sizes.xxl}
                           onChange={e => handleUpdateSize(idx, 'xxl', e.target.value)}
                           className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"

@@ -31,13 +31,17 @@ import {
   ArticleStockItem,
   DeliveryHistoryEntry,
   FactoryStockItem,
-  FactoryArticleMaster
+  FactoryArticleMaster,
+  StockInHistoryItem,
+  StockOutHistoryItem,
+  DistinctArticleStock
 } from '../types/factory';
 import { 
   defaultFactorySettings, 
   FactorySettings, 
   GLOVE_TEMPLATE_PRESETS 
 } from '../data/initialFactoryData';
+import { formatStockInDateTime, safeStringCompare, toComparableString } from '../utils/factoryFormatters';
 import { 
   db, 
   isFirebaseOnline, 
@@ -200,6 +204,10 @@ interface FactoryContextType {
   deleteFactoryStock: (id: string) => Promise<void>;
   updateStockDelivery: (id: string, updates: Pick<DeliveryHistoryEntry, 'date' | 'quantity' | 'customerName'>) => Promise<void>;
   deleteStockDelivery: (id: string) => Promise<void>;
+  getCuttingLedgerByCutter: (cutterId: string) => CuttingEntry[];
+  getStockInHistory: (articleName: string) => StockInHistoryItem[];
+  getStockOutHistory: (articleName: string) => StockOutHistoryItem[];
+  getDistinctArticles: () => DistinctArticleStock[];
 
   // Stitching orders and stitcher khata
   addStitcher: (data: { name: string; phone?: string; city?: string; perPairRate?: number; stitcherType?: Stitcher['stitcherType']; isActive?: boolean }) => Promise<Stitcher>;
@@ -479,14 +487,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             originalTotalPairs,
             totalQty: totalPairs,
             status: data.status || 'Pending',
-            createdAt: data.createdAt || new Date().toISOString(),
+            createdAt: toComparableString(data.createdAt) || new Date().toISOString(),
             createdBy: data.createdBy || 'Factory Admin',
             notes: data.notes || ''
           } as CustomerOrder;
         });
 
         // Newest orders on top
-        list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.createdAt, a.createdAt));
         setOrders(list);
         saveLocal(STORAGE_KEYS.ORDERS, list);
       }, err => {
@@ -536,9 +544,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         saveLocal(STORAGE_KEYS.STITCHERS, list);
       }, err => console.error('Firestore onSnapshot error (stitchers):', err)));
 
-      unsubs.push(onSnapshot(collection(db, 'stitching_orders'), snap => {
+        unsubs.push(onSnapshot(collection(db, 'stitching_orders'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StitchingOrder));
-        list.sort((a, b) => (b.issueDate || b.createdAt || '').localeCompare(a.issueDate || a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.issueDate || b.createdAt, a.issueDate || a.createdAt));
         setStitchingOrders(list);
         saveLocal(STORAGE_KEYS.STITCHING_ORDERS, list);
       }, err => console.error('Firestore onSnapshot error (stitching_orders):', err)));
@@ -549,14 +557,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           if (data.type !== 'ISSUE' && data.type !== 'RECEIVE' && data.type !== 'STATUS') return [];
           return [{ ...data, id: d.id } as StitchingHistoryEntry];
         });
-        list.sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setStitchingHistory(list);
         saveLocal(STORAGE_KEYS.STITCHING_HISTORY, list);
       }, err => console.error('Firestore onSnapshot error (stitching_history):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stitcher_khata_transactions'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StitcherKhataTransaction));
-        list.sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setStitcherKhataTransactions(list);
         saveLocal(STORAGE_KEYS.STITCHER_KHATA, list);
       }, err => console.error('Firestore onSnapshot error (stitcher_khata_transactions):', err)));
@@ -564,7 +572,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       // 6. cutting_transactions
       unsubs.push(onSnapshot(collection(db, 'cutting_transactions'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as CuttingTransaction));
-        list.sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setCuttingTransactions(list);
         saveLocal(STORAGE_KEYS.CUTTING_TXS, list);
       }, err => console.error('Firestore onSnapshot error (cutting_transactions):', err)));
@@ -590,17 +598,18 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             lotTotal: totalBalance,
             totalBalance,
             average: data.average || '',
-            runningBalance: Number(data.runningBalance) || 0
+            runningBalance: Number(data.runningBalance) || 0,
+            createdAt: toComparableString(data.createdAt) || new Date().toISOString()
           } as CuttingEntry;
         });
-        list.sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setCuttingEntries(list);
       }, err => console.error('Firestore onSnapshot error (cuttingEntries):', err)));
 
       // 8. order_dispatch_history
       unsubs.push(onSnapshot(collection(db, 'order_dispatch_history'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as OrderDispatchHistory));
-        list.sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setOrderDispatchHistory(list);
         saveLocal(STORAGE_KEYS.ORDER_HISTORY, list);
       }, err => console.error('Firestore onSnapshot error (order_dispatch_history):', err)));
@@ -655,7 +664,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       unsubs.push(onSnapshot(collection(db, 'stock_delivery_history'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as DeliveryHistoryEntry));
-        list.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || ''));
+        list.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.createdAt, a.createdAt));
         setDeliveryHistory(list);
       }, err => console.error('Firestore onSnapshot error (stock_delivery_history):', err)));
 
@@ -1315,7 +1324,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         createdAt: tx.createdAt
       } satisfies CuttingEntry));
     const nextEntries = [...cuttingEntries.filter(item => item.id !== entry.id), ...legacyEntries, entry]
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+      .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
     const cutterBalances = new Map<string, number>();
     const balancedEntries = nextEntries.map(item => {
       const balance = (cutterBalances.get(item.cutterId) || 0) + item.lotTotal;
@@ -1570,7 +1579,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const nextTxs = [txDoc, ...cuttingTransactions];
     setCuttingTransactions(nextTxs);
     saveLocal(STORAGE_KEYS.CUTTING_TXS, nextTxs);
-    setCuttingEntries([...balancedEntries].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    setCuttingEntries([...balancedEntries].sort((a, b) => safeStringCompare(b.date, a.date)));
 
     // Update local order tracking WITHOUT reducing originalQty
     if (data.orderId) {
@@ -1656,8 +1665,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const nextEntries = cuttingEntries.map(entry => entry.id === id ? updated : entry);
     const balanced = nextEntries
       .filter(entry => entry.cutterId === current.cutterId)
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '') ||
-        (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+      .sort((a, b) => safeStringCompare(a.date, b.date) ||
+        safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
     let runningBalance = 0;
     const balancedEntries = balanced.map(entry => {
       runningBalance += entry.lotTotal;
@@ -1766,7 +1775,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setCuttingEntries(previous => [
       ...previous.filter(entry => entry.cutterId !== current.cutterId),
       ...committedEntries
-    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    ].sort((a, b) => safeStringCompare(b.date, a.date)));
     setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
       ...cutter,
       totalGiven,
@@ -1803,8 +1812,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const nextEntries = cuttingEntries.filter(entry => entry.id !== id);
     const balanced = nextEntries
       .filter(entry => entry.cutterId === current.cutterId)
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '') ||
-        (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+      .sort((a, b) => safeStringCompare(a.date, b.date) ||
+        safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
     let runningBalance = 0;
     const balancedEntries = balanced.map(entry => {
       runningBalance += entry.lotTotal;
@@ -1867,7 +1876,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setCuttingEntries(previous => [
       ...previous.filter(entry => entry.cutterId !== current.cutterId),
       ...balancedEntries
-    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    ].sort((a, b) => safeStringCompare(b.date, a.date)));
     setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
       ...cutter,
       totalGiven,
@@ -1948,7 +1957,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       updated
     ]
       .filter(entry => entry.cutterId === current.cutterId)
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+      .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
     let balance = 0;
     const balanced = ordered.map(entry => {
       balance += entry.lotTotal;
@@ -2008,7 +2017,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setCuttingEntries(previous => [
       ...previous.filter(entry => entry.cutterId !== current.cutterId),
       ...balanced
-    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    ].sort((a, b) => safeStringCompare(b.date, a.date)));
     setCuttingTransactions(previous => previous.map(tx => tx.id === id ? {
       ...tx,
       date: updated.date,
@@ -2087,7 +2096,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       } satisfies CuttingEntry));
     const affected = [...remaining, ...legacyRemaining]
       .filter(item => item.cutterId === entry.cutterId)
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
+      .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
     let balance = 0;
     const balanced = affected.map(entry => {
       balance += entry.lotTotal;
@@ -2119,7 +2128,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setCuttingEntries(previous => [
       ...previous.filter(saved => saved.cutterId !== entry.cutterId),
       ...balanced
-    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    ].sort((a, b) => safeStringCompare(b.date, a.date)));
     setCuttingTransactions(previous => previous.filter(tx => tx.id !== id));
     setCutters(previous => previous.map(cutter => cutter.id === entry.cutterId ? {
       ...cutter,
@@ -2262,7 +2271,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
     const savedReturnedEntry = { ...returnedEntry, stockAdjustedQty, articleStockAdjustedQty };
     const nextEntries = [...cuttingEntries, savedReturnedEntry].sort((a, b) =>
-      (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || '')
+      safeStringCompare(b.date, a.date) || safeStringCompare(b.createdAt, a.createdAt)
     );
     setCuttingEntries(nextEntries);
     setCutters(previous => previous.map(cutter => {
@@ -2623,6 +2632,272 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         }
       });
     });
+  };
+
+  const getCuttingLedgerByCutter = (cutterId: string): CuttingEntry[] => {
+    if (!cutterId) {
+      console.log('Cutting ledger data for cutter:', cutterId, []);
+      return [];
+    }
+    try {
+      const entries = (cuttingEntries || []).filter(entry => entry && entry.cutterId === cutterId);
+      const savedIds = new Set(entries.map(entry => entry.id));
+      const legacyEntries = (cuttingTransactions || [])
+        .filter(tx => tx && tx.cutterId === cutterId && !savedIds.has(tx.id))
+        .map(tx => ({
+          id: tx.id,
+          cutterId: tx.cutterId,
+          cutterName: tx.cutterName,
+          type: tx.type,
+          date: tx.date,
+          customerName: tx.customerName || '',
+          article: tx.article,
+          articleTitle: tx.articleTitle || tx.article,
+          size: tx.size || '',
+          sizeName: tx.sizeName || tx.size || '',
+          average: tx.average || '',
+          remarks: tx.remarks || tx.notes || '',
+          pairs: tx.qty,
+          totalQty: tx.totalQty || tx.qty,
+          rate: tx.rate || 0,
+          lotTotal: tx.totalBalance || tx.lotTotal || tx.qty * (tx.rate || 0),
+          totalBalance: tx.totalBalance || tx.lotTotal || tx.qty * (tx.rate || 0),
+          customerOrder: tx.customerOrder || tx.orderNo || 'Direct Cutting',
+          runningBalance: 0,
+          billNo: tx.billNo || '',
+          createdAt: tx.createdAt
+        } satisfies CuttingEntry));
+
+      const combined = [...entries, ...legacyEntries].sort((a, b) =>
+        safeStringCompare(a.date, b.date) ||
+        safeStringCompare(a.createdAt, b.createdAt) ||
+        safeStringCompare(a.id, b.id)
+      );
+
+      let runningBalance = 0;
+      const result = combined.map(entry => {
+        const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
+        const rate = Number(entry.rate) || 0;
+        const lotTotal = Number(entry.totalBalance) || Number(entry.lotTotal) || pairs * rate;
+        runningBalance += lotTotal;
+        return { ...entry, pairs, rate, lotTotal, totalBalance: lotTotal, runningBalance };
+      });
+
+      console.log('Cutting ledger data for cutter:', cutterId, result);
+      return result || [];
+    } catch (err) {
+      console.error('Error in getCuttingLedgerByCutter:', err);
+      return [];
+    }
+  };
+
+  const getStockInHistory = (articleName: string): StockInHistoryItem[] => {
+    if (!articleName) return [];
+    const target = articleName.trim().toLowerCase();
+    const items: StockInHistoryItem[] = [];
+    const seenIds = new Set<string>();
+
+    // 1. From cuttingEntries (every entry in Receive Cutting)
+    (cuttingEntries || []).forEach(entry => {
+      const art = (entry.article || entry.articleTitle || '').trim().toLowerCase();
+      if (art === target && (entry.type === 'RECEIVE' || (!entry.type && Number(entry.pairs || 0) > 0))) {
+        if (!seenIds.has(entry.id)) {
+          seenIds.add(entry.id);
+          const { timeFormatted, fullFormatted } = formatStockInDateTime(entry.date, entry.createdAt);
+          const cutter = entry.cutterName ? `From Cutting Master (${entry.cutterName})` : 'From Cutting Master';
+          items.push({
+            id: entry.id,
+            date: entry.date,
+            time: timeFormatted,
+            formattedDateTime: fullFormatted,
+            source: cutter,
+            quantity: Math.abs(Number(entry.pairs ?? entry.totalQty ?? 0)),
+            rate: Number(entry.rate) || 0,
+            size: entry.size || entry.sizeName || '',
+            billNo: entry.billNo || '',
+            notes: entry.remarks || '',
+            rawEntry: entry
+          });
+        }
+      }
+    });
+
+    // 2. From legacy cutting transactions
+    (cuttingTransactions || []).forEach(tx => {
+      const art = (tx.article || tx.articleTitle || '').trim().toLowerCase();
+      if (art === target && tx.type === 'RECEIVE') {
+        if (!seenIds.has(tx.id)) {
+          seenIds.add(tx.id);
+          const { timeFormatted, fullFormatted } = formatStockInDateTime(tx.date, tx.createdAt);
+          const cutter = tx.cutterName ? `From Cutting Master (${tx.cutterName})` : 'From Cutting Master';
+          items.push({
+            id: tx.id,
+            date: tx.date,
+            time: timeFormatted,
+            formattedDateTime: fullFormatted,
+            source: cutter,
+            quantity: Math.abs(Number(tx.qty ?? tx.totalQty ?? 0)),
+            rate: Number(tx.rate) || 0,
+            size: tx.size || tx.sizeName || '',
+            billNo: tx.billNo || '',
+            notes: tx.remarks || tx.notes || '',
+            rawEntry: tx
+          });
+        }
+      }
+    });
+
+    // 3. From articleStock.cuttingHistory
+    (articleStock || []).forEach(stock => {
+      if ((stock.articleName || '').trim().toLowerCase() === target) {
+        (stock.cuttingHistory || []).forEach((hist, index) => {
+          const recId = hist.receiveId || `art-hist-${index}-${hist.date}`;
+          if (!seenIds.has(recId)) {
+            seenIds.add(recId);
+            const { timeFormatted, fullFormatted } = formatStockInDateTime(hist.date);
+            const sourceName = hist.source?.toLowerCase().includes('cutting')
+              ? hist.source
+              : `From Cutting Master (${hist.source || 'General'})`;
+            items.push({
+              id: recId,
+              date: hist.date,
+              time: timeFormatted,
+              formattedDateTime: fullFormatted,
+              source: sourceName,
+              quantity: Math.abs(Number(hist.pairs || 0)),
+              rate: 0,
+              size: '',
+              rawEntry: hist
+            });
+          }
+        });
+      }
+    });
+
+    // Sort newest date on top
+    return items.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.id, a.id));
+  };
+
+  const getStockOutHistory = (articleName: string): StockOutHistoryItem[] => {
+    if (!articleName) return [];
+    const target = articleName.trim().toLowerCase();
+    const items: StockOutHistoryItem[] = [];
+    const seenIds = new Set<string>();
+
+    // 1. From deliveryHistory
+    (deliveryHistory || []).forEach(entry => {
+      const art = (entry.article || '').trim().toLowerCase();
+      if (art === target) {
+        if (!seenIds.has(entry.id)) {
+          seenIds.add(entry.id);
+          const orderLabel = entry.orderNo
+            ? `Order #${entry.orderNo}${entry.customerName ? ` - ${entry.customerName}` : ''}`
+            : (entry.customerName || 'Direct Delivery');
+          items.push({
+            id: entry.id,
+            date: entry.date,
+            orderName: orderLabel,
+            orderNo: entry.orderNo || '',
+            customerName: entry.customerName || '',
+            quantity: Math.abs(Number(entry.quantity || 0)),
+            destination: entry.customerName ? `Delivered to ${entry.customerName}` : 'Customer Dispatched',
+            size: entry.size || '',
+            rawEntry: entry
+          });
+        }
+      }
+    });
+
+    // 2. From articleStock.deliveryHistory
+    (articleStock || []).forEach(stock => {
+      if ((stock.articleName || '').trim().toLowerCase() === target) {
+        (stock.deliveryHistory || []).forEach((hist, index) => {
+          const delId = hist.deliveryId || `art-del-${index}-${hist.date}`;
+          if (!seenIds.has(delId)) {
+            seenIds.add(delId);
+            const orderLabel = hist.orderNo
+              ? `Order #${hist.orderNo}${hist.customerName ? ` - ${hist.customerName}` : ''}`
+              : (hist.customerName || 'Direct Delivery');
+            items.push({
+              id: delId,
+              date: hist.date,
+              orderName: orderLabel,
+              orderNo: hist.orderNo || '',
+              customerName: hist.customerName || '',
+              quantity: Math.abs(Number(hist.pairs || 0)),
+              destination: hist.customerName ? `Delivered to ${hist.customerName}` : 'Customer Dispatched',
+              size: '',
+              rawEntry: hist
+            });
+          }
+        });
+      }
+    });
+
+    // Sort newest date on top
+    return items.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.id, a.id));
+  };
+
+  const getDistinctArticles = (): DistinctArticleStock[] => {
+    const articleMap = new Map<string, { displayName: string; sizes: Set<string>; sampleRate: number }>();
+
+    const recordArticle = (rawName?: string, rawSize?: string, rate?: number) => {
+      if (!rawName) return;
+      const clean = rawName.trim();
+      if (!clean) return;
+      const key = clean.toLowerCase();
+      if (!articleMap.has(key)) {
+        articleMap.set(key, { displayName: clean, sizes: new Set(), sampleRate: rate || 0 });
+      }
+      const entry = articleMap.get(key)!;
+      if (rawSize) entry.sizes.add(rawSize.trim());
+      if (rate && !entry.sampleRate) entry.sampleRate = rate;
+    };
+
+    (articlesMaster || []).forEach(a => recordArticle(a.articleName));
+    (articleStock || []).forEach(a => recordArticle(a.articleName));
+    (stockManagement || []).forEach(s => recordArticle(s.articleName || s.article, s.size, Number(s.rate) || 0));
+    (cuttingEntries || []).forEach(c => recordArticle(c.article || c.articleTitle, c.size || c.sizeName, Number(c.rate) || 0));
+    (deliveryHistory || []).forEach(d => recordArticle(d.article, d.size));
+    (products || []).forEach(p => recordArticle(p.gloveName, p.size, Number(p.salePrice || p.purchasePrice) || 0));
+
+    const result: DistinctArticleStock[] = [];
+
+    articleMap.forEach(({ displayName, sizes, sampleRate }) => {
+      const inHistory = getStockInHistory(displayName);
+      const outHistory = getStockOutHistory(displayName);
+
+      const totalIn = inHistory.reduce((sum, item) => sum + item.quantity, 0);
+      const totalOut = outHistory.reduce((sum, item) => sum + item.quantity, 0);
+      const availableStock = Math.max(0, totalIn - totalOut);
+
+      let unitRate = sampleRate || 0;
+      if (!unitRate) {
+        const matchingStock = stockManagement.find(s => (s.article || s.articleName || '').trim().toLowerCase() === displayName.toLowerCase());
+        if (matchingStock && matchingStock.rate) unitRate = Number(matchingStock.rate);
+      }
+      if (!unitRate) {
+        const matchingProduct = products.find(p => p.gloveName.trim().toLowerCase() === displayName.toLowerCase());
+        if (matchingProduct) unitRate = matchingProduct.salePrice || matchingProduct.purchasePrice || 0;
+      }
+      if (!unitRate) unitRate = 450;
+
+      const stockValue = availableStock * unitRate;
+
+      result.push({
+        articleName: displayName,
+        totalIn,
+        totalOut,
+        availableStock,
+        unitRate,
+        stockValue,
+        sizes: Array.from(sizes).filter(Boolean),
+        lastReceivedDate: inHistory[0]?.date,
+        lastDeliveredDate: outHistory[0]?.date
+      });
+    });
+
+    return result.sort((a, b) => a.articleName.localeCompare(b.articleName));
   };
 
   const deleteCuttingTransaction = async (id: string): Promise<void> => {
@@ -3047,7 +3322,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         throw new Error('Received and loss quantities cannot exceed the issued quantity.');
       }
       const latestReceipt = [...stitchingHistory.filter(entry => entry.stitchingOrderId === order.id && entry.type === 'RECEIVE' && entry.id !== current.id), updatedEntry]
-        .sort((a, b) => b.date.localeCompare(a.date))[0];
+        .sort((a, b) => safeStringCompare(b.date, a.date))[0];
       updatedOrder = {
         ...order,
         article: updates.article.trim(),
@@ -3108,7 +3383,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const receivedQuantity = Math.max(0, (order.receivedQuantity || 0) - entry.quantity);
       const lossQuantity = Math.max(0, (order.lossQuantity || 0) - (entry.lossQuantity || 0));
       const remainingReceipts = stitchingHistory.filter(item => item.stitchingOrderId === order.id && item.type === 'RECEIVE' && item.id !== entry.id);
-      const latestReceipt = remainingReceipts.sort((a, b) => b.date.localeCompare(a.date))[0];
+      const latestReceipt = remainingReceipts.sort((a, b) => safeStringCompare(b.date, a.date))[0];
       const updatedOrder: StitchingOrder = {
         ...order,
         receivedQuantity,
@@ -4140,7 +4415,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         deleteCashbookEntry,
         markAttendance,
         updateSettings,
-        clearAllFactoryData
+        clearAllFactoryData,
+        getCuttingLedgerByCutter,
+        getStockInHistory,
+        getStockOutHistory,
+        getDistinctArticles
       }}
     >
       {children}

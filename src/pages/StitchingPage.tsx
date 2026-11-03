@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { Stitcher, StitcherCategory, StitchingHistoryEntry, StitchingOrder, StitchingOrderStatus } from '../types/factory';
-import { formatCurrency, formatDate } from '../utils/factoryFormatters';
+import { formatCurrency, formatDate, safeStringCompare } from '../utils/factoryFormatters';
 
 type StitchingView = 'dashboard' | 'orders' | 'ready' | 'khata';
 
@@ -174,7 +174,7 @@ export const StitchingPage: React.FC = () => {
           customerName: tx.orderId ? orders.find(order => order.id === tx.orderId)?.customerName || '' : '',
           type: 'payment' as const
         }))
-    ].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+    ].sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.id, b.id));
     let balance = 0;
     return rows.map(row => {
       balance += row.debit - row.credit;
@@ -923,7 +923,7 @@ export const StitchingPage: React.FC = () => {
                   const issuedPairs = personOrders.reduce((sum, order) => sum + order.qty, 0);
                   const receivedPairs = personOrders.reduce((sum, order) => sum + (order.receivedQuantity || (order.status === 'Completed' || order.status === 'Received' ? order.qty : 0)), 0);
                   const pendingPairs = Math.max(0, issuedPairs - receivedPairs);
-                  const lastWork = stitchingHistory.filter(entry => entry.stitcherId === stitcher.id).sort((a, b) => b.date.localeCompare(a.date))[0]?.date;
+                  const lastWork = stitchingHistory.filter(entry => entry.stitcherId === stitcher.id).sort((a, b) => safeStringCompare(b.date, a.date))[0]?.date;
                   const isActive = stitcher.isActive !== false;
                   return <div key={stitcher.id} onClick={() => handleNameClick(stitcher)} className={`group flex cursor-pointer items-center justify-between gap-4 p-4 transition sm:px-6 ${isActive ? 'hover:bg-amber-50/50' : 'bg-slate-100 opacity-70'}`}>
                     <div className="flex min-w-0 items-center gap-3 sm:gap-4">

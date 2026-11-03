@@ -23,7 +23,7 @@ import {
   Plus
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
-import { formatCurrency, formatDate, getOrderStatusBadge } from '../utils/factoryFormatters';
+import { formatCurrency, formatDate, getOrderStatusBadge, safeStringCompare } from '../utils/factoryFormatters';
 import { db, collection, doc, onSnapshot, updateDoc } from '../firebase';
 import { OrderItem, SizeMatrix, StitchingHistoryEntry, StitchingOrderStatus } from '../types/factory';
 import { OrderHistoryDetailReport } from '../components/orders/OrderHistoryDetailReport';
@@ -136,7 +136,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     try {
       const unsub = onSnapshot(collection(db, 'customer_orders', orderId, 'order_history'), snap => {
         const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        list.sort((a: any, b: any) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+        list.sort((a: any, b: any) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setSubHistory(list);
       }, err => {
         console.warn('Sub-history onSnapshot notice:', err);
@@ -163,9 +163,19 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     );
   }
 
+  // Filter out any ghost 'Size Matrix' entries with <=0 pairs
+  const validOrderItems = useMemo(() => {
+    return (order.items || []).filter(item => {
+      const title = (item.title || item.gloveType || '').trim();
+      const origQty = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
+      const isGhost = (title.includes('Size Matrix') || title.includes('/ Matrix')) && origQty <= 0;
+      return !isGhost;
+    });
+  }, [order.items]);
+
   // --- 1. SECTION A DATA: IMMUTABLE ORIGINAL ORDER VALUES ---
   // Sum of originalQty across all items (Never subtracts)
-  const totalOriginalPairs = (order.items || []).reduce((sum, item) => {
+  const totalOriginalPairs = validOrderItems.reduce((sum, item) => {
     const orig = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
     return sum + orig;
   }, 0) || Number(order.totalPairs) || 0;
@@ -175,10 +185,10 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
   const orderCuttings = cuttings.filter(c => c.orderId === orderId);
   const orderStitchingOrders = stitchingOrders
     .filter(stitchingOrder => stitchingOrder.orderId === orderId)
-    .sort((a, b) => (a.issueDate || '').localeCompare(b.issueDate || ''));
+    .sort((a, b) => safeStringCompare(a.issueDate, b.issueDate));
   const orderStitchingHistory = stitchingHistory
     .filter(entry => entry.orderId === orderId)
-    .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || ''));
+    .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt));
   const orderCuttingTxs = cuttingTransactions.filter(t => t.orderId === orderId);
   const orderCuttingRecords = useMemo(() => {
     const recordsById = new Map<string, CuttingHistoryRow>();
@@ -229,9 +239,14 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         isLegacyCut: true
       });
     });
-    return [...recordsById.values()].sort((a, b) =>
-      (a.date || '').localeCompare(b.date || '') || a.id.localeCompare(b.id)
-    );
+    return [...recordsById.values()]
+      .filter(record => {
+        const isGhost = (record.article.includes('Size Matrix') || record.article.includes('/ Matrix')) && record.qty <= 0;
+        return !isGhost;
+      })
+      .sort((a, b) =>
+        safeStringCompare(a.date, b.date) || safeStringCompare(a.id, b.id)
+      );
   }, [cuttingEntries, orderCuttingTxs, orderCuttings, orderId]);
   const cuttingArticleGroups = useMemo(() => {
     const groups = new Map<string, CuttingArticleSizeGroup>();
@@ -262,7 +277,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
       return group;
     };
 
-    (order.items || []).forEach(item => {
+    validOrderItems.forEach(item => {
       const article = item.title || item.gloveType || 'Unspecified Article';
       const sizes = item.sizes || { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
       const sizeEntries = Object.entries(sizes).filter(([, quantity]) => Number(quantity) > 0);
@@ -279,10 +294,15 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
       addGroup(record.article, record.size).rows.push(record);
     });
 
-    return [...groups.values()].sort((a, b) =>
-      a.article.localeCompare(b.article) || a.size.localeCompare(b.size)
-    );
-  }, [order.items, order.cuttingArticleSizes, orderCuttingRecords]);
+    return [...groups.values()]
+      .filter(group => {
+        const isGhostMatrix = (group.article.includes('Size Matrix') || group.article.includes('/ Matrix')) && group.orderedPairs <= 0 && group.rows.length === 0;
+        return !isGhostMatrix;
+      })
+      .sort((a, b) =>
+        a.article.localeCompare(b.article) || a.size.localeCompare(b.size)
+      );
+  }, [validOrderItems, order.cuttingArticleSizes, orderCuttingRecords]);
 
   const stitchingArticleGroups = useMemo(() => {
     const groups = new Map<string, StitchingArticleSizeGroup>();
@@ -669,7 +689,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium">
-              {(order.items || []).map((item, idx) => {
+              {validOrderItems.map((item, idx) => {
                 const origQty = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
                 const sz = item.sizes || { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
                 return (

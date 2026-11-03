@@ -27,7 +27,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
-import { formatDate } from '../utils/factoryFormatters';
+import { formatDate, safeStringCompare } from '../utils/factoryFormatters';
 import { Cutter, CutterCategory, CuttingEntry, CuttingTransaction } from '../types/factory';
 import { collection, db, deleteDoc, doc, onSnapshot, runTransaction, serverTimestamp } from '../firebase';
 
@@ -138,7 +138,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     updateCuttingReturn,
     deleteCuttingReturn,
     returnCutting,
-    showToast 
+    showToast,
+    getCuttingLedgerByCutter
   } = useFactory();
 
   // Selected Option at top level: Cutting Man | Cutting Maker | Product
@@ -183,8 +184,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const [formBillNo, setFormBillNo] = useState('');
   // 7. Factory / Notes (e.g. "Shoaib Factory")
   const [formFactoryNotes, setFormFactoryNotes] = useState('');
-  // 8. Checkbox "Add to Stock Ledger?" (Receive only)
-  const [deliveryChoice, setDeliveryChoice] = useState<'customer' | 'stock'>('customer');
+  // 8. Delivery choice for Receive Cutting: LINKED_TO_PO | DIRECT_CUTTING_NO_PO | SEND_TO_STOCK
+  const [deliveryChoice, setDeliveryChoice] = useState<'LINKED_TO_PO' | 'DIRECT_CUTTING_NO_PO' | 'SEND_TO_STOCK'>('LINKED_TO_PO');
   const [showNewArticleForm, setShowNewArticleForm] = useState(false);
   const [newArticleForm, setNewArticleForm] = useState({ articleName: '', sizeName: '', pairs: '' });
 
@@ -269,43 +270,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   }, [cuttingTransactions, activeCutterId]);
   const activeCutterEntries = useMemo(() => {
     if (!activeCutterId) return [];
-    const entries = cuttingEntries.filter(entry => entry.cutterId === activeCutterId);
-    const savedIds = new Set(entries.map(entry => entry.id));
-    const legacyEntries = activeCutterTransactions
-      .filter(tx => !savedIds.has(tx.id))
-      .map(tx => ({
-        id: tx.id,
-        cutterId: tx.cutterId,
-        cutterName: tx.cutterName,
-        type: tx.type,
-        date: tx.date,
-        customerName: tx.customerName || '',
-        article: tx.article,
-        articleTitle: tx.articleTitle || tx.article,
-        size: tx.size || '',
-        sizeName: tx.sizeName || tx.size || '',
-        average: tx.average || '',
-        remarks: tx.remarks || tx.notes || '',
-        pairs: tx.qty,
-        totalQty: tx.totalQty || tx.qty,
-        rate: tx.rate || 0,
-        lotTotal: tx.totalBalance || tx.lotTotal || tx.qty * (tx.rate || 0),
-        totalBalance: tx.totalBalance || tx.lotTotal || tx.qty * (tx.rate || 0),
-        runningBalance: 0,
-        billNo: tx.billNo || '',
-        createdAt: tx.createdAt
-      }));
-    const chronological = [...entries, ...legacyEntries]
-      .sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || '') || a.id.localeCompare(b.id));
-    let runningBalance = 0;
-    return chronological.map(entry => {
-      const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
-      const rate = Number(entry.rate) || 0;
-      const lotTotal = Number(entry.totalBalance) || Number(entry.lotTotal) || pairs * rate;
-      runningBalance += lotTotal;
-      return { ...entry, pairs, rate, lotTotal, totalBalance: lotTotal, runningBalance };
-    });
-  }, [activeCutterTransactions, cuttingEntries, activeCutterId]);
+    try {
+      const data = getCuttingLedgerByCutter(activeCutterId);
+      console.log('Cutting ledger data for cutter:', activeCutterId, data);
+      return data || [];
+    } catch (err) {
+      console.error('Error fetching cutting ledger in CuttingsPage:', err);
+      return [];
+    }
+  }, [getCuttingLedgerByCutter, activeCutterId, cuttingEntries, cuttingTransactions]);
 
   useEffect(() => {
     if (!db || !activeCutterId) {
@@ -359,7 +332,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         });
         distinctEntries.push(...kept);
       });
-      distinctEntries.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+      distinctEntries.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.createdAt, a.createdAt));
       setLedgerPayments(distinctEntries);
       duplicateIds.forEach(id => {
         void deleteDoc(doc(db, 'nasim_ledger_payments', id)).catch(error => {
@@ -383,12 +356,33 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     });
   }, [ledgerPayments, ledgerDateFilter, filterFromDate, filterToDate]);
 
-  const totalCuttingAmount = dateFilteredEntries.reduce((sum, entry) =>
-    sum + (Number(entry.pairs) || 0) * (Number(entry.rate) || 0), 0);
-  const totalPaid = dateFilteredPayments
-    .filter(payment => payment.type === 'cash_in')
-    .reduce((sum, payment) => sum + payment.amount, 0);
-  const remainingBalance = totalCuttingAmount - totalPaid;
+  const cuttingEntriesBillsTotal = useMemo(() => {
+    return dateFilteredEntries
+      .filter(entry => entry.type !== 'RETURN')
+      .reduce((sum, entry) => sum + (Number(entry.pairs) || 0) * (Number(entry.rate) || 0), 0);
+  }, [dateFilteredEntries]);
+
+  const cuttingReturnsTotal = useMemo(() => {
+    return dateFilteredEntries
+      .filter(entry => entry.type === 'RETURN')
+      .reduce((sum, entry) => sum + Math.abs(Number(entry.pairs) || 0) * (Number(entry.rate) || 0), 0);
+  }, [dateFilteredEntries]);
+
+  const totalPaid = useMemo(() => {
+    return dateFilteredPayments
+      .filter(payment => payment.type === 'cash_in')
+      .reduce((sum, payment) => sum + payment.amount, 0);
+  }, [dateFilteredPayments]);
+
+  const totalCashOut = useMemo(() => {
+    return dateFilteredPayments
+      .filter(payment => payment.type === 'cash_out')
+      .reduce((sum, payment) => sum + payment.amount, 0);
+  }, [dateFilteredPayments]);
+
+  // Formula: PENDING BALANCE = SUM(FULL BILL) - SUM(Cash Paid) - SUM(Return Cutting)
+  const totalCuttingAmount = cuttingEntriesBillsTotal - cuttingReturnsTotal;
+  const remainingBalance = cuttingEntriesBillsTotal - totalPaid - cuttingReturnsTotal;
   const extraPaid = Math.max(0, -remainingBalance);
   const allArticleOptions = useMemo(() => {
     const options = new Map<string, { id: string; articleName: string; articleCode?: string }>();
@@ -467,7 +461,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     setFormCustomerName('');
     setFormBillNo('');
     setFormFactoryNotes(activeCutter?.name ? `${activeCutter.name} Unit` : '');
-    setDeliveryChoice('customer');
+    setDeliveryChoice('LINKED_TO_PO');
     setShowNewArticleForm(false);
     setNewArticleForm({ articleName: '', sizeName: '', pairs: '' });
     setArticleSearch('');
@@ -538,32 +532,58 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       showToast('Enter a valid pair quantity.', 'error');
       return;
     }
-    if (!formArticle.trim()) {
-      showToast('Enter an article.', 'error');
+
+    // Article: support free-text and auto-save
+    const finalArticle = (formArticle.trim() || articleSearch.trim());
+    if (!finalArticle) {
+      showToast('Enter an article name.', 'error');
       return;
     }
-    if (!formSize.trim()) {
-      showToast('Enter a size.', 'error');
-      return;
-    }
-    if (!formAverage.trim()) {
-      showToast('Enter an average.', 'error');
-      return;
-    }
-    if (!formRate || !Number.isFinite(parsedRate) || parsedRate <= 0) {
-      showToast('Enter a valid rate.', 'error');
-      return;
-    }
-    if (txModalType === 'RECEIVE' && deliveryChoice === 'customer' && !formOrderId) {
-      showToast('Select a customer order for direct delivery.', 'error');
+
+    if (txModalType === 'RECEIVE' && deliveryChoice === 'LINKED_TO_PO' && !formOrderId) {
+      showToast('Select a customer order for direct linked delivery.', 'error');
       return;
     }
 
     setIsSubmittingTx(true);
     try {
-      // Find selected order
-      const targetOrder = deliveryChoice === 'customer' ? orders.find(o => o.id === formOrderId) : undefined;
-      const totalBalance = parsedQty * parsedRate;
+      // Auto-save new article in master catalog if it doesn't already exist
+      if (createArticleMaster) {
+        const existsInMaster = articlesMaster.some(
+          a => a.articleName.trim().toLowerCase() === finalArticle.toLowerCase()
+        );
+        if (!existsInMaster) {
+          try {
+            await createArticleMaster({
+              articleName: finalArticle,
+              sizes: [{ sizeName: formSize.trim() || '-', pairs: 1 }]
+            });
+            console.log(`Auto-saved new article to master catalog: "${finalArticle}"`);
+          } catch (autoSaveErr) {
+            console.warn('Auto-save article warning:', autoSaveErr);
+          }
+        }
+      }
+
+      // Find selected order if linked to PO
+      const targetOrder = deliveryChoice === 'LINKED_TO_PO' ? orders.find(o => o.id === formOrderId) : undefined;
+      const finalRate = Number.isFinite(parsedRate) && parsedRate >= 0 ? parsedRate : 0;
+      const totalBalance = parsedQty * finalRate;
+
+      // Determine customer name and destination description
+      let effectiveCustomerName = 'Direct Cutting';
+      let effectiveCustomerOrder = 'Direct Cutting / Not Linked to Specific PO';
+
+      if (deliveryChoice === 'LINKED_TO_PO') {
+        effectiveCustomerName = targetOrder?.customerName || formCustomerName.trim() || 'PRO4';
+        effectiveCustomerOrder = targetOrder ? `${targetOrder.customerName} - ${targetOrder.orderNo}` : 'Customer PO';
+      } else if (deliveryChoice === 'SEND_TO_STOCK') {
+        effectiveCustomerName = 'Stock Management';
+        effectiveCustomerOrder = 'Stock Management - Direct to Stock';
+      } else {
+        effectiveCustomerName = formCustomerName.trim() || 'Direct Cutting';
+        effectiveCustomerOrder = 'Direct Cutting / Other Order - Without PO';
+      }
 
       await saveCuttingTransaction({
         cutterId: activeCutter.id,
@@ -573,20 +593,20 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         date: formDate,
         qty: parsedQty,
         totalQty: parsedQty,
-        rate: parsedRate,
-        article: formArticle.trim(),
-        articleTitle: formArticle.trim(),
-        orderId: deliveryChoice === 'customer' ? formOrderId || undefined : undefined,
+        rate: finalRate,
+        article: finalArticle,
+        articleTitle: finalArticle,
+        orderId: deliveryChoice === 'LINKED_TO_PO' ? formOrderId || undefined : undefined,
         orderNo: targetOrder?.orderNo || undefined,
-        customerName: targetOrder?.customerName || formCustomerName.trim() || 'PRO4',
-        size: formSize.trim(),
-        sizeName: formSize.trim(),
+        customerName: effectiveCustomerName,
+        size: formSize.trim() || '-',
+        sizeName: formSize.trim() || '-',
         average: parsedAverage > 0 ? String(parsedAverage) : formAverage.trim(),
         totalBalance,
-        customerOrder: targetOrder?.customerName || formCustomerName.trim() || 'PRO4',
+        customerOrder: effectiveCustomerOrder,
         billNo: formBillNo.trim() || undefined,
         factoryName: formFactoryNotes.trim() || undefined,
-        addToStock: txModalType === 'RECEIVE' ? deliveryChoice === 'stock' : false,
+        addToStock: txModalType === 'RECEIVE' ? deliveryChoice === 'SEND_TO_STOCK' : false,
         notes: formFactoryNotes.trim() || undefined
       });
       setFormQty('');
@@ -598,7 +618,13 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       setFormOrderId('');
       setFormBillNo('');
       setFormFactoryNotes('');
+      setArticleSearch('');
       handleCloseTxModal();
+      showToast(
+        deliveryChoice === 'SEND_TO_STOCK' 
+          ? 'Cutting received and sent directly to Stock Management.' 
+          : 'Cutting entry saved successfully.'
+      );
     } catch (err) {
       console.error('Error saving transaction:', err);
       showToast(err instanceof Error ? err.message : 'The cutting entry could not be saved. Please try again.', 'error');
@@ -663,40 +689,6 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       setIsSavingEdit(false);
     }
   };
-
-  class CuttingLedgerErrorBoundary extends React.Component<
-    { children: React.ReactNode },
-    { hasError: boolean }
-  > {
-    state = { hasError: false };
-
-    static getDerivedStateFromError(): { hasError: boolean } {
-      return { hasError: true };
-    }
-
-    render() {
-      if (this.state.hasError) {
-        return (
-          <div role="alert" className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
-            <h2 className="text-lg font-black text-slate-900">Cutting ledger could not be displayed</h2>
-            <p className="mt-2 text-sm text-slate-600">Return to the cutting roster or reload the page to try again.</p>
-            <button type="button" onClick={() => window.location.reload()} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white">
-              Reload page
-            </button>
-          </div>
-        );
-      }
-      return this.props.children;
-    }
-  }
-
-  export const CuttingsPage: React.FC<CuttingsPageProps> = props => (
-    <CuttingLedgerErrorBoundary>
-      <React.Suspense fallback={<div className="p-8 text-center text-sm font-semibold text-slate-500">Loading cutting ledger…</div>}>
-        <CuttingsPageContent {...props} />
-      </React.Suspense>
-    </CuttingLedgerErrorBoundary>
-  );
 
   const handleDeleteEntry = async () => {
     if (!deletingEntry) return;
@@ -792,9 +784,9 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     rangeLabel: string
   ) => {
     const chronologicalEntries = [...entries].sort((a, b) =>
-      (a.date || '').localeCompare(b.date || '') ||
-      (a.createdAt || '').localeCompare(b.createdAt || '') ||
-      a.id.localeCompare(b.id)
+      safeStringCompare(a.date, b.date) ||
+      safeStringCompare(a.createdAt, b.createdAt) ||
+      safeStringCompare(a.id, b.id)
     );
     const totalCutting = chronologicalEntries.reduce((sum, entry) => {
       const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
@@ -1324,7 +1316,18 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 return (
                   <div
                     key={cutter.id}
-                    onClick={() => setActiveCutterId(cutter.id)}
+                    onClick={() => {
+                      try {
+                        if (!cutter || !cutter.id) {
+                          console.warn('Cannot navigate: cutter or cutter.id missing', cutter);
+                          return;
+                        }
+                        console.log('Navigating to cutter ledger:', cutter.name, cutter.id);
+                        setActiveCutterId(cutter.id);
+                      } catch (err) {
+                        console.error('Error navigating to cutter:', err);
+                      }
+                    }}
                     className={`p-4 sm:px-6 flex items-center justify-between transition cursor-pointer group ${
                       isActive ? 'hover:bg-amber-50/50' : 'bg-slate-100 opacity-70'
                     }`}
@@ -1408,8 +1411,27 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       {/* =========================================================================
           VIEW B: CUTTER LEDGER PAGE
           ========================================================================= */}
-      {activeCutterId && activeCutter && (
-        <div className="space-y-6">
+      {activeCutterId && (
+        !activeCutter || !activeCutterEntries ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-600 shadow-sm my-6">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <BookOpen className="h-6 w-6" />
+            </div>
+            <p className="text-base font-semibold text-slate-800">
+              No data found for this cutter. Please add cutting entries first.
+            </p>
+            <div className="mt-4 flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveCutterId(null)}
+                className="rounded-xl border border-slate-200 bg-slate-100 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-200 transition"
+              >
+                &larr; Back to Cutters List
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-6">
           {/* Cutter ledger header with back button */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -1670,32 +1692,33 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                             Rs. {entry.runningBalance}
                           </td>
                           <td className="py-3.5 px-4 text-center">
-                            <>
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                onClick={() => openEditEntry(entry)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
+                                title="View / Edit entry"
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => setDeletingEntry(entry)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                title="Delete entry"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                              {entry.type === 'RECEIVE' && (
                                 <button
-                                  onClick={() => openEditEntry(entry)}
-                                  className="p-1 rounded text-slate-400 hover:text-blue-600 transition cursor-pointer"
-                                  title="Edit entry"
+                                  type="button"
+                                  onClick={() => openReturnModal(entry)}
+                                  className="ml-1 inline-flex items-center gap-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 text-[11px] font-bold shadow-xs transition cursor-pointer"
+                                  title="Return cutting pairs"
                                 >
-                                  <Pencil className="w-4 h-4" />
+                                  <ArrowLeft className="w-3 h-3" />
+                                  <span>Return Cutting</span>
                                 </button>
-                                <button
-                                  onClick={() => setDeletingEntry(entry)}
-                                  className="p-1 rounded text-slate-400 hover:text-rose-600 transition cursor-pointer"
-                                  title="Delete entry"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                                {entry.type === 'RECEIVE' && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openReturnModal(entry)}
-                                    className="ml-1 rounded-lg bg-rose-100 px-2 py-1 text-[10px] font-black text-rose-700 hover:bg-rose-200"
-                                    title="Return cutting pairs"
-                                  >
-                                    ↩ Return
-                                  </button>
-                                )}
-                            </>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1738,14 +1761,34 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {dateFilteredPayments.map(payment => (
-                    <tr key={payment.id}>
-                      <td className="px-4 py-3">{formatDate(payment.date)}</td>
-                      <td className="px-4 py-3 text-right font-mono font-bold">Rs. {payment.amount.toLocaleString()}</td>
-                      <td className="px-4 py-3">{payment.paymentMethod}</td>
-                      <td className="px-4 py-3">{payment.billNo || '-'}</td>
-                      <td className={`px-4 py-3 font-bold ${payment.type === 'cash_in' ? 'text-emerald-700' : 'text-rose-700'}`}>{payment.type === 'cash_in' ? 'Cash In' : 'Cash Out'}</td>
+                    <tr key={payment.id} className="hover:bg-slate-50 transition">
+                      <td className="px-4 py-3 font-mono">{formatDate(payment.date)}</td>
+                      <td className="px-4 py-3 text-right font-mono font-bold">
+                        {payment.type === 'cash_out' ? (
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-700 border border-rose-200 font-mono">
+                            - Rs. {payment.amount.toLocaleString()}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 font-mono">
+                            + Rs. {payment.amount.toLocaleString()}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-slate-700">{payment.paymentMethod}</td>
+                      <td className="px-4 py-3 font-mono text-slate-500">{payment.billNo || '-'}</td>
+                      <td className="px-4 py-3 font-bold">
+                        {payment.type === 'cash_in' ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md font-bold">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Cash In
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-xs text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md font-bold">
+                            <span className="w-2 h-2 rounded-full bg-rose-500"></span> Cash Out
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-right">
-                        <button type="button" onClick={() => void handleDeletePayment(payment.id)} className="rounded-lg p-2 text-rose-600 hover:bg-rose-50" aria-label="Delete payment">
+                        <button type="button" onClick={() => void handleDeletePayment(payment.id)} className="rounded-lg p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer" aria-label="Delete payment">
                           <Trash2 className="h-4 w-4" />
                         </button>
                       </td>
@@ -1753,22 +1796,32 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                   ))}
                   {dateFilteredPayments.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">No payments in this date range.</td></tr>}
                 </tbody>
-                <tfoot className="border-t-2 border-slate-300 bg-slate-50 text-sm font-black">
+                <tfoot className="border-t-2 border-slate-300 bg-slate-50 text-xs sm:text-sm font-black">
                   <tr>
-                    <td className="px-4 py-3">Total Bill</td>
-                    <td className="px-4 py-3 text-right font-mono text-amber-700">Rs. {totalCuttingAmount.toLocaleString()}</td>
-                    <td className="px-4 py-3" colSpan={4}>Cutting entries in this date range</td>
+                    <td className="px-4 py-3">1. Cutting Entries Total</td>
+                    <td className="px-4 py-3 text-right font-mono text-amber-700">Rs. {cuttingEntriesBillsTotal.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={4}>Total of cutting bills in this date range</td>
                   </tr>
+                  {cuttingReturnsTotal > 0 && (
+                    <tr>
+                      <td className="px-4 py-3 text-rose-700">2. Return Cutting Deducted</td>
+                      <td className="px-4 py-3 text-right font-mono text-rose-700">- Rs. {cuttingReturnsTotal.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-slate-500 font-normal" colSpan={4}>Returned lots deducted from bill</td>
+                    </tr>
+                  )}
                   <tr>
-                    <td className="px-4 py-3">Total Paid</td>
-                    <td className="px-4 py-3 text-right font-mono text-emerald-700">Rs. {totalPaid.toLocaleString()}</td>
-                    <td className="px-4 py-3" colSpan={4}>Cash In payments in this date range</td>
+                    <td className="px-4 py-3 text-emerald-700">3. Cash Paid / In</td>
+                    <td className="px-4 py-3 text-right font-mono text-emerald-700">- Rs. {totalPaid.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={4}>Cash In payments in this date range</td>
                   </tr>
-                  <tr>
-                    <td className="px-4 py-3">Baqaya</td>
-                    <td className={`px-4 py-3 text-right font-mono ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-800'}`}>Rs. {remainingBalance.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-emerald-700" colSpan={4}>
-                      {extraPaid > 0 ? `Extra Paid: Rs. ${extraPaid.toLocaleString()}` : ' '}
+                  <tr className="bg-blue-50/90 border-t border-blue-200">
+                    <td className="px-4 py-3.5 text-blue-900 uppercase">PENDING BALANCE</td>
+                    <td className={`px-4 py-3.5 text-right font-mono text-base font-black ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-800'}`}>
+                      Rs. {remainingBalance.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3.5 text-slate-700 font-semibold" colSpan={4}>
+                      Formula: SUM(Cutting: Rs.{cuttingEntriesBillsTotal.toLocaleString()}) - Cash Paid(Rs.{totalPaid.toLocaleString()}) - Returns(Rs.{cuttingReturnsTotal.toLocaleString()}) = Rs.{remainingBalance.toLocaleString()}
+                      {extraPaid > 0 && <span className="ml-2 text-emerald-700 font-black">· Extra Paid: Rs. {extraPaid.toLocaleString()}</span>}
                     </td>
                   </tr>
                 </tfoot>
@@ -1776,6 +1829,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
             </div>
           </section>
         </div>
+        )
       )}
 
       {/* =========================================================================
@@ -1956,22 +2010,21 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     <div className="flex items-center gap-2">
                       <input
                         type="search"
-                        required
                         role="combobox"
                         aria-expanded={isArticlePickerOpen}
                         aria-controls="receive-article-options"
-                        placeholder={formArticle || 'Search all articles by name or code'}
+                        placeholder="Search or type new article name (auto-saves)"
                         value={articleSearch || formArticle}
                         onFocus={() => {
-                          setArticleSearch('');
                           setIsArticlePickerOpen(true);
                         }}
                         onChange={event => {
-                          setArticleSearch(event.target.value);
+                          const val = event.target.value;
+                          setArticleSearch(val);
+                          setFormArticle(val);
                           setIsArticlePickerOpen(true);
-                          if (formArticle && event.target.value !== formArticle) setFormArticle('');
                         }}
-                        className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20 sm:text-sm"
+                        className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20 sm:text-sm font-semibold"
                       />
                       {(formArticle || articleSearch) && (
                         <button
@@ -1989,6 +2042,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                         </button>
                       )}
                     </div>
+
+                    {/* Auto-save helper notice when article is new */}
+                    {(articleSearch || formArticle) && !articlesMaster.some(a => a.articleName.trim().toLowerCase() === (articleSearch || formArticle).trim().toLowerCase()) && (
+                      <div className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-200">
+                        <Check className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                        <span>New article "{articleSearch || formArticle}" will be auto-saved on Receive</span>
+                      </div>
+                    )}
+
                     {isArticlePickerOpen && (
                       <div id="receive-article-options" role="listbox" className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
                         {filteredArticleOptions.map(article => (
@@ -2003,8 +2065,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                             {article.articleName}{article.articleCode ? ` (${article.articleCode})` : ''}
                           </button>
                         ))}
-                        {filteredArticleOptions.length === 0 && <p className="px-3 py-2 text-xs text-slate-500">No active articles found.</p>}
-                        <button type="button" role="option" onClick={() => handleArticleSelection('__other__')} className="block w-full rounded-lg px-3 py-2 text-left text-xs font-bold text-blue-700 hover:bg-blue-50">Other — add article</button>
+                        {filteredArticleOptions.length === 0 && (
+                          <p className="px-3 py-2 text-xs text-slate-500">
+                            Type to enter custom article (auto-saves on receive).
+                          </p>
+                        )}
+                        <button type="button" role="option" onClick={() => handleArticleSelection('__other__')} className="block w-full rounded-lg px-3 py-2 text-left text-xs font-bold text-blue-700 hover:bg-blue-50 border-t border-slate-100">
+                          + Other — configure article with size matrix
+                        </button>
                       </div>
                     )}
                   </div>
@@ -2021,7 +2089,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 {showNewArticleForm && txModalType === 'RECEIVE' && (
                   <div className="mt-3 space-y-3 rounded-xl border border-blue-200 bg-blue-50 p-3">
                     <label className="block text-xs font-bold text-slate-700">
-                      Article Number
+                      Article Number / Name
                       <input required value={newArticleForm.articleName} onChange={event => setNewArticleForm(form => ({ ...form, articleName: event.target.value }))} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-normal" />
                     </label>
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -2039,101 +2107,208 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 )}
               </div>
 
+              {/* Task 4: 3-Way Delivery Choice */}
               {txModalType === 'RECEIVE' && (
-                <fieldset className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <legend className="px-1 text-xs font-bold text-slate-700">Delivery Choice *</legend>
-                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-                    <input type="radio" name="receive-destination" checked={deliveryChoice === 'customer'} onChange={() => setDeliveryChoice('customer')} />
-                    Direct Deliver to Customer Order
-                  </label>
-                  <label className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-                    <input type="radio" name="receive-destination" checked={deliveryChoice === 'stock'} onChange={() => setDeliveryChoice('stock')} />
-                    Send to Stock Management
-                  </label>
+                <fieldset className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                  <legend className="px-1 text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Delivery Choice *
+                  </legend>
+                  <div className="space-y-2">
+                    <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
+                      deliveryChoice === 'LINKED_TO_PO' 
+                        ? 'border-blue-500 bg-blue-50/80 text-blue-900 shadow-2xs' 
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                    }`}>
+                      <input 
+                        type="radio" 
+                        name="receive-destination" 
+                        value="LINKED_TO_PO"
+                        checked={deliveryChoice === 'LINKED_TO_PO'} 
+                        onChange={() => setDeliveryChoice('LINKED_TO_PO')} 
+                        className="mt-0.5 text-blue-600"
+                      />
+                      <div>
+                        <span className="font-bold block">OPTION 1: Direct Deliver to Customer Order - Linked to PO</span>
+                        <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
+                          Links directly to customer order PO, updates fulfillment progress & customer ledger.
+                        </span>
+                      </div>
+                    </label>
+
+                    <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
+                      deliveryChoice === 'DIRECT_CUTTING_NO_PO' 
+                        ? 'border-amber-500 bg-amber-50/80 text-amber-900 shadow-2xs' 
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                    }`}>
+                      <input 
+                        type="radio" 
+                        name="receive-destination" 
+                        value="DIRECT_CUTTING_NO_PO"
+                        checked={deliveryChoice === 'DIRECT_CUTTING_NO_PO'} 
+                        onChange={() => setDeliveryChoice('DIRECT_CUTTING_NO_PO')} 
+                        className="mt-0.5 text-amber-600"
+                      />
+                      <div>
+                        <span className="font-bold block">OPTION 2: Direct Cutting / Other Order - Without PO</span>
+                        <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
+                          Saves as unassigned direct cutting lot not tied to a customer PO.
+                        </span>
+                      </div>
+                    </label>
+
+                    <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
+                      deliveryChoice === 'SEND_TO_STOCK' 
+                        ? 'border-emerald-500 bg-emerald-50/80 text-emerald-900 shadow-2xs' 
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                    }`}>
+                      <input 
+                        type="radio" 
+                        name="receive-destination" 
+                        value="SEND_TO_STOCK"
+                        checked={deliveryChoice === 'SEND_TO_STOCK'} 
+                        onChange={() => setDeliveryChoice('SEND_TO_STOCK')} 
+                        className="mt-0.5 text-emerald-600"
+                      />
+                      <div>
+                        <span className="font-bold block">OPTION 3: Send to Stock Management - Direct to Stock</span>
+                        <span className="text-[11px] text-emerald-700 font-semibold block mt-0.5">
+                          This receipt automatically increases available stock in Stock Management.
+                        </span>
+                      </div>
+                    </label>
+                  </div>
                 </fieldset>
               )}
 
-              {/* Field 3: Order (Dropdown, filtered dynamically to show ONLY Customer Orders containing selected Article)
-                  Format: "Customer Name - Order Date - Order ID" */}
-              {(txModalType !== 'RECEIVE' || deliveryChoice === 'customer') && <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
-                  <span>3. Customer Order</span>
-                  <span className="text-[10px] text-slate-400 font-normal">Optional / Direct Cutting</span>
-                </label>
-                <select
-                  value={formOrderId}
-                  onChange={e => {
-                    const orderId = e.target.value;
-                    setFormOrderId(orderId);
-                    const order = orders.find(item => item.id === orderId);
-                    if (order) setFormCustomerName(order.customerName);
-                  }}
-                  className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20"
-                >
-                  <option value="">-- Direct Cutting / Not Linked to Specific PO --</option>
-                  {filteredOrdersForArticle.map(ord => (
-                    <option key={ord.id} value={ord.id}>
-                      {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}
-                    </option>
-                  ))}
-                </select>
-              </div>}
+              {/* Field 3: Customer Order selection (Only when LINKED_TO_PO or when txModalType is GIVE) */}
+              {txModalType === 'RECEIVE' && deliveryChoice === 'LINKED_TO_PO' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span>3. Customer Order (PO) *</span>
+                    <span className="text-[10px] text-blue-600 font-bold">Linked Order Required</span>
+                  </label>
+                  <select
+                    required
+                    value={formOrderId}
+                    onChange={e => {
+                      const orderId = e.target.value;
+                      setFormOrderId(orderId);
+                      const order = orders.find(item => item.id === orderId);
+                      if (order) setFormCustomerName(order.customerName);
+                    }}
+                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="">-- Select Customer Order --</option>
+                    {filteredOrdersForArticle.map(ord => (
+                      <option key={ord.id} value={ord.id}>
+                        {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Reference note for DIRECT_CUTTING_NO_PO */}
+              {txModalType === 'RECEIVE' && deliveryChoice === 'DIRECT_CUTTING_NO_PO' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    3. Reference Note / Other Order Name <span className="text-slate-400 font-normal">(Optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Unassigned / Direct Cutting / Extra Lot"
+                    value={formCustomerName}
+                    onChange={e => setFormCustomerName(e.target.value)}
+                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                  />
+                </div>
+              )}
+
+              {/* Customer Order for GIVE cutting */}
+              {txModalType === 'GIVE' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                    <span>3. Customer Order</span>
+                    <span className="text-[10px] text-slate-400 font-normal">Optional / Direct Cutting</span>
+                  </label>
+                  <select
+                    value={formOrderId}
+                    onChange={e => {
+                      const orderId = e.target.value;
+                      setFormOrderId(orderId);
+                      const order = orders.find(item => item.id === orderId);
+                      if (order) setFormCustomerName(order.customerName);
+                    }}
+                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                  >
+                    <option value="">-- Direct Cutting / Not Linked to Specific PO --</option>
+                    {filteredOrdersForArticle.map(ord => (
+                      <option key={ord.id} value={ord.id}>
+                        {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Field 5: Independent size, average, quantity, rate, balance and remarks */}
+              {/* Task 5: AVERAGE and RATE are OPTIONAL - never block save */}
               <div className="rounded-xl bg-[#f0f6ff] p-[15px]">
                 <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-3">
                   5. SIZE / QTY / AVERAGE / RATE / TOTAL - 5 BOXES
                 </label>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
                   <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">QUANTITY</label>
+                    <label className="mb-1 block text-[10px] font-bold text-blue-700">QUANTITY *</label>
                     <input
                       id="quantity"
                       type="number"
                       min="1"
                       required
-                      placeholder=""
+                      placeholder="Qty"
                       value={formQty}
                       onChange={e => setFormQty(e.target.value)}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
+                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold"
                     />
                   </div>
                   <div className="min-w-0">
                     <label className="mb-1 block text-[10px] font-bold text-blue-700">SIZE</label>
                     {txModalType === 'RECEIVE' && articlesMaster.find(article => article.articleName === formArticle)?.sizes.length ? (
-                      <select id="sizeName" required value={formSize} onChange={event => {
+                      <select id="sizeName" value={formSize} onChange={event => {
                         const selected = articlesMaster.find(article => article.articleName === formArticle)?.sizes.find(size => size.sizeName === event.target.value);
                         setFormSize(event.target.value);
-                        if (selected) setFormQty(String(selected.pairs));
+                        if (selected && selected.pairs > 0) setFormQty(String(selected.pairs));
                       }} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm">
-                        <option value="">Select size</option>
+                        <option value="">Select size (Optional)</option>
                         {articlesMaster.find(article => article.articleName === formArticle)?.sizes.map(size => <option key={size.sizeName} value={size.sizeName}>{size.sizeName} ({size.pairs})</option>)}
                       </select>
                     ) : (
-                      <input id="sizeName" type="text" required value={formSize} onChange={e => setFormSize(e.target.value)} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm" />
+                      <input id="sizeName" type="text" placeholder="Size (e.g. 10)" value={formSize} onChange={e => setFormSize(e.target.value)} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm" />
                     )}
                   </div>
                   <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">AVERAGE</label>
+                    <label className="mb-1 block text-[10px] font-bold text-blue-700">
+                      AVERAGE <span className="font-normal text-slate-400">(Optional)</span>
+                    </label>
                     <input
                       id="average"
                       type="text"
-                      required
-                      placeholder=""
+                      placeholder="Avg (Optional)"
                       value={formAverage}
                       onChange={e => setFormAverage(e.target.value)}
                       className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
                     />
                   </div>
                   <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">RATE</label>
+                    <label className="mb-1 block text-[10px] font-bold text-blue-700">
+                      RATE <span className="font-normal text-slate-400">(Optional)</span>
+                    </label>
                     <input
                       id="rate"
                       type="number"
                       min="0"
                       step="any"
-                      required
-                      placeholder=""
+                      placeholder="Rate (Optional)"
                       value={formRate}
                       onChange={e => setFormRate(e.target.value)}
                       className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
@@ -2145,8 +2320,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                       id="totalBalance"
                       type="text"
                       readOnly
-                      value={Number(formQty) > 0 && Number(formRate) > 0 ? String(Number(formQty) * Number(formRate)) : ''}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-slate-100 px-3 text-sm font-bold"
+                      value={Number(formQty) > 0 ? String(Number(formQty) * (Number(formRate) || 0)) : ''}
+                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-slate-100 px-3 text-sm font-bold text-slate-900"
                     />
                   </div>
                 </div>
@@ -2524,3 +2699,38 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     </div>
   );
 };
+
+class CuttingLedgerErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div role="alert" className="mx-auto max-w-xl rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <h2 className="text-lg font-black text-slate-900">Cutting ledger could not be displayed</h2>
+          <p className="mt-2 text-sm text-slate-600">Return to the cutting roster or reload the page to try again.</p>
+          <button type="button" onClick={() => window.location.reload()} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white">
+            Reload page
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export const CuttingsPage: React.FC<CuttingsPageProps> = props => (
+  <CuttingLedgerErrorBoundary>
+    <React.Suspense fallback={<div className="p-8 text-center text-sm font-semibold text-slate-500">Loading cutting ledger…</div>}>
+      <CuttingsPageContent {...props} />
+    </React.Suspense>
+  </CuttingLedgerErrorBoundary>
+);
+

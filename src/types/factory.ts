@@ -536,6 +536,44 @@ export interface ArticleStockItem {
   deliveryHistory: ArticleStockDeliveryHistoryEntry[];
 }
 
+export interface StockInHistoryItem {
+  id: string;
+  date: string;
+  time?: string;
+  formattedDateTime: string;
+  source: string;
+  quantity: number;
+  rate?: number;
+  size?: string;
+  billNo?: string;
+  notes?: string;
+  rawEntry?: unknown;
+}
+
+export interface StockOutHistoryItem {
+  id: string;
+  date: string;
+  orderName: string;
+  orderNo?: string;
+  customerName?: string;
+  quantity: number;
+  destination: string;
+  size?: string;
+  rawEntry?: unknown;
+}
+
+export interface DistinctArticleStock {
+  articleName: string;
+  totalIn: number;
+  totalOut: number;
+  availableStock: number;
+  unitRate: number;
+  stockValue: number;
+  sizes?: string[];
+  lastReceivedDate?: string;
+  lastDeliveredDate?: string;
+}
+
 export interface StaffAttendance {
   id: string;
   staffId: string;
