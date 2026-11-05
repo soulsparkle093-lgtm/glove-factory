@@ -10,29 +10,29 @@ interface CreateOrderModalProps {
   onOpenAddParty?: () => void;
 }
 
+interface SizeQtyRow {
+  id: string;
+  size: string;
+  quantity: number | string;
+}
+
 interface GloveFormRow {
   id?: string;
   title: string; // 100% BLANK by default
   color: string; // BLANK by default
-  sizes: {
-    small: number | string;
-    medium: number | string;
-    large: number | string;
-    xl: number | string;
-    xxl: number | string;
-  };
+  sizesList: SizeQtyRow[];
 }
+
+const createEmptySizeRow = (): SizeQtyRow => ({
+  id: 'sz-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+  size: '',
+  quantity: ''
+});
 
 const createEmptyRow = (): GloveFormRow => ({
   title: '',
   color: '',
-  sizes: {
-    small: 0,
-    medium: 0,
-    large: 0,
-    xl: 0,
-    xxl: 0
-  }
+  sizesList: [createEmptySizeRow()]
 });
 
 export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
@@ -51,7 +51,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Dynamic glove item rows with size matrix
+  // Dynamic glove item rows with dynamic Size + Quantity pairs
   const [rows, setRows] = useState<GloveFormRow[]>([createEmptyRow()]);
 
   // Sync state when opening or when orderToEdit changes
@@ -66,18 +66,45 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
         setNotes(orderToEdit.notes || '');
 
         if (orderToEdit.items && orderToEdit.items.length > 0) {
-          const prefilledRows = orderToEdit.items.map(item => ({
-            id: item.id,
-            title: item.title || item.gloveType || '',
-            color: item.color || '',
-            sizes: {
-              small: item.sizes?.small ?? 0,
-              medium: item.sizes?.medium ?? 0,
-              large: item.sizes?.large ?? item.qty ?? 0,
-              xl: item.sizes?.xl ?? 0,
-              xxl: item.sizes?.xxl ?? 0
+          const prefilledRows = orderToEdit.items.map(item => {
+            let sizesList: SizeQtyRow[] = [];
+            if (item.customSizes && item.customSizes.length > 0) {
+              sizesList = item.customSizes.map(cs => ({
+                id: cs.id || 'sz-' + Math.random().toString(36).slice(2, 6),
+                size: cs.size || '',
+                quantity: cs.quantity === 0 ? '' : cs.quantity
+              }));
+            } else if (item.sizes) {
+              // Legacy size matrix: extract non-zero sizes (e.g. Large = 3000 for ORD-002)
+              const list: SizeQtyRow[] = [];
+              const entries = [
+                { key: 'Small', val: item.sizes.small },
+                { key: 'Medium', val: item.sizes.medium },
+                { key: 'Large', val: item.sizes.large !== undefined && item.sizes.large !== null && item.sizes.large > 0 ? item.sizes.large : (item.qty && !item.sizes.small && !item.sizes.medium && !item.sizes.xl && !item.sizes.xxl ? item.qty : 0) },
+                { key: 'XL', val: item.sizes.xl },
+                { key: '2XL', val: item.sizes.xxl }
+              ];
+              entries.forEach(e => {
+                const num = Number(e.val);
+                if (num > 0) {
+                  list.push({
+                    id: 'sz-' + Math.random().toString(36).slice(2, 6),
+                    size: e.key,
+                    quantity: num
+                  });
+                }
+              });
+              sizesList = list.length > 0 ? list : [createEmptySizeRow()];
+            } else {
+              sizesList = [createEmptySizeRow()];
             }
-          }));
+            return {
+              id: item.id,
+              title: item.title || item.gloveType || '',
+              color: item.color || '',
+              sizesList
+            };
+          });
           setRows(prefilledRows);
         } else {
           setRows([createEmptyRow()]);
@@ -113,32 +140,57 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
     setRows(prev => prev.map((r, idx) => (idx === index ? { ...r, ...updates } : r)));
   };
 
-  const handleUpdateSize = (index: number, sizeKey: keyof GloveFormRow['sizes'], rawVal: string) => {
-    const val = rawVal === '' ? 0 : Math.max(0, parseInt(rawVal, 10) || 0);
-    setRows(prev =>
-      prev.map((r, idx) => {
-        if (idx === index) {
-          return {
-            ...r,
-            sizes: {
-              ...r.sizes,
-              [sizeKey]: val
-            }
-          };
-        }
-        return r;
-      })
-    );
+  const handleAddSizeRow = (gloveIndex: number) => {
+    setRows(prev => prev.map((r, idx) => {
+      if (idx === gloveIndex) {
+        return {
+          ...r,
+          sizesList: [...r.sizesList, createEmptySizeRow()]
+        };
+      }
+      return r;
+    }));
   };
 
-  // Calculate pairs for each row
+  const handleRemoveSizeRow = (gloveIndex: number, sizeIndex: number) => {
+    setRows(prev => prev.map((r, idx) => {
+      if (idx === gloveIndex) {
+        if (r.sizesList.length <= 1) return r;
+        return {
+          ...r,
+          sizesList: r.sizesList.filter((_, sIdx) => sIdx !== sizeIndex)
+        };
+      }
+      return r;
+    }));
+  };
+
+  const handleUpdateSizeRow = (gloveIndex: number, sizeIndex: number, field: 'size' | 'quantity', val: string) => {
+    setRows(prev => prev.map((r, idx) => {
+      if (idx === gloveIndex) {
+        return {
+          ...r,
+          sizesList: r.sizesList.map((s, sIdx) => {
+            if (sIdx === sizeIndex) {
+              return {
+                ...s,
+                [field]: field === 'quantity' ? (val === '' ? '' : Math.max(0, parseInt(val, 10) || 0)) : val
+              };
+            }
+            return s;
+          })
+        };
+      }
+      return r;
+    }));
+  };
+
+  // Calculate pairs for each glove row (Sum of all size quantity boxes)
   const getRowPairs = (row: GloveFormRow): number => {
-    const s = Number(row.sizes.small) || 0;
-    const m = Number(row.sizes.medium) || 0;
-    const l = Number(row.sizes.large) || 0;
-    const xl = Number(row.sizes.xl) || 0;
-    const xxl = Number(row.sizes.xxl) || 0;
-    return s + m + l + xl + xxl;
+    return row.sizesList.reduce((sum, s) => {
+      const q = s.quantity === '' ? 0 : Number(s.quantity) || 0;
+      return sum + q;
+    }, 0);
   };
 
   // Overall order Total Pairs = sum of all glove items total pairs
@@ -158,19 +210,34 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
     setIsSubmitting(true);
     try {
       const itemsPayload = validRows.map(r => {
-        const sizesObj: SizeMatrix = {
-          small: Number(r.sizes.small) || 0,
-          medium: Number(r.sizes.medium) || 0,
-          large: Number(r.sizes.large) || 0,
-          xl: Number(r.sizes.xl) || 0,
-          xxl: Number(r.sizes.xxl) || 0
-        };
-        const total = sizesObj.small + sizesObj.medium + sizesObj.large + sizesObj.xl + sizesObj.xxl;
+        const customSizesList = r.sizesList
+          .filter(s => s.size.trim().length > 0 || Number(s.quantity) > 0)
+          .map(s => ({
+            id: s.id,
+            size: s.size.trim() || 'Standard',
+            quantity: s.quantity === '' ? 0 : Math.max(0, parseInt(String(s.quantity), 10) || 0)
+          }));
+
+        const total = customSizesList.reduce((sum, s) => sum + s.quantity, 0);
+
+        // Backward compatibility for legacy modules
+        const legacySizes: SizeMatrix = { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
+        customSizesList.forEach(cs => {
+          const norm = cs.size.trim().toLowerCase();
+          if (norm === 'small' || norm === 's') legacySizes.small += cs.quantity;
+          else if (norm === 'medium' || norm === 'm') legacySizes.medium += cs.quantity;
+          else if (norm === 'large' || norm === 'l') legacySizes.large += cs.quantity;
+          else if (norm === 'xl' || norm === 'extra large') legacySizes.xl += cs.quantity;
+          else if (norm === '2xl' || norm === 'xxl') legacySizes.xxl += cs.quantity;
+          else legacySizes.large += cs.quantity;
+        });
+
         return {
           id: r.id,
           title: r.title.trim(),
           color: r.color.trim(),
-          sizes: sizesObj,
+          sizes: legacySizes,
+          customSizes: customSizesList,
           totalPairs: total
         };
       });
@@ -389,88 +456,85 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                     </div>
                   </div>
 
-                  {/* E. SIZING SYSTEM: Size Matrix with 5 labels on TOP */}
-                  <div className="p-3.5 bg-slate-50/80 rounded-xl border border-slate-200/80 space-y-2">
-                    <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block">
-                      Size Matrix & Pairs Quantity
-                    </span>
-
-                    <div className="grid grid-cols-5 gap-2 sm:gap-3">
-                      {/* Small */}
+                  {/* E. SIZING SYSTEM: Only 2 Boxes - Size + Quantity / Pairs with Add More */}
+                  <div className="p-4 bg-slate-50/90 rounded-2xl border border-slate-200 space-y-3">
+                    <div className="flex items-center justify-between">
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-700 text-center mb-1">
-                          Small
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          placeholder=""
-                          value={row.sizes.small === 0 ? '' : row.sizes.small}
-                          onChange={e => handleUpdateSize(idx, 'small', e.target.value)}
-                          className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
-                        />
+                        <span className="text-[11px] font-black text-slate-700 uppercase tracking-wider block">
+                          Size &amp; Quantity
+                        </span>
+                        <p className="text-[11px] text-slate-500">
+                          Free-text Size box and Quantity box per size
+                        </p>
                       </div>
-
-                      {/* Medium */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 text-center mb-1">
-                          Medium
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          placeholder=""
-                          value={row.sizes.medium === 0 ? '' : row.sizes.medium}
-                          onChange={e => handleUpdateSize(idx, 'medium', e.target.value)}
-                          className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
-                        />
-                      </div>
-
-                      {/* Large */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 text-center mb-1">
-                          Large
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          placeholder=""
-                          value={row.sizes.large === 0 ? '' : row.sizes.large}
-                          onChange={e => handleUpdateSize(idx, 'large', e.target.value)}
-                          className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
-                        />
-                      </div>
-
-                      {/* XL */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 text-center mb-1">
-                          XL
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          placeholder=""
-                          value={row.sizes.xl === 0 ? '' : row.sizes.xl}
-                          onChange={e => handleUpdateSize(idx, 'xl', e.target.value)}
-                          className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
-                        />
-                      </div>
-
-                      {/* 2XL */}
-                      <div>
-                        <label className="block text-[11px] font-bold text-slate-700 text-center mb-1">
-                          2XL
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          placeholder=""
-                          value={row.sizes.xxl === 0 ? '' : row.sizes.xxl}
-                          onChange={e => handleUpdateSize(idx, 'xxl', e.target.value)}
-                          className="w-full text-center py-2 px-1 text-xs sm:text-sm font-bold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white shadow-2xs"
-                        />
-                      </div>
+                      <span className="text-xs font-bold text-blue-700 bg-blue-100/70 px-2.5 py-0.5 rounded-full">
+                        {itemTotal} Pairs
+                      </span>
                     </div>
+
+                    <div className="space-y-3">
+                      {row.sizesList.map((sRow, sIdx) => (
+                        <div
+                          key={sRow.id || sIdx}
+                          className="p-3.5 bg-white rounded-xl border border-slate-200/90 shadow-2xs space-y-2.5 relative"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold text-slate-500">
+                              Size Entry #{sIdx + 1}
+                            </span>
+                            {row.sizesList.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveSizeRow(idx, sIdx)}
+                                className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                title="Remove this size"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Box 1 - Size: Free text input */}
+                          <div>
+                            <label className="block text-xs font-bold text-slate-700 mb-1">
+                              Size
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Large, Medium, Small, 9, 10, Ladies Large, Gents XL"
+                              value={sRow.size}
+                              onChange={e => handleUpdateSizeRow(idx, sIdx, 'size', e.target.value)}
+                              className="w-full px-3 py-2 text-xs sm:text-sm font-semibold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white"
+                            />
+                          </div>
+
+                          {/* Box 2 - Quantity / Pairs */}
+                          <div>
+                            <label className="block text-xs font-bold text-slate-700 mb-1">
+                              Quantity / Pairs
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              placeholder="e.g. 3000"
+                              value={sRow.quantity}
+                              onChange={e => handleUpdateSizeRow(idx, sIdx, 'quantity', e.target.value)}
+                              className="w-full px-3 py-2 text-xs sm:text-sm font-bold font-mono rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white placeholder-shown:border-dashed placeholder-shown:border-slate-300 placeholder-shown:bg-slate-50/50"
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Add More Button */}
+                    <button
+                      type="button"
+                      onClick={() => handleAddSizeRow(idx)}
+                      className="w-full py-2.5 rounded-xl border-2 border-dashed border-blue-200 hover:border-blue-300 bg-blue-50/50 hover:bg-blue-50 text-blue-700 text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>+ Add Another Size</span>
+                    </button>
                   </div>
                 </div>
               );

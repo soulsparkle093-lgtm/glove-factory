@@ -24,7 +24,9 @@ import {
   X,
   AlertCircle,
   Pencil,
-  Loader2
+  Loader2,
+  RotateCcw,
+  Minus
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatDate, safeStringCompare } from '../utils/factoryFormatters';
@@ -53,6 +55,13 @@ interface CuttingsPageProps {
 
 type LedgerPaymentMethod = 'Cash' | 'Easypaisa' | 'JazzCash' | 'Bank Transfer';
 
+export interface LotSplitAllocation {
+  lotId: string;
+  lotNo: string;
+  billNo?: string;
+  amount: number;
+}
+
 interface NasimLedgerPayment {
   id: string;
   cutterId: string;
@@ -61,6 +70,9 @@ interface NasimLedgerPayment {
   amount: number;
   paymentMethod: LedgerPaymentMethod;
   billNo: string;
+  lotId?: string;
+  lotNo?: string;
+  splitAllocations?: LotSplitAllocation[];
   type: 'cash_in' | 'cash_out';
   createdAt: string;
 }
@@ -203,6 +215,13 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     reason: 'Damaged' as 'Damaged' | 'Wrong Size' | 'Quality'
   });
   const [isSavingReturn, setIsSavingReturn] = useState(false);
+  // Contractor Return Cutting Modal State
+  const [isReturnCuttingModalOpen, setIsReturnCuttingModalOpen] = useState(false);
+  const [returnCuttingArticle, setReturnCuttingArticle] = useState('');
+  const [returnCuttingDate, setReturnCuttingDate] = useState(new Date().toISOString().slice(0, 10));
+  const [returnCuttingPairs, setReturnCuttingPairs] = useState('');
+  const [returnCuttingReason, setReturnCuttingReason] = useState('Damaged');
+  const [returnCuttingNotes, setReturnCuttingNotes] = useState('');
   const [ledgerSearch, setLedgerSearch] = useState('');
   const [pdfExportMode, setPdfExportMode] = useState<'date' | null>(null);
   const [pdfFromDate, setPdfFromDate] = useState('');
@@ -217,7 +236,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     date: new Date().toISOString().slice(0, 10),
     amount: '',
     paymentMethod: 'Cash' as 'Cash' | 'Easypaisa' | 'JazzCash' | 'Bank Transfer',
-    billNo: ''
+    billNo: '',
+    allocationMode: 'single' as 'single' | 'split' | 'unallocated',
+    lotId: '',
+    splitRows: [] as { lotId: string; amount: string }[]
   });
   const [isSavingPayment, setIsSavingPayment] = useState(false);
   const savingPaymentRef = useRef(false);
@@ -280,6 +302,17 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     }
   }, [getCuttingLedgerByCutter, activeCutterId, cuttingEntries, cuttingTransactions]);
 
+  // Contractor name helper to match variations (NAEM, NAIM, NAEEM, NASIM)
+  const isSameContractor = (a: string, b: string): boolean => {
+    const normA = (a || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normB = (b || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!normA || !normB) return false;
+    if (normA === normB) return true;
+    const isNaemA = normA === 'naem' || normA === 'naim' || normA === 'naeem' || normA === 'nasim';
+    const isNaemB = normB === 'naem' || normB === 'naim' || normB === 'naeem' || normB === 'nasim';
+    return isNaemA && isNaemB;
+  };
+
   useEffect(() => {
     if (!db || !activeCutterId) {
       setLedgerPayments([]);
@@ -288,19 +321,32 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     return onSnapshot(collection(db, 'nasim_ledger_payments'), snapshot => {
       const entries = snapshot.docs.flatMap(document => {
         const data = document.data();
-        if (data.cutterId !== activeCutterId) return [];
+        const matchesId = data.cutterId === activeCutterId || data.cutterId === activeCutter?.id;
+        const matchesName = activeCutter?.name && data.cutterName && (
+          data.cutterName.trim().toLowerCase() === activeCutter.name.trim().toLowerCase() ||
+          isSameContractor(String(data.cutterName || ''), activeCutter.name)
+        );
+        const matchesContractor = activeCutter?.name && data.contractor && (
+          data.contractor.trim().toLowerCase() === activeCutter.name.trim().toLowerCase() ||
+          isSameContractor(String(data.contractor || ''), activeCutter.name)
+        );
+        if (!matchesId && !matchesName && !matchesContractor) return [];
+
         const method = ['Cash', 'Easypaisa', 'JazzCash', 'Bank Transfer'].includes(data.paymentMethod)
           ? data.paymentMethod as LedgerPaymentMethod
           : 'Cash';
         const createdAt = data.createdAt as { toDate?: () => Date; toMillis?: () => number } | string | undefined;
         return [{
           id: document.id,
-          cutterId: String(data.cutterId),
-          cutterName: String(data.cutterName || ''),
+          cutterId: String(data.cutterId || activeCutterId),
+          cutterName: String(data.cutterName || activeCutter?.name || ''),
           date: String(data.date || ''),
           amount: Number(data.amount) || 0,
           paymentMethod: method,
           billNo: String(data.billNo || ''),
+          lotId: data.lotId ? String(data.lotId) : undefined,
+          lotNo: data.lotNo ? String(data.lotNo) : undefined,
+          splitAllocations: Array.isArray(data.splitAllocations) ? data.splitAllocations : undefined,
           type: data.type === 'cash_in' ? 'cash_in' as const : 'cash_out' as const,
           createdAt: typeof createdAt === 'string'
             ? createdAt
@@ -340,7 +386,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         });
       });
     }, error => console.error('Unable to load Nasim ledger payments:', error));
-  }, [activeCutterId]);
+  }, [activeCutterId, activeCutter?.name, activeCutter?.id]);
 
   const dateFilteredEntries = useMemo(() => {
     const range = getLedgerDateRange(ledgerDateFilter, filterFromDate, filterToDate);
@@ -368,17 +414,48 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       .reduce((sum, entry) => sum + Math.abs(Number(entry.pairs) || 0) * (Number(entry.rate) || 0), 0);
   }, [dateFilteredEntries]);
 
-  const totalPaid = useMemo(() => {
-    return dateFilteredPayments
-      .filter(payment => payment.type === 'cash_in')
-      .reduce((sum, payment) => sum + payment.amount, 0);
-  }, [dateFilteredPayments]);
-
+  // Cash Out: Payments made to contractor (Red Minus, reduces pending balance)
   const totalCashOut = useMemo(() => {
     return dateFilteredPayments
       .filter(payment => payment.type === 'cash_out')
-      .reduce((sum, payment) => sum + payment.amount, 0);
+      .reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
   }, [dateFilteredPayments]);
+
+  // Cash In: Adjustments or cash received from contractor
+  const totalCashIn = useMemo(() => {
+    return dateFilteredPayments
+      .filter(payment => payment.type === 'cash_in')
+      .reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
+  }, [dateFilteredPayments]);
+
+  // Lot-wise paid amounts calculation from payments
+  const lotPaidMap = useMemo(() => {
+    const map: Record<string, number> = {};
+    ledgerPayments.forEach(p => {
+      const sign = p.type === 'cash_out' ? 1 : -1;
+      if (p.lotId) {
+        map[p.lotId] = (map[p.lotId] || 0) + Number(p.amount) * sign;
+      }
+      if (p.splitAllocations && p.splitAllocations.length > 0) {
+        p.splitAllocations.forEach(split => {
+          if (split.lotId) {
+            map[split.lotId] = (map[split.lotId] || 0) + Number(split.amount) * sign;
+          }
+        });
+      }
+    });
+    return map;
+  }, [ledgerPayments]);
+
+  // Total Paid to Contractor:
+  // Step 2: User ne contractor ko payment ki (Cash Out): Rs.10,000
+  // Step 4: Formula: PENDING BALANCE = SUM(FULL BILL of all cutting in date range) - SUM(Cash Paid/Cash Out in date range) - SUM(Return Cutting)
+  const totalPaid = useMemo(() => {
+    if (totalCashOut > 0) {
+      return totalCashOut - totalCashIn;
+    }
+    return totalCashIn;
+  }, [totalCashOut, totalCashIn]);
 
   // Formula: PENDING BALANCE = SUM(FULL BILL) - SUM(Cash Paid) - SUM(Return Cutting)
   const totalCuttingAmount = cuttingEntriesBillsTotal - cuttingReturnsTotal;
@@ -747,6 +824,129 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     }
   };
 
+  // Contractor return article list (P600, P601, P802 etc)
+  const contractorArticles = useMemo(() => {
+    if (!activeCutter) return [];
+    const fromLedger = cuttingEntries
+      .filter(e => e.cutterId === activeCutter.id && e.type === 'RECEIVE')
+      .map(e => (e.articleTitle || e.article).trim())
+      .filter(Boolean);
+    const set = new Set(fromLedger);
+    if (set.size === 0) {
+      allArticleOptions.forEach(opt => set.add(opt.articleName));
+    }
+    return Array.from(set);
+  }, [activeCutter, cuttingEntries, allArticleOptions]);
+
+  // Entries of this cutter for this article
+  const returnEligibleEntries = useMemo(() => {
+    if (!activeCutter || !returnCuttingArticle) return [];
+    const target = returnCuttingArticle.trim().toLowerCase();
+    return cuttingEntries.filter(
+      e => e.cutterId === activeCutter.id && 
+           e.type === 'RECEIVE' &&
+           (e.articleTitle || e.article).trim().toLowerCase() === target
+    );
+  }, [activeCutter, returnCuttingArticle, cuttingEntries]);
+
+  // Target original entry matched by date
+  const matchedReturnEntry = useMemo(() => {
+    if (returnEligibleEntries.length === 0) return null;
+    return returnEligibleEntries.find(e => e.date === returnCuttingDate) || returnEligibleEntries[0];
+  }, [returnEligibleEntries, returnCuttingDate]);
+
+  // Rate for auto calculation
+  const returnRate = matchedReturnEntry?.rate || 0;
+
+  // Maximum eligible pairs on this entry/date
+  const returnMaxPairs = useMemo(() => {
+    if (!matchedReturnEntry) return 999999;
+    const alreadyReturned = cuttingEntries
+      .filter(e => e.type === 'RETURN' && e.returnReferenceId === matchedReturnEntry.id)
+      .reduce((sum, e) => sum + Math.abs(e.pairs), 0);
+    return Math.max(0, matchedReturnEntry.pairs - alreadyReturned);
+  }, [matchedReturnEntry, cuttingEntries]);
+
+  // Return amount auto-calculated: Qty * Rate
+  const returnAutoAmount = (Number(returnCuttingPairs) || 0) * returnRate;
+
+  const handleOpenReturnCuttingModal = () => {
+    if (!activeCutter) return;
+    const cutterReceiveEntries = cuttingEntries.filter(
+      e => e.cutterId === activeCutter.id && e.type === 'RECEIVE'
+    );
+    const distinctArticles = Array.from(
+      new Set(cutterReceiveEntries.map(e => (e.articleTitle || e.article).trim()).filter(Boolean))
+    );
+    const defaultArticle = distinctArticles[0] || (allArticleOptions[0]?.articleName ?? '');
+    setReturnCuttingArticle(defaultArticle);
+    const articleEntries = cutterReceiveEntries.filter(
+      e => (e.articleTitle || e.article).trim().toLowerCase() === defaultArticle.toLowerCase()
+    );
+    const firstDate = articleEntries[0]?.date || new Date().toISOString().slice(0, 10);
+    setReturnCuttingDate(firstDate);
+    setReturnCuttingPairs('');
+    setReturnCuttingReason('Damaged');
+    setReturnCuttingNotes('');
+    setIsReturnCuttingModalOpen(true);
+  };
+
+  const handleSubmitReturnCutting = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!activeCutter || isSavingReturn) return;
+    const qty = Number(returnCuttingPairs);
+    if (!returnCuttingArticle.trim()) {
+      showToast('Please select an article to return.', 'error');
+      return;
+    }
+    if (!returnCuttingDate) {
+      showToast('Please select the return date.', 'error');
+      return;
+    }
+    if (!Number.isInteger(qty) || qty <= 0) {
+      showToast('Please enter a valid whole-number quantity to return.', 'error');
+      return;
+    }
+    if (matchedReturnEntry && qty > returnMaxPairs) {
+      showToast(`Cannot return more than ${returnMaxPairs} pairs available on ${formatDate(returnCuttingDate)}.`, 'error');
+      return;
+    }
+
+    setIsSavingReturn(true);
+    try {
+      if (matchedReturnEntry) {
+        await returnCutting({
+          originalEntryId: matchedReturnEntry.id,
+          quantity: qty,
+          reason: returnCuttingReason,
+          date: returnCuttingDate,
+          remarks: `Return Cutting - ${returnCuttingArticle.trim()} - ${qty} pairs${returnCuttingNotes.trim() ? ` (${returnCuttingNotes.trim()})` : ''}`
+        });
+      } else {
+        await saveCuttingTransaction({
+          cutterId: activeCutter.id,
+          cutterName: activeCutter.name,
+          cutterType: activeCutter.cutterType || 'cutting_maker',
+          type: 'RECEIVE',
+          date: returnCuttingDate,
+          qty: -qty,
+          rate: returnRate,
+          article: returnCuttingArticle.trim(),
+          articleTitle: returnCuttingArticle.trim(),
+          remarks: `Return Cutting - ${returnCuttingArticle.trim()} - ${qty} pairs${returnCuttingNotes.trim() ? ` (${returnCuttingNotes.trim()})` : ''}`,
+          notes: returnCuttingNotes.trim()
+        });
+      }
+      setIsReturnCuttingModalOpen(false);
+      showToast(`Return Cutting successfully recorded: ${qty} pairs of ${returnCuttingArticle.trim()}`);
+    } catch (err) {
+      console.error('Error saving return cutting:', err);
+      showToast(err instanceof Error ? err.message : 'The return cutting entry could not be saved.', 'error');
+    } finally {
+      setIsSavingReturn(false);
+    }
+  };
+
   const saveInlineEdit = async () => {
     if (!inlineEdit) return;
     const nextValue = Number(inlineEdit.value);
@@ -925,12 +1125,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     }
   };
 
-  const openPaymentModal = (type: 'cash_in' | 'cash_out') => {
+  const openPaymentModal = (type: 'cash_in' | 'cash_out', initialLotId?: string) => {
     setPaymentForm({
       date: new Date().toISOString().slice(0, 10),
       amount: '',
       paymentMethod: 'Cash',
-      billNo: ''
+      billNo: '',
+      allocationMode: initialLotId ? 'single' : 'single',
+      lotId: initialLotId || '',
+      splitRows: []
     });
     setPaymentModalType(type);
   };
@@ -948,6 +1151,58 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       return;
     }
 
+    // Validate allocation
+    let resolvedLotId: string | undefined = undefined;
+    let resolvedLotNo: string | undefined = undefined;
+    let resolvedSplits: LotSplitAllocation[] | undefined = undefined;
+
+    if (paymentForm.allocationMode === 'single' && paymentForm.lotId) {
+      const targetLot = activeCutterEntries.find(e => e.id === paymentForm.lotId);
+      if (targetLot) {
+        resolvedLotId = targetLot.id;
+        resolvedLotNo = targetLot.billNo || targetLot.id.slice(-4);
+        const lotTotal = Math.abs(targetLot.pairs) * (Number(targetLot.rate) || 0);
+        const alreadyPaid = Math.max(0, lotPaidMap[targetLot.id] || 0);
+        const remaining = Math.max(0, lotTotal - alreadyPaid);
+        if (paymentModalType === 'cash_out' && amount > remaining) {
+          showToast(`Payment exceeds remaining balance for this Lot (Max: Rs. ${remaining.toLocaleString()})`, 'error');
+          return;
+        }
+      }
+    } else if (paymentForm.allocationMode === 'split') {
+      const validSplits = paymentForm.splitRows.filter(r => r.lotId && Number(r.amount) > 0);
+      if (validSplits.length === 0) {
+        showToast('Add at least one lot allocation for Split Payment.', 'error');
+        return;
+      }
+      const splitSum = validSplits.reduce((sum, r) => sum + Number(r.amount), 0);
+      if (Math.abs(splitSum - amount) > 0.01) {
+        showToast(`Split total (Rs. ${splitSum.toLocaleString()}) must match payment amount (Rs. ${amount.toLocaleString()}).`, 'error');
+        return;
+      }
+      for (const split of validSplits) {
+        const lot = activeCutterEntries.find(e => e.id === split.lotId);
+        if (lot) {
+          const lotTotal = Math.abs(lot.pairs) * (Number(lot.rate) || 0);
+          const alreadyPaid = Math.max(0, lotPaidMap[lot.id] || 0);
+          const rem = Math.max(0, lotTotal - alreadyPaid);
+          if (paymentModalType === 'cash_out' && Number(split.amount) > rem) {
+            showToast(`Split amount for Lot #${lot.billNo || lot.id.slice(-4)} exceeds remaining balance (Max: Rs. ${rem.toLocaleString()})`, 'error');
+            return;
+          }
+        }
+      }
+      resolvedSplits = validSplits.map(r => {
+        const lot = activeCutterEntries.find(e => e.id === r.lotId);
+        return {
+          lotId: r.lotId,
+          lotNo: lot?.billNo || lot?.id?.slice(-4) || 'Lot',
+          billNo: lot?.billNo || '',
+          amount: Number(r.amount)
+        };
+      });
+    }
+
     savingPaymentRef.current = true;
     setIsSavingPayment(true);
     try {
@@ -962,7 +1217,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           paymentModalType,
           paymentForm.date,
           billNo.toLocaleLowerCase(),
-          amount
+          amount,
+          resolvedLotId || ''
         ]))
       );
       const result = await runTransaction(db, async transaction => {
@@ -975,7 +1231,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           if (existingPaymentSnapshot.exists()) return { id: existingPaymentId, duplicate: true };
         }
 
-        transaction.set(paymentRef, {
+        const payload: Record<string, any> = {
           id: paymentRef.id,
           transactionId: paymentRef.id,
           cutterId: activeCutter.id,
@@ -986,7 +1242,16 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           billNo,
           type: paymentModalType,
           createdAt: serverTimestamp()
-        });
+        };
+        if (resolvedLotId) {
+          payload.lotId = resolvedLotId;
+          payload.lotNo = resolvedLotNo || '';
+        }
+        if (resolvedSplits && resolvedSplits.length > 0) {
+          payload.splitAllocations = resolvedSplits;
+        }
+
+        transaction.set(paymentRef, payload);
         transaction.set(idempotencyRef, {
           paymentId: paymentRef.id,
           createdAtMillis,
@@ -1011,11 +1276,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         amount,
         paymentMethod: paymentForm.paymentMethod,
         billNo,
+        lotId: resolvedLotId,
+        lotNo: resolvedLotNo,
+        splitAllocations: resolvedSplits,
         type: paymentModalType,
         createdAt: new Date(createdAtMillis).toISOString()
       }, ...previous.filter(payment => payment.id !== result.id)]);
       setPaymentModalType(null);
-      showToast(paymentModalType === 'cash_in' ? 'Cash-in recorded.' : 'Cash-out recorded.');
+      showToast(paymentModalType === 'cash_in' ? 'Cash-in recorded.' : 'Cash-out (Lot Payment) recorded.');
     } catch (error) {
       console.error('Unable to save Nasim ledger payment:', error);
       showToast(error instanceof Error ? error.message : 'The payment could not be saved.', 'error');
@@ -1469,23 +1737,35 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </div>
               </div>
 
-              {/* Two Main Action Buttons as strictly required:
-                  1. "Issue Cutting" (Orange)
-                  2. "Receive Cutting" (Green) */}
-              <div className="flex items-center gap-3">
+              {/* Three Main Action Buttons as strictly required:
+                  [New Cutting (orange)] [Return Cutting (orange/red)] [Receive Cutting (blue)] */}
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
                 <button
+                  type="button"
                   onClick={() => handleOpenTxModal('GIVE')}
                   disabled={activeCutter.isActive === false}
-                  className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-amber-500 hover:bg-amber-600 text-white shadow-md shadow-amber-500/25 transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+                  className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-amber-500 hover:bg-amber-600 text-white shadow-md shadow-amber-500/25 transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                 >
-                  <ArrowUpRight className="w-4 h-4" />
-                  <span>Issue Cutting</span>
+                  <Scissors className="w-4 h-4" />
+                  <span>New Cutting</span>
                 </button>
 
                 <button
+                  type="button"
+                  onClick={handleOpenReturnCuttingModal}
+                  disabled={activeCutter.isActive === false}
+                  className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-gradient-to-r from-orange-500 to-rose-600 hover:from-orange-600 hover:to-rose-700 text-white shadow-md shadow-rose-500/25 transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  title="Return Cutting Entry"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>Return Cutting</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => handleOpenTxModal('RECEIVE')}
                   disabled={activeCutter.isActive === false}
-                  className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/25 transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+                  className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/25 transition active:scale-95 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                 >
                   <ArrowDownLeft className="w-4 h-4" />
                   <span>Receive Cutting</span>
@@ -1512,7 +1792,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 <div className="text-2xl font-black text-emerald-700 font-mono mt-1">
                   Rs. {totalPaid.toLocaleString()}
                 </div>
-                <p className="text-[11px] text-emerald-900/70 mt-1">Cash-in payments in this date range</p>
+                <p className="text-[11px] text-emerald-900/70 mt-1">Cash Paid (Out) to {activeCutter.name}</p>
               </div>
 
               <div className="p-4 rounded-xl bg-blue-50/80 border border-blue-200">
@@ -1522,7 +1802,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 <div className={`text-2xl font-black font-mono mt-1 ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-700'}`}>
                   Rs. {remainingBalance.toLocaleString()}
                 </div>
-                <p className="text-[11px] text-blue-900/70 mt-1">Cutting amount minus total paid</p>
+                <p className="text-[11px] text-blue-900/70 mt-1">Cutting Amount minus Total Paid & Returns</p>
                 {extraPaid > 0 && (
                   <p className="mt-2 text-sm font-black text-emerald-700">Extra Paid: Rs. {extraPaid.toLocaleString()}</p>
                 )}
@@ -1543,11 +1823,17 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button onClick={handleDateWisePdf} className="rounded-lg bg-orange-500 px-3 py-2 text-xs font-bold text-white hover:bg-orange-600">Date-Range Ledger PDF</button>
-                <button onClick={handleFullLedgerPdf} className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700">Full Ledger PDF</button>
-                <button onClick={handleCashbookPdf} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800">Cashbook PDF</button>
-                <button onClick={() => openPaymentModal('cash_in')} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700">Cash In</button>
-                <button onClick={() => openPaymentModal('cash_out')} className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700">Cash Out</button>
+                <button onClick={handleDateWisePdf} className="rounded-lg bg-orange-500 px-3 py-2 text-xs font-bold text-white hover:bg-orange-600 cursor-pointer">Date-Range Ledger PDF</button>
+                <button onClick={handleFullLedgerPdf} className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700 cursor-pointer">Full Ledger PDF</button>
+                <button onClick={handleCashbookPdf} className="rounded-lg bg-slate-700 px-3 py-2 text-xs font-bold text-white hover:bg-slate-800 cursor-pointer">Cashbook PDF</button>
+                <button onClick={() => openPaymentModal('cash_out')} className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-2 text-xs font-bold text-white hover:bg-rose-700 transition shadow-xs cursor-pointer">
+                  <Minus className="w-3.5 h-3.5" />
+                  <span>Cash Out (Payment)</span>
+                </button>
+                <button onClick={() => openPaymentModal('cash_in')} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white hover:bg-emerald-700 transition shadow-xs cursor-pointer">
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Cash In</span>
+                </button>
               </div>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1590,33 +1876,39 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 <table className="min-w-[1250px] w-full text-left text-xs">
                   <thead>
                     <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
-                      <th className="py-3 px-4">1. Date (Wasool Date)</th>
-                      <th className="py-3 px-4">2. Customer Name</th>
-                      <th className="py-3 px-4">Article</th>
-                      <th className="py-3 px-4">Size</th>
-                      <th className="py-3 px-4 text-right">Pairs</th>
-                      <th className="py-3 px-4">Average</th>
-                      <th className="py-3 px-4 text-right">Rate (Rs.)</th>
-                      <th className="py-3 px-4 text-right">Total Balance</th>
-                      <th className="py-3 px-4 text-right">Balance</th>
-                      <th className="py-3 px-4 text-center">10. Action</th>
+                      <th className="py-3 px-3">1. Date (Wasool)</th>
+                      <th className="py-3 px-3">2. Customer</th>
+                      <th className="py-3 px-3">Article</th>
+                      <th className="py-3 px-2">Size</th>
+                      <th className="py-3 px-3 text-right">Pairs</th>
+                      <th className="py-3 px-2">Avg</th>
+                      <th className="py-3 px-3 text-right">Rate (Rs.)</th>
+                      <th className="py-3 px-3 text-right">Total Amount</th>
+                      <th className="py-3 px-3 text-right text-emerald-700">Paid Amount</th>
+                      <th className="py-3 px-3 text-right text-rose-700">Remaining</th>
+                      <th className="py-3 px-3 text-center">Status</th>
+                      <th className="py-3 px-3 text-right">Balance</th>
+                      <th className="py-3 px-3 text-center">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-medium">
                     {visibleLedgerEntries.map(entry => {
+                      const totalAmt = Math.abs(entry.pairs) * (Number(entry.rate) || 0);
+                      const paidAmt = lotPaidMap[entry.id] || 0;
+                      const remAmt = Math.max(0, totalAmt - paidAmt);
                       return (
                         <tr key={entry.id} className={entry.type === 'RETURN' ? 'bg-[#ffe6e6] font-bold text-[#cc0000]' : 'hover:bg-slate-50/70 transition'}>
-                          <td className="py-3.5 px-4 font-mono">{formatDate(entry.date)}</td>
-                          <td className="py-3.5 px-4">{entry.customerName || 'PRO4'}</td>
-                          <td className="py-3.5 px-4 font-bold text-slate-900">
+                          <td className="py-3.5 px-3 font-mono">{formatDate(entry.date)}</td>
+                          <td className="py-3.5 px-3">{entry.customerName || 'PRO4'}</td>
+                          <td className="py-3.5 px-3 font-bold text-slate-900">
                             {entry.articleTitle || entry.article}
                             {entry.type === 'RETURN' && <span className="mt-1 block text-[10px] font-semibold text-[#cc0000]">{entry.remarks}</span>}
                           </td>
-                          <td className="py-3.5 px-4">{entry.sizeName || entry.size || '-'}</td>
+                          <td className="py-3.5 px-2">{entry.sizeName || entry.size || '-'}</td>
                           {(['pairs'] as const).map(field => (
                             <td
                               key={field}
-                              className="py-3.5 px-4 text-right font-mono"
+                              className="py-3.5 px-3 text-right font-mono"
                               title={entry.type === 'RETURN' ? undefined : 'Double-click to quick edit'}
                               onDoubleClick={entry.type === 'RETURN' ? undefined : () => setInlineEdit({
                                 entry,
@@ -1652,9 +1944,9 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                               )}
                             </td>
                           ))}
-                          <td className="py-3.5 px-4">{entry.average || '-'}</td>
+                          <td className="py-3.5 px-2">{entry.average || '-'}</td>
                           <td
-                            className="py-3.5 px-4 text-right font-mono"
+                            className="py-3.5 px-3 text-right font-mono"
                             title={entry.type === 'RETURN' ? undefined : 'Double-click to quick edit'}
                             onDoubleClick={entry.type === 'RETURN' ? undefined : () => setInlineEdit({ entry, field: 'rate', value: String(entry.rate) })}
                           >
@@ -1681,18 +1973,67 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                               />
                             ) : (
                               <span className={entry.rate ? 'cursor-text' : 'cursor-text text-rose-600'}>
-                                {entry.rate ? `Rs. ${entry.rate}` : 'Rs. 0 - Old Entry'}
+                                {entry.rate ? `Rs. ${entry.rate}` : 'Rs. 0'}
                               </span>
                             )}
                           </td>
-                          <td className={`py-3.5 px-4 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-emerald-700'}`}>
-                            Rs. {Number(entry.totalBalance) || Number(entry.lotTotal) || entry.pairs * entry.rate}
+
+                          {/* Total Amount */}
+                          <td className={`py-3.5 px-3 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-slate-900'}`}>
+                            {entry.type === 'RETURN' ? `-Rs. ${totalAmt.toLocaleString()}` : `Rs. ${totalAmt.toLocaleString()}`}
                           </td>
-                          <td className={`py-3.5 px-4 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-blue-800 bg-blue-50'}`}>
-                            Rs. {entry.runningBalance}
+
+                          {/* Paid Amount */}
+                          <td className="py-3.5 px-3 text-right font-mono font-bold text-emerald-700">
+                            {entry.type === 'RETURN' ? '—' : `Rs. ${paidAmt.toLocaleString()}`}
                           </td>
-                          <td className="py-3.5 px-4 text-center">
+
+                          {/* Remaining Balance */}
+                          <td className="py-3.5 px-3 text-right font-mono font-bold text-rose-700">
+                            {entry.type === 'RETURN' ? '—' : `Rs. ${remAmt.toLocaleString()}`}
+                          </td>
+
+                          {/* Status Badge */}
+                          <td className="py-3.5 px-3 text-center">
+                            {entry.type === 'RETURN' ? (
+                              <span className="rounded-full bg-rose-100 text-rose-800 px-2 py-0.5 text-[10px] font-bold border border-rose-200">
+                                Return
+                              </span>
+                            ) : (
+                              remAmt === 0 && totalAmt > 0 ? (
+                                <span className="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[10px] font-bold border border-emerald-300">
+                                  Paid
+                                </span>
+                              ) : paidAmt > 0 ? (
+                                <span className="rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 text-[10px] font-bold border border-amber-300">
+                                  Partial
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-rose-100 text-rose-800 px-2 py-0.5 text-[10px] font-bold border border-rose-300">
+                                  Unpaid
+                                </span>
+                              )
+                            )}
+                          </td>
+
+                          {/* Running Balance */}
+                          <td className={`py-3.5 px-3 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-blue-800 bg-blue-50/50'}`}>
+                            Rs. {entry.runningBalance?.toLocaleString() ?? 0}
+                          </td>
+
+                          {/* Action */}
+                          <td className="py-3.5 px-3 text-center">
                             <div className="flex items-center justify-center gap-1.5">
+                              {entry.type !== 'RETURN' && remAmt > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => openPaymentModal('cash_out', entry.id)}
+                                  className="px-2 py-1 rounded-md bg-rose-50 text-rose-700 hover:bg-rose-100 font-bold text-[10px] border border-rose-200 transition cursor-pointer"
+                                  title="Pay for this lot"
+                                >
+                                  Pay
+                                </button>
+                              )}
                               <button
                                 onClick={() => openEditEntry(entry)}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
@@ -1707,17 +2048,6 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                               >
                                 <Trash2 className="w-4 h-4" />
                               </button>
-                              {entry.type === 'RECEIVE' && (
-                                <button
-                                  type="button"
-                                  onClick={() => openReturnModal(entry)}
-                                  className="ml-1 inline-flex items-center gap-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 text-[11px] font-bold shadow-xs transition cursor-pointer"
-                                  title="Return cutting pairs"
-                                >
-                                  <ArrowLeft className="w-3 h-3" />
-                                  <span>Return Cutting</span>
-                                </button>
-                              )}
                             </div>
                           </td>
                         </tr>
@@ -1725,14 +2055,21 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     })}
                   </tbody>
                   <tfoot>
-                    <tr className="border-t-2 border-slate-300 bg-slate-50 font-black">
-                      <td className="px-4 py-3" colSpan={4}>TOTAL</td>
-                      <td className="px-4 py-3 text-right">{visibleLedgerEntries.reduce((sum, entry) => sum + entry.pairs, 0)}</td>
+                    <tr className="border-t-2 border-slate-300 bg-slate-50 font-black text-xs">
+                      <td className="px-3 py-3" colSpan={4}>TOTAL</td>
+                      <td className="px-3 py-3 text-right">{visibleLedgerEntries.reduce((sum, entry) => sum + entry.pairs, 0).toLocaleString()}</td>
                       <td colSpan={2}></td>
-                      <td className="px-4 py-3 text-right text-emerald-700">
-                        Rs. {visibleLedgerEntries.reduce((sum, entry) => sum + entry.pairs * entry.rate, 0).toLocaleString()}
+                      <td className="px-3 py-3 text-right text-slate-900">
+                        Rs. {visibleLedgerEntries.reduce((sum, entry) => sum + (entry.type === 'RETURN' ? -Math.abs(entry.pairs * entry.rate) : entry.pairs * entry.rate), 0).toLocaleString()}
                       </td>
-                      <td className="px-4 py-3 text-right text-blue-800" colSpan={2}>
+                      <td className="px-3 py-3 text-right text-emerald-700">
+                        Rs. {visibleLedgerEntries.filter(e => e.type !== 'RETURN').reduce((sum, entry) => sum + (lotPaidMap[entry.id] || 0), 0).toLocaleString()}
+                      </td>
+                      <td className="px-3 py-3 text-right text-rose-700">
+                        Rs. {visibleLedgerEntries.filter(e => e.type !== 'RETURN').reduce((sum, entry) => sum + Math.max(0, entry.pairs * entry.rate - (lotPaidMap[entry.id] || 0)), 0).toLocaleString()}
+                      </td>
+                      <td></td>
+                      <td className="px-3 py-3 text-right text-blue-800" colSpan={2}>
                         Pending: Rs. {remainingBalance.toLocaleString()}
                       </td>
                     </tr>
@@ -1748,13 +2085,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               <p className="mt-1 text-xs text-slate-500">Cash in and cash out records for {activeCutter.name}, filtered by the selected date range.</p>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] text-left text-sm">
+              <table className="w-full min-w-[760px] text-left text-sm">
                 <thead className="bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600">
                   <tr>
                     <th className="px-4 py-3">Date</th>
                     <th className="px-4 py-3 text-right">Amount</th>
                     <th className="px-4 py-3">Method</th>
                     <th className="px-4 py-3">Bill No</th>
+                    <th className="px-4 py-3">Lot No / Allocated Lot</th>
                     <th className="px-4 py-3">Type</th>
                     <th className="px-4 py-3 text-right">Action</th>
                   </tr>
@@ -1762,28 +2100,44 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 <tbody className="divide-y divide-slate-100">
                   {dateFilteredPayments.map(payment => (
                     <tr key={payment.id} className="hover:bg-slate-50 transition">
-                      <td className="px-4 py-3 font-mono">{formatDate(payment.date)}</td>
-                      <td className="px-4 py-3 text-right font-mono font-bold">
+                      <td className="px-4 py-3 font-mono text-slate-800">{formatDate(payment.date)}</td>
+                      <td className="px-4 py-3 text-right font-mono">
                         {payment.type === 'cash_out' ? (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-700 border border-rose-200 font-mono">
-                            - Rs. {payment.amount.toLocaleString()}
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-rose-100 text-rose-700 border border-rose-200 font-mono shadow-2xs">
+                            <Minus className="w-3 h-3 stroke-[3]" /> Rs. {payment.amount.toLocaleString()}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 font-mono">
-                            + Rs. {payment.amount.toLocaleString()}
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-200 font-mono shadow-2xs">
+                            <Plus className="w-3 h-3 stroke-[3]" /> Rs. {payment.amount.toLocaleString()}
                           </span>
                         )}
                       </td>
                       <td className="px-4 py-3 font-medium text-slate-700">{payment.paymentMethod}</td>
                       <td className="px-4 py-3 font-mono text-slate-500">{payment.billNo || '-'}</td>
-                      <td className="px-4 py-3 font-bold">
-                        {payment.type === 'cash_in' ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md font-bold">
-                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Cash In
+                      <td className="px-4 py-3 font-mono text-slate-700 text-xs">
+                        {payment.splitAllocations && payment.splitAllocations.length > 0 ? (
+                          <div className="flex flex-col gap-0.5">
+                            <span className="font-bold text-blue-700 text-xs">Split ({payment.splitAllocations.length} lots)</span>
+                            <span className="text-[10px] text-slate-500 font-normal">
+                              {payment.splitAllocations.map(s => `Lot #${s.lotNo}: Rs. ${s.amount.toLocaleString()}`).join(', ')}
+                            </span>
+                          </div>
+                        ) : payment.lotNo || payment.lotId ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-800">
+                            Lot #{payment.lotNo || payment.lotId?.slice(-4)}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1.5 text-xs text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md font-bold">
-                            <span className="w-2 h-2 rounded-full bg-rose-500"></span> Cash Out
+                          <span className="text-slate-400 text-xs italic">Unallocated</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 font-bold">
+                        {payment.type === 'cash_out' ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg font-bold border border-rose-200">
+                            <span className="w-2 h-2 rounded-full bg-rose-500"></span> Cash Paid (Out)
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg font-bold border border-emerald-200">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Cash In
                           </span>
                         )}
                       </td>
@@ -1794,34 +2148,53 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                       </td>
                     </tr>
                   ))}
-                  {dateFilteredPayments.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">No payments in this date range.</td></tr>}
+                  {dateFilteredPayments.length === 0 && <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">No payments in this date range.</td></tr>}
                 </tbody>
-                <tfoot className="border-t-2 border-slate-300 bg-slate-50 text-xs sm:text-sm font-black">
+                <tfoot className="border-t-2 border-slate-300 bg-slate-50 text-xs sm:text-sm font-black divide-y divide-slate-200">
                   <tr>
-                    <td className="px-4 py-3">1. Cutting Entries Total</td>
-                    <td className="px-4 py-3 text-right font-mono text-amber-700">Rs. {cuttingEntriesBillsTotal.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={4}>Total of cutting bills in this date range</td>
+                    <td className="px-4 py-3 font-bold">1. Cutting entries in this date range</td>
+                    <td className="px-4 py-3 text-right font-mono text-amber-700 font-black">Rs. {cuttingEntriesBillsTotal.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>Sum of all full cutting bills in selected date range</td>
                   </tr>
                   {cuttingReturnsTotal > 0 && (
                     <tr>
-                      <td className="px-4 py-3 text-rose-700">2. Return Cutting Deducted</td>
-                      <td className="px-4 py-3 text-right font-mono text-rose-700">- Rs. {cuttingReturnsTotal.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-slate-500 font-normal" colSpan={4}>Returned lots deducted from bill</td>
+                      <td className="px-4 py-3 text-rose-700 font-bold">2. Return Cutting Deducted</td>
+                      <td className="px-4 py-3 text-right font-mono text-rose-700 font-black">- Rs. {cuttingReturnsTotal.toLocaleString()}</td>
+                      <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>Sum of all return cutting entries deducted</td>
                     </tr>
                   )}
                   <tr>
-                    <td className="px-4 py-3 text-emerald-700">3. Cash Paid / In</td>
-                    <td className="px-4 py-3 text-right font-mono text-emerald-700">- Rs. {totalPaid.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={4}>Cash In payments in this date range</td>
+                    <td className="px-4 py-3 text-rose-700 font-bold">
+                      {cuttingReturnsTotal > 0 ? '3. Cash Paid / Cash Out in this date range' : '2. Cash Paid / Cash Out in this date range'}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-rose-700 font-black">
+                      - Rs. {totalPaid.toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>
+                      Cash payments paid out to {activeCutter.name}
+                    </td>
                   </tr>
-                  <tr className="bg-blue-50/90 border-t border-blue-200">
-                    <td className="px-4 py-3.5 text-blue-900 uppercase">PENDING BALANCE</td>
+                  {totalCashIn > 0 && totalCashOut > 0 && (
+                    <tr>
+                      <td className="px-4 py-3 text-emerald-700 font-bold">
+                        Cash In Adjustment
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-emerald-700 font-black">
+                        + Rs. {totalCashIn.toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>
+                        Adjustments or cash received back from contractor
+                      </td>
+                    </tr>
+                  )}
+                  <tr className="bg-blue-50/90 border-t-2 border-blue-200">
+                    <td className="px-4 py-3.5 text-blue-900 uppercase font-black">PENDING BALANCE</td>
                     <td className={`px-4 py-3.5 text-right font-mono text-base font-black ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-800'}`}>
                       Rs. {remainingBalance.toLocaleString()}
                     </td>
-                    <td className="px-4 py-3.5 text-slate-700 font-semibold" colSpan={4}>
-                      Formula: SUM(Cutting: Rs.{cuttingEntriesBillsTotal.toLocaleString()}) - Cash Paid(Rs.{totalPaid.toLocaleString()}) - Returns(Rs.{cuttingReturnsTotal.toLocaleString()}) = Rs.{remainingBalance.toLocaleString()}
-                      {extraPaid > 0 && <span className="ml-2 text-emerald-700 font-black">· Extra Paid: Rs. {extraPaid.toLocaleString()}</span>}
+                    <td className="px-4 py-3.5 text-slate-700 font-semibold" colSpan={5}>
+                      Formula: SUM(Cutting: Rs.{cuttingEntriesBillsTotal.toLocaleString()}) - Cash Paid(Rs.{totalPaid.toLocaleString()}){cuttingReturnsTotal > 0 ? ` - Returns(Rs.${cuttingReturnsTotal.toLocaleString()})` : ''} = Rs.{remainingBalance.toLocaleString()}
+                      {extraPaid > 0 && <span className="ml-2 text-emerald-700 font-black">&bull; Extra Paid: Rs. {extraPaid.toLocaleString()}</span>}
                     </td>
                   </tr>
                 </tfoot>
@@ -2505,42 +2878,426 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         </div>
       )}
 
-      {paymentModalType && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4">
-          <form onSubmit={handleSavePayment} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
+      {/* NEW CONTRACTOR RETURN CUTTING ENTRY MODAL (Requirement: NAEM Ledger button click) */}
+      {isReturnCuttingModalOpen && activeCutter && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <form onSubmit={handleSubmitReturnCutting} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-4 border-b border-rose-100 pb-3">
               <div>
-                <h3 className={`text-lg font-bold ${paymentModalType === 'cash_in' ? 'text-emerald-700' : 'text-rose-700'}`}>
-                  {paymentModalType === 'cash_in' ? 'Cash In' : 'Cash Out'}
-                </h3>
-                <p className="mt-1 text-sm text-slate-500">{activeCutter?.name || 'Selected'} ledger payment</p>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-md bg-rose-100 p-1 text-rose-700">
+                    <RotateCcw className="h-4 w-4" />
+                  </span>
+                  <h3 className="text-lg font-black text-rose-700">Return Cutting Entry</h3>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  Deduct returned cutting pairs from {activeCutter.name} ledger and adjust stock.
+                </p>
               </div>
-              <button type="button" onClick={() => setPaymentModalType(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100" aria-label="Close payment modal">
+              <button
+                type="button"
+                onClick={() => setIsReturnCuttingModalOpen(false)}
+                disabled={isSavingReturn}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 transition"
+                aria-label="Close modal"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <label className="block text-sm font-semibold text-slate-700">
-              Date
-              <input required type="date" value={paymentForm.date} onChange={event => setPaymentForm(form => ({ ...form, date: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
-            </label>
-            <label className="block text-sm font-semibold text-slate-700">
-              Amount
-              <input required min="0.01" step="any" type="number" value={paymentForm.amount} onChange={event => setPaymentForm(form => ({ ...form, amount: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
-            </label>
-            <label className="block text-sm font-semibold text-slate-700">
-              Payment Method
-              <select required value={paymentForm.paymentMethod} onChange={event => setPaymentForm(form => ({ ...form, paymentMethod: event.target.value as LedgerPaymentMethod }))} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2">
+
+            {/* 1. Cutting Contractor (Auto NAEM / NAIM) */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-600">
+                Cutting Contractor
+              </label>
+              <input
+                readOnly
+                value={`${activeCutter.name} (${activeCutter.cutterType === 'cutting_maker' ? 'Cutter Maker' : 'Cutting Man'})`}
+                className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-bold text-slate-800"
+              />
+            </div>
+
+            {/* 2. Select Article Dropdown (REQUIRED) */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                Select Article *
+              </label>
+              <select
+                required
+                value={returnCuttingArticle}
+                onChange={e => {
+                  const art = e.target.value;
+                  setReturnCuttingArticle(art);
+                  const matching = cuttingEntries.filter(
+                    entry => entry.cutterId === activeCutter.id &&
+                             entry.type === 'RECEIVE' &&
+                             (entry.articleTitle || entry.article).trim().toLowerCase() === art.trim().toLowerCase()
+                  );
+                  if (matching[0]?.date) {
+                    setReturnCuttingDate(matching[0].date);
+                  }
+                }}
+                className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 outline-none"
+              >
+                <option value="" disabled>-- Select Article (P600, P601, etc.) --</option>
+                {contractorArticles.map(art => (
+                  <option key={art} value={art}>{art}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* 3. Select Date (Date picker) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Select Cutting Date *
+                </label>
+                <input
+                  required
+                  type="date"
+                  value={returnCuttingDate}
+                  onChange={e => setReturnCuttingDate(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 outline-none"
+                />
+              </div>
+
+              {/* 4. Quantity / Pairs */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Quantity / Pairs *
+                </label>
+                <input
+                  required
+                  type="number"
+                  min="1"
+                  max={returnMaxPairs}
+                  step="1"
+                  placeholder="e.g. 50"
+                  value={returnCuttingPairs}
+                  onChange={e => setReturnCuttingPairs(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono font-bold text-slate-900 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Info Badge on Available / Eligible Pairs & Rate */}
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs space-y-1">
+              <div className="flex justify-between text-slate-600">
+                <span>Original Cutting on {returnCuttingDate ? formatDate(returnCuttingDate) : 'selected date'}:</span>
+                <span className="font-bold text-slate-900">
+                  {matchedReturnEntry ? `${matchedReturnEntry.pairs} pairs (${returnMaxPairs} available)` : 'Direct / Manual entry'}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Contractor Cutting Rate:</span>
+                <span className="font-bold text-slate-900">Rs. {returnRate} / pair</span>
+              </div>
+            </div>
+
+            {/* 5. Return Amount Auto-Calculate: Qty * Rate */}
+            <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-3.5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-rose-800 block">
+                    Auto-Calculated Return Amount (Qty × Rate)
+                  </span>
+                  <p className="text-[11px] text-rose-700/80">Will be deducted from Total Cutting & Pending Balance</p>
+                </div>
+                <div className="text-xl font-mono font-black text-rose-700">
+                  Rs. {returnAutoAmount.toLocaleString()}
+                </div>
+              </div>
+            </div>
+
+            {/* 6. Reason / Note (Optional) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Reason
+                </label>
+                <select
+                  value={returnCuttingReason}
+                  onChange={e => setReturnCuttingReason(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 outline-none"
+                >
+                  <option value="Damaged">Damaged</option>
+                  <option value="Wrong Size">Wrong Size</option>
+                  <option value="Quality">Quality Defect</option>
+                  <option value="Excess Leather Returned">Excess Returned</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Note / Remarks (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Returned 50 pairs due to cut defect"
+                  value={returnCuttingNotes}
+                  onChange={e => setReturnCuttingNotes(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2.5 border-t border-slate-100 pt-4">
+              <button
+                type="button"
+                onClick={() => setIsReturnCuttingModalOpen(false)}
+                disabled={isSavingReturn}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingReturn || !returnCuttingArticle || !returnCuttingPairs || Number(returnCuttingPairs) <= 0}
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-orange-600 to-rose-600 hover:from-orange-700 hover:to-rose-700 px-5 py-2 text-sm font-bold text-white shadow-md shadow-rose-600/25 transition disabled:opacity-50"
+              >
+                {isSavingReturn && <Loader2 className="h-4 w-4 animate-spin" />}
+                <span>{isSavingReturn ? 'Saving Return...' : 'Submit Return Cutting'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {paymentModalType && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
+          <form onSubmit={handleSavePayment} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className={`text-lg font-black flex items-center gap-2 ${paymentModalType === 'cash_in' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                  {paymentModalType === 'cash_out' ? <Minus className="w-5 h-5 stroke-[3]" /> : <Plus className="w-5 h-5 stroke-[3]" />}
+                  {paymentModalType === 'cash_in' ? 'Record Cash In' : 'Record Cash Out / Payment'}
+                </h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  {paymentModalType === 'cash_out' 
+                    ? `Cash payment to ${activeCutter?.name || 'contractor'} (reduces pending balance)` 
+                    : `Cash received back or advance credit from ${activeCutter?.name || 'contractor'}`}
+                </p>
+              </div>
+              <button type="button" onClick={() => setPaymentModalType(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition cursor-pointer" aria-label="Close payment modal">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Payment Date
+              </label>
+              <input required type="date" value={paymentForm.date} onChange={event => setPaymentForm(form => ({ ...form, date: event.target.value }))} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/20" />
+            </div>
+            {/* Lot Allocation Section */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 space-y-3">
+              <label className="block text-xs font-bold text-slate-800">
+                Payment Allocation / Select Lot
+              </label>
+
+              {/* 3 Allocation Mode Buttons */}
+              <div className="grid grid-cols-3 gap-1 p-1 bg-slate-200/70 rounded-xl text-xs font-bold text-slate-600">
+                <button
+                  type="button"
+                  onClick={() => setPaymentForm(form => ({ ...form, allocationMode: 'single' }))}
+                  className={`py-1.5 rounded-lg text-center transition cursor-pointer ${paymentForm.allocationMode === 'single' ? 'bg-white text-slate-900 shadow-2xs' : 'hover:text-slate-900'}`}
+                >
+                  Specific Lot
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentForm(form => ({
+                      ...form,
+                      allocationMode: 'split',
+                      splitRows: form.splitRows.length > 0 ? form.splitRows : [{ lotId: '', amount: '' }]
+                    }));
+                  }}
+                  className={`py-1.5 rounded-lg text-center transition cursor-pointer ${paymentForm.allocationMode === 'split' ? 'bg-white text-slate-900 shadow-2xs' : 'hover:text-slate-900'}`}
+                >
+                  Split Payment
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentForm(form => ({ ...form, allocationMode: 'unallocated', lotId: '' }))}
+                  className={`py-1.5 rounded-lg text-center transition cursor-pointer ${paymentForm.allocationMode === 'unallocated' ? 'bg-white text-slate-900 shadow-2xs' : 'hover:text-slate-900'}`}
+                >
+                  Unallocated
+                </button>
+              </div>
+
+              {/* Mode: Single Lot */}
+              {paymentForm.allocationMode === 'single' && (
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Select Lot for this payment
+                  </label>
+                  <select
+                    value={paymentForm.lotId}
+                    onChange={e => {
+                      const selectedId = e.target.value;
+                      const lot = activeCutterEntries.find(ent => ent.id === selectedId);
+                      const lotTotal = lot ? Math.abs(lot.pairs) * (Number(lot.rate) || 0) : 0;
+                      const paid = lot ? (lotPaidMap[lot.id] || 0) : 0;
+                      const rem = Math.max(0, lotTotal - paid);
+                      setPaymentForm(form => ({
+                        ...form,
+                        lotId: selectedId,
+                        amount: !form.amount && rem > 0 ? String(rem) : form.amount,
+                        billNo: form.billNo || lot?.billNo || ''
+                      }));
+                    }}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-rose-500/20"
+                  >
+                    <option value="">-- Choose Cutting Lot --</option>
+                    {activeCutterEntries
+                      .filter(entry => entry.type !== 'RETURN')
+                      .map(entry => {
+                        const total = Math.abs(entry.pairs) * (Number(entry.rate) || 0);
+                        const paid = lotPaidMap[entry.id] || 0;
+                        const rem = Math.max(0, total - paid);
+                        return (
+                          <option key={entry.id} value={entry.id}>
+                            Lot #{entry.billNo || entry.id.slice(-4)} &bull; {entry.articleTitle || entry.article} ({entry.pairs} pairs) - Rem: Rs. {rem.toLocaleString()} {rem === 0 ? '(PAID)' : ''}
+                          </option>
+                        );
+                      })}
+                  </select>
+
+                  {/* Active lot info badge */}
+                  {(() => {
+                    const lot = activeCutterEntries.find(ent => ent.id === paymentForm.lotId);
+                    if (!lot) return null;
+                    const lotTotal = Math.abs(lot.pairs) * (Number(lot.rate) || 0);
+                    const paid = lotPaidMap[lot.id] || 0;
+                    const rem = Math.max(0, lotTotal - paid);
+                    const isOver = paymentModalType === 'cash_out' && Number(paymentForm.amount) > rem;
+                    return (
+                      <div className={`p-2.5 rounded-xl border text-xs ${isOver ? 'bg-rose-50 border-rose-300 text-rose-800' : 'bg-blue-50 border-blue-200 text-blue-900'}`}>
+                        <div className="flex justify-between font-bold">
+                          <span>Lot Total: Rs. {lotTotal.toLocaleString()}</span>
+                          <span>Paid: Rs. {paid.toLocaleString()}</span>
+                          <span className="text-rose-700">Remaining: Rs. {rem.toLocaleString()}</span>
+                        </div>
+                        {isOver && (
+                          <p className="mt-1 font-bold text-rose-600">
+                            Payment exceeds remaining balance for this Lot by Rs. {(Number(paymentForm.amount) - rem).toLocaleString()}.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Mode: Split Payment */}
+              {paymentForm.allocationMode === 'split' && (
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center text-xs font-bold text-slate-700">
+                    <span>Divide Amount Across Lots</span>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentForm(form => ({
+                        ...form,
+                        splitRows: [...form.splitRows, { lotId: '', amount: '' }]
+                      }))}
+                      className="text-blue-600 hover:text-blue-700 cursor-pointer"
+                    >
+                      + Add Lot
+                    </button>
+                  </div>
+                  {paymentForm.splitRows.map((row, idx) => {
+                    const lot = activeCutterEntries.find(ent => ent.id === row.lotId);
+                    const lotTotal = lot ? Math.abs(lot.pairs) * (Number(lot.rate) || 0) : 0;
+                    const paid = lot ? (lotPaidMap[lot.id] || 0) : 0;
+                    const rem = Math.max(0, lotTotal - paid);
+                    return (
+                      <div key={idx} className="flex items-center gap-2">
+                        <select
+                          value={row.lotId}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setPaymentForm(form => {
+                              const next = [...form.splitRows];
+                              next[idx] = { ...next[idx], lotId: val };
+                              return { ...form, splitRows: next };
+                            });
+                          }}
+                          className="flex-1 rounded-xl border border-slate-300 bg-white p-2 text-xs"
+                        >
+                          <option value="">-- Choose Lot --</option>
+                          {activeCutterEntries.filter(e => e.type !== 'RETURN').map(e => (
+                            <option key={e.id} value={e.id}>
+                              Lot #{e.billNo || e.id.slice(-4)} - {e.articleTitle || e.article} (Rem: Rs. {Math.max(0, (e.pairs * (Number(e.rate) || 0)) - (lotPaidMap[e.id] || 0)).toLocaleString()})
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="number"
+                          placeholder="Amount"
+                          value={row.amount}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setPaymentForm(form => {
+                              const next = [...form.splitRows];
+                              next[idx] = { ...next[idx], amount: val };
+                              return { ...form, splitRows: next };
+                            });
+                          }}
+                          className="w-28 rounded-xl border border-slate-300 p-2 text-xs font-mono font-bold"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setPaymentForm(form => ({
+                            ...form,
+                            splitRows: form.splitRows.filter((_, i) => i !== idx)
+                          }))}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                  <div className="flex justify-between items-center text-xs text-slate-600 font-bold pt-1">
+                    <span>Allocated: Rs. {paymentForm.splitRows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0).toLocaleString()}</span>
+                    <span>Total Payment: Rs. {(Number(paymentForm.amount) || 0).toLocaleString()}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Mode: Unallocated */}
+              {paymentForm.allocationMode === 'unallocated' && (
+                <p className="text-xs text-slate-500 italic">
+                  This payment will be recorded as a general payment without linking to a specific cutting lot.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Amount (Rs.) <span className="text-rose-500">*</span>
+              </label>
+              <input required min="1" step="any" type="number" placeholder="e.g. 10000" value={paymentForm.amount} onChange={event => setPaymentForm(form => ({ ...form, amount: event.target.value }))} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono font-bold bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/20" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Payment Method
+              </label>
+              <select required value={paymentForm.paymentMethod} onChange={event => setPaymentForm(form => ({ ...form, paymentMethod: event.target.value as LedgerPaymentMethod }))} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500/20">
                 {(['Cash', 'Easypaisa', 'JazzCash', 'Bank Transfer'] as const).map(method => <option key={method} value={method}>{method}</option>)}
               </select>
-            </label>
-            <label className="block text-sm font-semibold text-slate-700">
-              Bill No / Transaction No
-              <input type="text" value={paymentForm.billNo} onChange={event => setPaymentForm(form => ({ ...form, billNo: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
-            </label>
-            <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
-              <button type="button" onClick={() => setPaymentModalType(null)} disabled={isSavingPayment} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-              <button type="submit" disabled={isSavingPayment} className={`rounded-xl px-4 py-2 text-sm font-bold text-white disabled:opacity-60 ${paymentModalType === 'cash_in' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'}`}>
-                {isSavingPayment ? 'Saving…' : 'Save Payment'}
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Bill No / Voucher No <span className="text-slate-400 font-normal">(Optional)</span>
+              </label>
+              <input type="text" placeholder="e.g. BILL-001 or VCH-002" value={paymentForm.billNo} onChange={event => setPaymentForm(form => ({ ...form, billNo: event.target.value }))} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/20" />
+            </div>
+            <div className="flex justify-end gap-2.5 border-t border-slate-100 pt-4">
+              <button type="button" onClick={() => setPaymentModalType(null)} disabled={isSavingPayment} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer">Cancel</button>
+              <button type="submit" disabled={isSavingPayment} className={`rounded-xl px-5 py-2 text-sm font-bold text-white shadow-md transition cursor-pointer disabled:opacity-60 ${paymentModalType === 'cash_in' ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/25' : 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/25'}`}>
+                {isSavingPayment ? 'Saving…' : (paymentModalType === 'cash_out' ? 'Save Cash Out (- Payment)' : 'Save Cash In')}
               </button>
             </div>
           </form>

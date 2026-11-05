@@ -8,7 +8,8 @@ import {
   Plus, 
   Search, 
   Pencil, 
-  Trash2 
+  Trash2,
+  RotateCcw 
 } from 'lucide-react';
 import { Cutter, CuttingEntry } from '../../types/factory';
 import { formatDate, safeStringCompare } from '../../utils/factoryFormatters';
@@ -20,6 +21,7 @@ interface CuttingLedgerProps {
   ledgerData: CuttingEntry[] | null | undefined;
   onBack: () => void;
   onOpenIssueCutting?: () => void;
+  onOpenReturnCutting?: () => void;
   onOpenReceiveCutting?: () => void;
   onEditEntry?: (entry: CuttingEntry) => void;
   onDeleteEntry?: (entry: CuttingEntry) => void;
@@ -34,6 +36,7 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
   ledgerData,
   onBack,
   onOpenIssueCutting,
+  onOpenReturnCutting,
   onOpenReceiveCutting,
   onEditEntry,
   onDeleteEntry,
@@ -202,23 +205,33 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
             </div>
           </div>
 
-          {/* Action Buttons */}
+          {/* Action Buttons: [New Cutting (orange)] [Return Cutting (orange/red)] [Receive Cutting (blue)] */}
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             {onOpenIssueCutting && (
               <button
                 type="button"
                 onClick={onOpenIssueCutting}
-                className="flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-amber-700 transition"
+                className="flex items-center gap-2 rounded-xl bg-amber-500 hover:bg-amber-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition active:scale-95"
               >
                 <Scissors className="h-4 w-4" />
-                Issue Cutting (Give)
+                New Cutting
+              </button>
+            )}
+            {onOpenReturnCutting && (
+              <button
+                type="button"
+                onClick={onOpenReturnCutting}
+                className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-rose-600 hover:from-orange-600 hover:to-rose-700 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition active:scale-95"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Return Cutting
               </button>
             )}
             {onOpenReceiveCutting && (
               <button
                 type="button"
                 onClick={onOpenReceiveCutting}
-                className="flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition"
+                className="flex items-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition active:scale-95"
               >
                 <Plus className="h-4 w-4" />
                 Receive Cutting
@@ -404,7 +417,7 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
                       <td className="px-4 py-3 text-right font-mono font-bold text-blue-700">
                         Rs. {(entry.runningBalance || 0).toLocaleString()}
                       </td>
-                      {(onEditEntry || onDeleteEntry || onReturnCutting) && (
+                      {(onEditEntry || onDeleteEntry) && (
                         <td className="px-4 py-3 text-center">
                           <div className="flex items-center justify-center gap-1">
                             {onEditEntry && (
@@ -415,17 +428,6 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
                                 title="Edit"
                               >
                                 <Pencil className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            {onReturnCutting && !isReturn && (
-                              <button
-                                type="button"
-                                onClick={() => onReturnCutting(entry)}
-                                className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 transition cursor-pointer"
-                                title="Return Cutting"
-                              >
-                                <ArrowLeft className="h-2.5 w-2.5" />
-                                Return Cutting
                               </button>
                             )}
                             {onDeleteEntry && (

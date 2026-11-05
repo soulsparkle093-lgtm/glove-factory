@@ -46,6 +46,12 @@ export interface SizeMatrix {
   xxl: number;
 }
 
+export interface CustomSizeQty {
+  id?: string;
+  size: string;
+  quantity: number;
+}
+
 export interface OrderItem {
   id: string;
   productId?: string;
@@ -55,8 +61,9 @@ export interface OrderItem {
   size?: string; // Optional display string e.g. "S: 10, M: 20..."
   color?: string; // Optional
   leatherType?: string;
-  sizes: SizeMatrix; // Size Matrix: S, M, L, XL, XXL
-  totalPairs: number; // Sum of S+M+L+XL+XXL
+  sizes: SizeMatrix; // Size Matrix: S, M, L, XL, XXL (for legacy compatibility)
+  customSizes?: CustomSizeQty[]; // Dynamic Size + Quantity pairs
+  totalPairs: number; // Sum of all sizes
   originalQty: number; // IMMUTABLE original quantity - NEVER subtracts
   qty: number; // Total ordered pairs for compatibility
   rate?: number; // Optional
@@ -153,8 +160,18 @@ export interface CuttingTransaction {
   allocatedToOrder?: number;
   sentToStock?: number;
   linkedStockId?: string;
+  parentCuttingId?: string;
+  isSizeMatrixChild?: boolean;
   notes?: string;
   createdAt: string;
+}
+
+export interface LotPaymentSplit {
+  lotId: string;
+  lotNo?: string;
+  billNo?: string;
+  article?: string;
+  amount: number;
 }
 
 export interface CuttingEntry {
@@ -184,9 +201,11 @@ export interface CuttingEntry {
   billNo: string;
   linkedStockId?: string;
   returnReferenceId?: string;
-  returnReason?: 'Damaged' | 'Wrong Size' | 'Quality';
+  returnReason?: 'Damaged' | 'Wrong Size' | 'Quality' | string;
   stockAdjustedQty?: number;
   articleStockAdjustedQty?: number;
+  parentCuttingId?: string;
+  isSizeMatrixChild?: boolean;
   createdAt: string;
   editedAt?: unknown;
   editedBy?: string;

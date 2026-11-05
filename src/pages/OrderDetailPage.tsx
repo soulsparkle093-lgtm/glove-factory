@@ -296,7 +296,9 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
 
     return [...groups.values()]
       .filter(group => {
-        const isGhostMatrix = (group.article.includes('Size Matrix') || group.article.includes('/ Matrix')) && group.orderedPairs <= 0 && group.rows.length === 0;
+        // Exclude any orphan group with 0 ordered pairs and 0 records
+        if (group.orderedPairs <= 0 && group.rows.length === 0) return false;
+        const isGhostMatrix = (group.article.includes('Size Matrix') || group.article.includes('/ Matrix')) && group.orderedPairs <= 0;
         return !isGhostMatrix;
       })
       .sort((a, b) =>

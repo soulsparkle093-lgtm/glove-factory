@@ -195,8 +195,9 @@ interface FactoryContextType {
   returnCutting: (data: {
     originalEntryId: string;
     quantity: number;
-    reason: 'Damaged' | 'Wrong Size' | 'Quality';
+    reason: 'Damaged' | 'Wrong Size' | 'Quality' | string;
     date: string;
+    remarks?: string;
   }) => Promise<CuttingEntry>;
   createArticleMaster: (data: Omit<FactoryArticleMaster, 'id' | 'createdAt'>) => Promise<FactoryArticleMaster>;
   deliverFromStock: (data: { stockId: string; orderId: string; customerName: string; quantity: number; date: string }) => Promise<void>;
@@ -2072,9 +2073,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     if (!db) throw new Error('Firestore is not available. The entry was not deleted.');
 
-    const remaining = cuttingEntries.filter(entry => entry.id !== id);
+    // Cascade delete any child entries (e.g. size matrix children linked via parentCuttingId)
+    const childEntryIds = cuttingEntries.filter(e => e.parentCuttingId === id).map(e => e.id);
+    const childTxIds = cuttingTransactions.filter(t => (t as any).parentCuttingId === id).map(t => t.id);
+    const allIdsToDelete = new Set([id, ...childEntryIds, ...childTxIds]);
+
+    const remaining = cuttingEntries.filter(entry => !allIdsToDelete.has(entry.id));
     const legacyRemaining = cuttingTransactions
-      .filter(tx => tx.id !== id && !remaining.some(saved => saved.id === tx.id))
+      .filter(tx => !allIdsToDelete.has(tx.id) && !remaining.some(saved => saved.id === tx.id))
       .map(tx => ({
         id: tx.id,
         cutterId: tx.cutterId,
@@ -2107,8 +2113,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
       .reduce((sum, entry) => sum + entry.pairs, 0);
 
-    await deleteDoc(doc(db, 'cuttingEntries', id));
-    await deleteDoc(doc(db, 'cutting_transactions', id));
+    for (const deleteId of allIdsToDelete) {
+      await deleteDoc(doc(db, 'cuttingEntries', deleteId)).catch(() => {});
+      await deleteDoc(doc(db, 'cutting_transactions', deleteId)).catch(() => {});
+    }
     const batch = writeBatch(db);
     balanced.forEach(entry => {
       const entryRef = doc(db, 'cuttingEntries', entry.id);
@@ -2129,7 +2137,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ...previous.filter(saved => saved.cutterId !== entry.cutterId),
       ...balanced
     ].sort((a, b) => safeStringCompare(b.date, a.date)));
-    setCuttingTransactions(previous => previous.filter(tx => tx.id !== id));
+    setCuttingTransactions(previous => previous.filter(tx => !allIdsToDelete.has(tx.id)));
     setCutters(previous => previous.map(cutter => cutter.id === entry.cutterId ? {
       ...cutter,
       totalGiven,
@@ -2141,8 +2149,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const returnCutting = async (data: {
     originalEntryId: string;
     quantity: number;
-    reason: 'Damaged' | 'Wrong Size' | 'Quality';
+    reason: 'Damaged' | 'Wrong Size' | 'Quality' | string;
     date: string;
+    remarks?: string;
   }): Promise<CuttingEntry> => {
     if (!db) throw new Error('Firestore is not available. The return was not saved.');
     const original = cuttingEntries.find(entry => entry.id === data.originalEntryId);
@@ -2191,7 +2200,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       lotTotal: -data.quantity * original.rate,
       totalBalance: -data.quantity * original.rate,
       runningBalance: 0,
-      remarks: `Return: ${data.quantity} pairs ${data.reason} - Ref: ${original.date}`,
+      remarks: data.remarks || `Return Cutting - ${articleName} - ${data.quantity} pairs`,
       returnReferenceId: original.id,
       returnReason: data.reason,
       createdAt: new Date().toISOString()
