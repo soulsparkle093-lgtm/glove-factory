@@ -509,6 +509,13 @@ export interface DeliveryHistoryEntry {
   article: string;
   size: string;
   quantity: number;
+  rate?: number;
+  amount?: number;
+  billNo?: string;
+  gatePassNo?: string;
+  vehicleNo?: string;
+  driverName?: string;
+  biltyNo?: string;
   createdAt: string;
 }
 

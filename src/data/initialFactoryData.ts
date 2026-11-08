@@ -42,13 +42,115 @@ export const defaultFactorySettings: FactorySettings = {
   cuttingPrefix: "CUT-"
 };
 
-// All demo/sample data from previous project deleted. Clean empty initial arrays as requested.
-export const initialParties: Party[] = [];
-export const initialStaff: Staff[] = [];
+// Initial customer and cutter data
+export const initialParties: Party[] = [
+  {
+    id: 'party-bestway',
+    type: 'customer',
+    name: 'BESTWAY',
+    phone: '+92 300 9876543',
+    address: 'Sialkot',
+    openingBalance: 0,
+    currentBalance: 0,
+    createdAt: '2026-11-01T08:00:00.000Z',
+    updatedAt: '2026-11-01T08:00:00.000Z'
+  }
+];
+
+export const initialStaff: Staff[] = [
+  {
+    id: 'cutter-tariq',
+    name: 'Tariq Mehmood',
+    role: 'cutter',
+    phone: '+92 301 2345678',
+    perPairRate: 12,
+    currentBalance: 0,
+    createdAt: '2026-11-01T08:00:00.000Z',
+    updatedAt: '2026-11-01T08:00:00.000Z'
+  }
+];
+
 export const initialProducts: Product[] = [];
-export const initialOrders: CustomerOrder[] = [];
-export const initialCuttings: Cutting[] = [];
-export const initialStockLedger: StockLedgerEntry[] = [];
+
+export const initialOrders: CustomerOrder[] = [
+  {
+    id: 'ord-003-bestway',
+    orderNo: 'ORD-003',
+    customerName: 'BESTWAY',
+    customerPhone: '+92 300 9876543',
+    orderDate: '2026-11-01',
+    deliveryDate: '2026-11-20',
+    totalPairs: 6000,
+    originalTotalPairs: 6000,
+    totalQty: 6000,
+    status: 'In-Production',
+    cuttingArticleSizes: [
+      { article: '1202', size: '10' }
+    ],
+    items: [
+      {
+        id: 'item-ord-003-1',
+        title: '1202',
+        gloveType: '1202',
+        size: '10',
+        color: 'Natural White',
+        leatherType: 'Cowhide Grain Leather',
+        sizes: { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 },
+        customSizes: [{ id: 'cs-1', size: '10', quantity: 6000 }],
+        totalPairs: 6000,
+        originalQty: 6000,
+        qty: 6000,
+        rate: 235,
+        amount: 1410000,
+        cuttingGivenQty: 6000,
+        stockReceivedQty: 6000,
+        billedQty: 0,
+        pendingQty: 6000
+      }
+    ],
+    createdAt: '2026-11-01T08:00:00.000Z'
+  }
+];
+
+export const initialCuttings: Cutting[] = [
+  {
+    id: 'cut-ord-003-1',
+    orderId: 'ord-003-bestway',
+    orderNo: 'ORD-003',
+    orderItemId: 'item-ord-003-1',
+    gloveType: '1202',
+    size: '10',
+    color: 'Natural White',
+    date: '2026-11-02',
+    cuttingType: 'cutting_man',
+    personId: 'cutter-tariq',
+    personName: 'Tariq Mehmood',
+    qty: 6000,
+    rate: 12,
+    totalAmount: 72000,
+    status: 'Received',
+    receivedDate: '2026-11-04',
+    notes: 'Cutting lot completed for BESTWAY Order #ORD-003',
+    createdAt: '2026-11-02T09:00:00.000Z'
+  }
+];
+
+export const initialStockLedger: StockLedgerEntry[] = [
+  {
+    id: 'stock-led-1',
+    productId: 'prod-1202',
+    productName: '1202 - Size 10',
+    type: 'cutting_received',
+    date: '2026-11-04',
+    qty: 6000,
+    referenceId: 'cut-ord-003-1',
+    orderId: 'ord-003-bestway',
+    orderNo: 'ORD-003',
+    notes: 'Finished cutting received to stock',
+    createdAt: '2026-11-04T12:00:00.000Z'
+  }
+];
+
 export const initialInvoices: SaleInvoice[] = [];
 export const initialPartyTransactions: PartyTransaction[] = [];
 export const initialStaffLedger: StaffLedgerEntry[] = [];

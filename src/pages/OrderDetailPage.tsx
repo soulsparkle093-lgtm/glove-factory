@@ -110,13 +110,12 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     cuttingTransactions,
     deliveryHistory,
     settings,
-    receiveCutting,
-    setSelectedInvoiceId,
-    setActiveModule,
+    deliverFromStock,
     showToast
   } = useFactory();
 
-  const [activeTab, setActiveTab] = useState<'items' | 'cutting' | 'delivery' | 'stock' | 'dispatch'>('items');
+  // Tab options: 'all' (Full Journey), 'items' (Order Created), 'cutting' (Cutting History), 'delivery' (Delivery History)
+  const [activeTab, setActiveTab] = useState<'all' | 'items' | 'cutting' | 'delivery'>('all');
   const [subHistory, setSubHistory] = useState<any[]>([]);
   const [expandedCuttingGroup, setExpandedCuttingGroup] = useState<string | null>(null);
   const [cuttingArticleSearch, setCuttingArticleSearch] = useState('');
@@ -130,6 +129,22 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
   const [deliverySearch, setDeliverySearch] = useState('');
   const [selectedGatePass, setSelectedGatePass] = useState<OrderDeliveryRow | null>(null);
 
+  // Quick Deliver Modal state
+  const [isDeliverModalOpen, setIsDeliverModalOpen] = useState(false);
+  const [isSavingDelivery, setIsSavingDelivery] = useState(false);
+  const [deliveryForm, setDeliveryForm] = useState({
+    date: new Date().toISOString().slice(0, 10),
+    billNo: '',
+    gatePassNo: '',
+    article: '',
+    size: '10',
+    qty: '',
+    rate: '',
+    vehicleNo: 'LES-8921',
+    driverName: 'Muhammad Akram',
+    biltyNo: 'BL-4491'
+  });
+
   // Drag-to-scroll refs for tables
   const deliveryTableScrollRef = useDragToScroll<HTMLDivElement>();
   const cuttingTableScrollRef = useDragToScroll<HTMLDivElement>();
@@ -137,17 +152,18 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
 
   // Close on Escape key
   useEffect(() => {
-    if (!isAddArticleSizeOpen && !selectedGatePass && !selectedCutterHistory) return;
+    if (!isAddArticleSizeOpen && !selectedGatePass && !selectedCutterHistory && !isDeliverModalOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsAddArticleSizeOpen(false);
         setSelectedGatePass(null);
         setSelectedCutterHistory(null);
+        setIsDeliverModalOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAddArticleSizeOpen, selectedGatePass, selectedCutterHistory]);
+  }, [isAddArticleSizeOpen, selectedGatePass, selectedCutterHistory, isDeliverModalOpen]);
 
   const order = orders.find(o => o.id === orderId);
 
@@ -263,6 +279,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         safeStringCompare(a.date, b.date) || safeStringCompare(a.id, b.id)
       );
   }, [cuttingEntries, orderCuttingTxs, orderCuttings, orderId]);
+
   const cuttingArticleGroups = useMemo(() => {
     const groups = new Map<string, CuttingArticleSizeGroup>();
     const normalizeArticle = (value: string) => value.trim().toLocaleLowerCase();
@@ -318,7 +335,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
       );
   }, [validOrderItems, order.cuttingArticleSizes, orderCuttingRecords]);
 
-  // Delivery History for Order Detail Tab 3:
+  // Delivery History:
   // Automatically queries deliveryHistory from stock_delivery_history, orderDispatchHistory, and invoices
   const orderDeliveryRecords = useMemo(() => {
     const list: OrderDeliveryRow[] = [];
@@ -346,13 +363,13 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         seenIds.add(d.id);
         const qty = Number(d.quantity) || 0;
         const matchingItem = order?.items?.find(i => normalize(i.title || i.gloveType || i.article || '') === normalize(d.article));
-        const rate = Number(d.rate) || Number(matchingItem?.rate) || 0;
+        const rate = Number(d.rate) || Number(matchingItem?.rate) || 235;
         const amount = Number(d.amount) || (qty * rate);
-        const billNo = d.billNo || `Bill No. ${19 + (idx * 3) % 40}`;
+        const billNo = d.billNo || `Bill No. ${19 + idx}`;
         const gatePassNo = d.gatePassNo || `GP-${String(idx + 1).padStart(3, '0')}`;
-        const vehicleNo = d.vehicleNo || `LES-${4210 + (idx * 149) % 5000}`;
-        const driverName = d.driverName || (idx % 2 === 0 ? 'Muhammad Akram' : 'Tariq Mehmood');
-        const biltyNo = d.biltyNo || `BL-${7180 + (idx * 93) % 2000}`;
+        const vehicleNo = d.vehicleNo || 'LES-8921';
+        const driverName = d.driverName || 'Muhammad Akram';
+        const biltyNo = d.biltyNo || 'BL-4491';
 
         list.push({
           id: d.id,
@@ -381,11 +398,11 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         if (seenIds.has(entry.id)) return;
         seenIds.add(entry.id);
         const qty = Number(entry.quantity) || 0;
-        const billNo = `Bill No. ${19 + (idx * 4) % 30}`;
+        const billNo = `Bill No. ${19 + list.length}`;
         const gatePassNo = `GP-${String(list.length + 1).padStart(3, '0')}`;
-        const vehicleNo = `LES-${3140 + (idx * 167) % 5000}`;
+        const vehicleNo = 'LES-8921';
         const driverName = 'Muhammad Akram';
-        const biltyNo = `BL-${5100 + (idx * 111) % 4000}`;
+        const biltyNo = 'BL-4491';
 
         list.push({
           id: entry.id,
@@ -395,8 +412,8 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           article: entry.article || order?.items?.[0]?.title || '1202',
           size: entry.sizes ? (Object.entries(entry.sizes).find(([, q]) => Number(q) > 0)?.[0] || '10') : '10',
           qty,
-          rate: 0,
-          amount: 0,
+          rate: order?.items?.[0]?.rate || 235,
+          amount: qty * (order?.items?.[0]?.rate || 235),
           deliveredTo: order?.customerName || '',
           vehicleNo,
           driverName,
@@ -416,7 +433,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           if (seenIds.has(invKey)) return;
           seenIds.add(invKey);
           const qty = Number(item.qty) || 0;
-          const rate = Number(item.rate) || 0;
+          const rate = Number(item.rate) || 235;
           const amount = Number(item.amount) || (qty * rate);
           const billNo = inv.invoiceNo || `Bill No. ${19 + invIdx}`;
           const gatePassNo = `GP-${String(list.length + 1).padStart(3, '0')}`;
@@ -440,33 +457,6 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           });
         });
       });
-
-    // 4. Default seed if order has recorded delivered qty (matches customer's video view e.g. 3000 pairs delivered)
-    if (list.length === 0 && order) {
-      const deliveredQtyFromOrder = Number(order.totalDelivered) || (order.totalQty && order.totalQty >= 6000 ? 3000 : 0);
-      if (deliveredQtyFromOrder > 0) {
-        const firstItem = order.items?.[0];
-        const art = firstItem?.title || firstItem?.article || '1202';
-        const sz = firstItem?.size || (firstItem?.customSizes && firstItem.customSizes[0]?.size) || '10';
-        list.push({
-          id: `del-seed-${order.id}`,
-          date: order.deliveryDate || order.orderDate || new Date().toISOString().slice(0, 10),
-          billNo: 'Bill No. 19',
-          gatePassNo: 'GP-001',
-          article: art,
-          size: sz,
-          qty: deliveredQtyFromOrder,
-          rate: 0,
-          amount: 0,
-          deliveredTo: order.customerName,
-          vehicleNo: 'LES-8921',
-          driverName: 'Muhammad Akram',
-          biltyNo: 'BL-4491',
-          status: 'Delivered',
-          balanceRemaining: 0
-        });
-      }
-    }
 
     // Sort by date ascending
     list.sort((a, b) => safeStringCompare(a.date, b.date));
@@ -578,6 +568,60 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
       showToast('The article and size could not be saved. Please try again.', 'error');
     } finally {
       setIsSavingArticleSize(false);
+    }
+  };
+
+  // Quick Deliver Modal Handler
+  const handleOpenQuickDeliver = () => {
+    const firstItem = order.items?.[0];
+    const nextBillNo = `Bill No. ${19 + orderDeliveryRecords.length}`;
+    const nextGpNo = `GP-${String(orderDeliveryRecords.length + 1).padStart(3, '0')}`;
+    setDeliveryForm({
+      date: new Date().toISOString().slice(0, 10),
+      billNo: nextBillNo,
+      gatePassNo: nextGpNo,
+      article: firstItem?.title || firstItem?.article || '1202',
+      size: firstItem?.size || '10',
+      qty: remainingToDeliverPairs > 0 ? String(Math.min(remainingToDeliverPairs, 1000)) : '1000',
+      rate: String(firstItem?.rate || 235),
+      vehicleNo: 'LES-8921',
+      driverName: 'Muhammad Akram',
+      biltyNo: 'BL-4491'
+    });
+    setIsDeliverModalOpen(true);
+  };
+
+  const handleSaveQuickDelivery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const qty = Number(deliveryForm.qty);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      showToast('Enter a valid delivery quantity in pairs.', 'error');
+      return;
+    }
+    setIsSavingDelivery(true);
+    try {
+      await deliverFromStock({
+        orderId: order.id,
+        customerName: order.customerName,
+        quantity: qty,
+        date: deliveryForm.date,
+        billNo: deliveryForm.billNo.trim(),
+        gatePassNo: deliveryForm.gatePassNo.trim(),
+        article: deliveryForm.article.trim(),
+        size: deliveryForm.size.trim(),
+        rate: Number(deliveryForm.rate) || 235,
+        amount: qty * (Number(deliveryForm.rate) || 235),
+        vehicleNo: deliveryForm.vehicleNo.trim(),
+        driverName: deliveryForm.driverName.trim(),
+        biltyNo: deliveryForm.biltyNo.trim()
+      });
+      showToast(`Delivered ${qty.toLocaleString()} pairs with Gate Pass ${deliveryForm.gatePassNo}.`);
+      setIsDeliverModalOpen(false);
+    } catch (err: any) {
+      console.error('Error saving delivery:', err);
+      showToast(err?.message || 'Could not record delivery.', 'error');
+    } finally {
+      setIsSavingDelivery(false);
     }
   };
 
@@ -935,25 +979,35 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
 
       {/* =========================================================================
           SECTION C - ORDER HISTORY (BOTTOM - TABS):
-          Tab 1: Glove Items Status (Original vs Given vs Pending)
-          Tab 2: Cutting History (from cuttings collection)
-          Tab 3: Stitching History
-          Tab 4: Stock Movement (from stock_ledger)
-          Tab 5: Dispatch History / Billed History (from sales_invoices + order_dispatch_history)
+          Tab 1: 1. Order Created
+          Tab 2: 2. Cutting History
+          Tab 3: 3. Delivery History (REPLACES STITCHING HISTORY)
+          Tab 4: Full Order Journey (All 3 Sections in sequence)
           ========================================================================= */}
       <section className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
         {/* Tab Navigation Header */}
         <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/50">
           <div>
-            <h2 className="text-base font-black text-slate-900 tracking-tight">
-              Section C: Order History & Audit Trail
+            <h2 className="text-base font-black text-slate-900 tracking-tight flex items-center gap-2">
+              <FileText className="w-4 h-4 text-blue-600" />
+              <span>Section C: Order History</span>
             </h2>
             <p className="text-xs text-slate-500">
-              Detailed tracking across cutting assignments, stock receipts, and dispatches.
+              Chronological journey of this order: Order Created &rarr; Cutting History &rarr; Delivery History
             </p>
           </div>
 
           <div className="flex items-center gap-1.5 overflow-x-auto p-1 bg-slate-100 rounded-xl">
+            <button
+              onClick={() => setActiveTab('all')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+                activeTab === 'all'
+                  ? 'bg-blue-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Full Order Journey (All 3)
+            </button>
             <button
               onClick={() => setActiveTab('items')}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
@@ -962,7 +1016,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Tab 1: Glove Status
+              1. Order Created
             </button>
             <button
               onClick={() => setActiveTab('cutting')}
@@ -972,678 +1026,399 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Tab 2: Cutting History ({orderCuttingRecords.length})
+              2. Cutting History ({orderCuttingRecords.length})
             </button>
             <button
-              onClick={() => setActiveTab('stitching')}
+              onClick={() => setActiveTab('delivery')}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-                activeTab === 'stitching'
+                activeTab === 'delivery'
                   ? 'bg-white text-blue-700 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Tab 3: Stitching History ({orderStitchingHistory.filter(entry => entry.type === 'ISSUE').length})
-            </button>
-            <button
-              onClick={() => setActiveTab('stock')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-                activeTab === 'stock'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Tab 4: Stock Movement ({orderStockLedger.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('dispatch')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-                activeTab === 'dispatch'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Tab 5: Dispatch / Bills ({orderInvoices.length + orderDispatches.length})
+              3. Delivery History ({orderDeliveryRecords.length})
             </button>
           </div>
         </div>
 
-        {/* Tab 1 Content: Glove Items Status (Original vs Given vs Pending table) */}
-        {activeTab === 'items' && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
-                  <th className="py-3 px-4">#</th>
-                  <th className="py-3 px-4">Glove Type / Article</th>
-                  <th className="py-3 px-4">Size Matrix</th>
-                  <th className="py-3 px-4 text-right font-black text-blue-700">Original Qty</th>
-                  <th className="py-3 px-4 text-right font-bold text-amber-700">Cutting Given</th>
-                  <th className="py-3 px-4 text-right font-bold text-emerald-700">Stock Received</th>
-                  <th className="py-3 px-4 text-right font-bold text-blue-700">Dispatched</th>
-                  <th className="py-3 px-4 text-right font-bold text-indigo-700">Pending</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-medium">
-                {(order.items || []).map((itm, idx) => {
-                  const orig = Number(itm.originalQty) || Number(itm.totalPairs) || Number(itm.qty) || 0;
-                  const given = Number(itm.cuttingGivenQty) || 0;
-                  const stockRec = Number(itm.stockReceivedQty) || 0;
-                  const billed = Number(itm.billedQty) || 0;
-                  const pend = Math.max(0, orig - billed);
-                  const sz = itm.sizes || { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
-
-                  return (
-                    <tr key={itm.id || idx} className="hover:bg-slate-50/70 transition">
-                      <td className="py-3.5 px-4 font-mono text-slate-400">{idx + 1}</td>
-                      <td className="py-3.5 px-4">
-                        <span className="font-bold text-slate-900">{itm.title || itm.gloveType}</span>
-                        {itm.color && (
-                          <span className="text-[10px] text-slate-400 block">Color: {itm.color}</span>
-                        )}
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span className="text-[11px] font-mono text-slate-600">
-                          S:{sz.small || 0} M:{sz.medium || 0} L:{sz.large || 0} XL:{sz.xl || 0} 2XL:{sz.xxl || 0}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-black text-blue-700">
-                        {orig}
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-bold text-amber-700">
-                        {given}
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-bold text-emerald-700">
-                        {stockRec}
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-bold text-blue-700">
-                        {billed}
-                      </td>
-                      <td className="py-3.5 px-4 text-right font-mono font-black text-indigo-700">
-                        {pend}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {/* 1. ORDER CREATED SECTION (Shown in 'all' or 'items') */}
+        {(activeTab === 'all' || activeTab === 'items') && (
+          <div className="border-b border-slate-200 last:border-b-0">
+            <div className="bg-slate-50/80 px-4 py-3 sm:px-5 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-6 h-6 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-black">1</span>
+                <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider">
+                  Order Created — Original Contract Specification
+                </h3>
+              </div>
+              <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 px-2.5 py-1 rounded-md border border-blue-200">
+                Date: {formatDate(order.orderDate)} &bull; Total: {totalOriginalPairs.toLocaleString()} Pairs
+              </span>
+            </div>
+            <div className="overflow-x-auto" ref={poTableScrollRef}>
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-slate-100/70 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                    <th className="py-2.5 px-4">#</th>
+                    <th className="py-2.5 px-4">Order No</th>
+                    <th className="py-2.5 px-4">Customer</th>
+                    <th className="py-2.5 px-4">Article / Glove</th>
+                    <th className="py-2.5 px-4">Size Matrix</th>
+                    <th className="py-2.5 px-4 text-right">Unit Rate</th>
+                    <th className="py-2.5 px-4 text-right font-black text-blue-700">Original Qty (Pairs)</th>
+                    <th className="py-2.5 px-4 text-right font-black text-slate-900">Total Value</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-medium">
+                  {validOrderItems.map((itm, idx) => {
+                    const orig = Number(itm.originalQty) || Number(itm.totalPairs) || Number(itm.qty) || 0;
+                    const rate = Number(itm.rate) || 235;
+                    const sz = itm.sizes || { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
+                    return (
+                      <tr key={itm.id || idx} className="hover:bg-slate-50/70 transition">
+                        <td className="py-3 px-4 font-mono text-slate-400">{idx + 1}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-blue-700">#{order.orderNo}</td>
+                        <td className="py-3 px-4 font-bold text-slate-900">{order.customerName}</td>
+                        <td className="py-3 px-4 font-bold text-slate-800">{itm.title || itm.gloveType}</td>
+                        <td className="py-3 px-4 font-mono text-slate-600 text-[11px]">
+                          {itm.customSizes && itm.customSizes.length > 0
+                            ? itm.customSizes.map(cs => `${cs.size}:${cs.quantity}`).join(', ')
+                            : Object.entries(sz).filter(([, q]) => Number(q) > 0).map(([k, q]) => `${k.toUpperCase()}:${q}`).join(', ') || itm.size || '10'}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono">Rs. {rate.toLocaleString()}</td>
+                        <td className="py-3 px-4 text-right font-mono font-black text-blue-700">{orig.toLocaleString()}</td>
+                        <td className="py-3 px-4 text-right font-mono font-black text-slate-900">Rs. {(orig * rate).toLocaleString()}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
-        {/* Tab 2 Content: Cutting History (from cuttings and cutting_transactions) */}
-        {activeTab === 'cutting' && (
-          <div className="space-y-4 p-4 sm:p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="relative w-full sm:max-w-sm">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <input
-                  type="search"
-                  value={cuttingArticleSearch}
-                  onChange={event => setCuttingArticleSearch(event.target.value)}
-                  placeholder="Search by article or size"
-                  className="w-full rounded-xl border border-slate-300 py-2 pl-9 pr-3 text-sm"
-                />
+        {/* 2. CUTTING HISTORY SECTION (Shown in 'all' or 'cutting') */}
+        {(activeTab === 'all' || activeTab === 'cutting') && (
+          <div className="border-b border-slate-200 last:border-b-0">
+            <div className="bg-amber-50/80 px-4 py-3 sm:px-5 border-b border-amber-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-6 h-6 rounded-lg bg-amber-200 text-amber-800 flex items-center justify-center text-xs font-black">2</span>
+                <h3 className="text-sm font-black text-amber-950 uppercase tracking-wider">
+                  Cutting History — Work Batches Issued &amp; Received
+                </h3>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setNewCuttingArticle('');
-                    setNewCuttingSize('');
-                    setIsAddArticleSizeOpen(true);
-                  }}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-50"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add Article &amp; Size
-                </button>
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
+                  <input
+                    type="search"
+                    value={cuttingArticleSearch}
+                    onChange={e => setCuttingArticleSearch(e.target.value)}
+                    placeholder="Search cutter or article..."
+                    className="rounded-lg border border-slate-300 py-1 pl-8 pr-2 text-xs bg-white"
+                  />
+                </div>
                 <button
                   type="button"
                   onClick={() => onOpenCuttingModalForOrder(order.id)}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-600"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-600 shadow-xs cursor-pointer"
                 >
-                  <Scissors className="h-4 w-4" />
+                  <Scissors className="h-3.5 w-3.5" />
                   Add Cutting Entry
                 </button>
               </div>
             </div>
 
-            {cuttingArticleGroups.filter(group => {
-              const query = cuttingArticleSearch.trim().toLocaleLowerCase();
-              return !query || group.article.toLocaleLowerCase().includes(query) || group.size.toLocaleLowerCase().includes(query);
-            }).length === 0 ? (
-              <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-slate-500">
-                <Scissors className="mx-auto mb-2 h-8 w-8 opacity-40" />
-                <p className="text-sm font-semibold">{cuttingArticleSearch ? 'No matching articles or sizes.' : 'No article or size groups are available for this order.'}</p>
-                {!cuttingArticleSearch && (
-                  <button
-                    type="button"
-                    onClick={() => onOpenCuttingModalForOrder(order.id)}
-                    className="mt-3 rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-white hover:bg-amber-600"
-                  >
-                    Add Cutting Entry
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {cuttingArticleGroups
-                  .filter(group => {
-                    const query = cuttingArticleSearch.trim().toLocaleLowerCase();
-                    return !query || group.article.toLocaleLowerCase().includes(query) || group.size.toLocaleLowerCase().includes(query);
-                  })
-                  .map((group, index) => {
-                    const issuedPairs = group.rows.reduce((sum, row) =>
-                      sum + (row.type === 'GIVE' || row.isLegacyCut ? row.qty : 0), 0);
-                    const receivedPairs = group.rows.reduce((sum, row) =>
-                      sum + (row.type === 'RECEIVE' ? row.qty : 0), 0);
-                    const remainingPairs = Math.max(0, group.orderedPairs - receivedPairs);
-                    const progress = group.orderedPairs > 0
-                      ? Math.min(100, Math.round((receivedPairs / group.orderedPairs) * 100))
-                      : 0;
-                    const cutterTotals = new Map<string, { issued: number; received: number; rows: CuttingHistoryRow[] }>();
-                    group.rows.forEach(row => {
-                      const totals = cutterTotals.get(row.cutterName) || { issued: 0, received: 0, rows: [] };
-                      if (row.isLegacyCut) {
-                        totals.issued += row.qty;
-                        if (row.type === 'RECEIVE') totals.received += row.qty;
-                      } else if (row.type === 'GIVE') {
-                        totals.issued += row.qty;
-                      } else {
-                        totals.received += row.qty;
-                      }
-                      totals.rows.push(row);
-                      cutterTotals.set(row.cutterName, totals);
-                    });
-                    const expanded = expandedCuttingGroup === group.key;
+            <div className="p-4 sm:p-5 space-y-3">
+              {cuttingArticleGroups.filter(group => {
+                const q = cuttingArticleSearch.trim().toLowerCase();
+                return !q || group.article.toLowerCase().includes(q) || group.size.toLowerCase().includes(q) ||
+                  group.rows.some(r => r.cutterName.toLowerCase().includes(q));
+              }).length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-slate-500">
+                  <Scissors className="mx-auto mb-2 h-8 w-8 opacity-40 text-amber-600" />
+                  <p className="text-sm font-semibold">No cutting records found for this order.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {cuttingArticleGroups
+                    .filter(group => {
+                      const q = cuttingArticleSearch.trim().toLowerCase();
+                      return !q || group.article.toLowerCase().includes(q) || group.size.toLowerCase().includes(q) ||
+                        group.rows.some(r => r.cutterName.toLowerCase().includes(q));
+                    })
+                    .map(group => {
+                      const issuedPairs = group.rows.reduce((sum, row) =>
+                        sum + (row.type === 'GIVE' || row.isLegacyCut ? row.qty : 0), 0);
+                      const receivedPairs = group.rows.reduce((sum, row) =>
+                        sum + (row.type === 'RECEIVE' ? row.qty : 0), 0);
+                      const remainingPairs = Math.max(0, group.orderedPairs - receivedPairs);
+                      const progress = group.orderedPairs > 0
+                        ? Math.min(100, Math.round((receivedPairs / group.orderedPairs) * 100))
+                        : 0;
+                      const expanded = expandedCuttingGroup === group.key;
 
-                    return (
-                      <section key={group.key} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                        <button
-                          type="button"
-                          onClick={() => setExpandedCuttingGroup(expanded ? null : group.key)}
-                          aria-expanded={expanded}
-                          className={`grid w-full grid-cols-1 gap-3 p-4 text-left transition hover:bg-blue-50/70 sm:grid-cols-[minmax(180px,1.3fr)_minmax(90px,.45fr)_repeat(3,minmax(115px,.7fr))_auto] sm:items-center ${expanded ? 'bg-blue-50/70' : ''}`}
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            {expanded
-                              ? <ChevronDown className="h-4 w-4 shrink-0 text-blue-700" />
-                              : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
-                            <span className="min-w-0">
-                              <span className="block truncate text-sm font-black text-slate-900">{group.article}</span>
-                              <span className="block text-[11px] text-slate-500">Article</span>
+                      return (
+                        <div key={group.key} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedCuttingGroup(expanded ? null : group.key)}
+                            aria-expanded={expanded}
+                            className={`grid w-full grid-cols-1 gap-2 p-3 text-left transition hover:bg-amber-50/50 sm:grid-cols-[minmax(180px,1.3fr)_minmax(90px,.45fr)_repeat(3,minmax(115px,.7fr))_auto] sm:items-center ${expanded ? 'bg-amber-50/60' : ''}`}
+                          >
+                            <span className="flex min-w-0 items-center gap-2">
+                              {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-amber-700" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
+                              <span className="min-w-0">
+                                <span className="block truncate text-sm font-black text-slate-900">{group.article}</span>
+                                <span className="block text-[11px] text-slate-500">Article</span>
+                              </span>
                             </span>
-                          </span>
-                          <span>
-                            <span className="block text-sm font-bold text-slate-800">{group.size}</span>
-                            <span className="block text-[11px] text-slate-500">Size</span>
-                          </span>
-                          <span>
-                            <span className="block text-sm font-bold text-slate-800">{group.rows.length} Entries</span>
-                            <span className="block text-[11px] text-slate-500">History records</span>
-                          </span>
-                          <span>
-                            <span className="block text-sm font-black text-amber-700">{issuedPairs.toLocaleString()} Pairs</span>
-                            <span className="block text-[11px] text-slate-500">Cutting issued</span>
-                          </span>
-                          <span>
-                            <span className="block text-sm font-bold text-blue-800">{remainingPairs.toLocaleString()} Pairs</span>
-                            <span className="block text-[11px] text-slate-500">Remaining from order</span>
-                          </span>
-                          <span className="flex items-center gap-2 sm:min-w-[95px]">
-                            <span className="h-2 min-w-14 flex-1 overflow-hidden rounded-full bg-slate-200">
-                              <span className={`block h-full rounded-full ${progress === 100 ? 'bg-emerald-500' : 'bg-blue-600'}`} style={{ width: `${progress}%` }} />
+                            <span>
+                              <span className="block text-sm font-bold text-slate-800">{group.size}</span>
+                              <span className="block text-[11px] text-slate-500">Size</span>
                             </span>
-                            <span className="text-xs font-bold text-slate-600">{progress}%</span>
-                          </span>
-                        </button>
+                            <span>
+                              <span className="block text-sm font-bold text-slate-800">{group.rows.length} Entries</span>
+                              <span className="block text-[11px] text-slate-500">Work batches</span>
+                            </span>
+                            <span>
+                              <span className="block text-sm font-black text-amber-700">{issuedPairs.toLocaleString()} Pairs</span>
+                              <span className="block text-[11px] text-slate-500">Issued</span>
+                            </span>
+                            <span>
+                              <span className="block text-sm font-bold text-blue-800">{remainingPairs.toLocaleString()} Pairs</span>
+                              <span className="block text-[11px] text-slate-500">Remaining</span>
+                            </span>
+                            <span className="flex items-center gap-2 sm:min-w-[95px]">
+                              <span className="h-2 min-w-14 flex-1 overflow-hidden rounded-full bg-slate-200">
+                                <span className={`block h-full rounded-full ${progress === 100 ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${progress}%` }} />
+                              </span>
+                              <span className="text-xs font-bold text-slate-600">{progress}%</span>
+                            </span>
+                          </button>
 
-                        {expanded && (
-                          <div className="border-t border-blue-200 bg-slate-50 p-3 sm:p-4">
-                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                              <div>
-                                <h4 className="text-sm font-black text-slate-900">Article: {group.article} <span className="text-slate-400">|</span> Size: {group.size}</h4>
-                                <p className="mt-1 text-xs text-slate-600">
-                                  Ordered: {group.orderedPairs.toLocaleString()} · Issued: {issuedPairs.toLocaleString()} · Received: {receivedPairs.toLocaleString()} · Remaining: {remainingPairs.toLocaleString()} Pairs
-                                </p>
+                          {expanded && (
+                            <div className="border-t border-amber-200 bg-slate-50/80 p-3 sm:p-4">
+                              <div className="overflow-x-auto rounded-lg border border-slate-300 bg-white" ref={cuttingTableScrollRef}>
+                                <table className="w-full min-w-[750px] border-collapse text-left text-xs">
+                                  <thead>
+                                    <tr className="bg-amber-500 font-bold text-white">
+                                      <th className="border border-amber-600 px-3 py-2">Sr #</th>
+                                      <th className="border border-amber-600 px-3 py-2">Date</th>
+                                      <th className="border border-amber-600 px-3 py-2">Cutter Name</th>
+                                      <th className="border border-amber-600 px-3 py-2">Article</th>
+                                      <th className="border border-amber-600 px-3 py-2">Size</th>
+                                      <th className="border border-amber-600 px-3 py-2 text-right">Pairs</th>
+                                      <th className="border border-amber-600 px-3 py-2 text-right">Rate</th>
+                                      <th className="border border-amber-600 px-3 py-2 text-right">Amount</th>
+                                      <th className="border border-amber-600 px-3 py-2">Status</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {group.rows.map((row, rIdx) => (
+                                      <tr key={row.id} className={rIdx % 2 ? 'bg-slate-50' : 'bg-white'}>
+                                        <td className="border border-slate-200 px-3 py-2 font-mono text-slate-500">{rIdx + 1}</td>
+                                        <td className="border border-slate-200 px-3 py-2 font-mono">{formatDate(row.date)}</td>
+                                        <td className="border border-slate-200 px-3 py-2 font-bold text-slate-900">{row.cutterName}</td>
+                                        <td className="border border-slate-200 px-3 py-2">{row.article}</td>
+                                        <td className="border border-slate-200 px-3 py-2">{row.size}</td>
+                                        <td className="border border-slate-200 px-3 py-2 text-right font-mono font-bold text-amber-800">{row.qty.toLocaleString()}</td>
+                                        <td className="border border-slate-200 px-3 py-2 text-right font-mono">{row.rate > 0 ? `Rs. ${row.rate}` : '-'}</td>
+                                        <td className="border border-slate-200 px-3 py-2 text-right font-mono font-bold">{row.amount > 0 ? `Rs. ${row.amount.toLocaleString()}` : '-'}</td>
+                                        <td className="border border-slate-200 px-3 py-2">
+                                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${row.type === 'GIVE' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                                            {row.status}
+                                          </span>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                    <tr className="bg-amber-100/60 font-black">
+                                      <td className="border border-slate-300 px-3 py-2" colSpan={5}>TOTAL CUTTING ISSUED / RECEIVED</td>
+                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono text-amber-900">{issuedPairs.toLocaleString()} / {receivedPairs.toLocaleString()}</td>
+                                      <td className="border border-slate-300 px-3 py-2" />
+                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono text-slate-900">
+                                        Rs. {group.rows.reduce((sum, row) => sum + row.amount, 0).toLocaleString()}
+                                      </td>
+                                      <td className="border border-slate-300 px-3 py-2" />
+                                    </tr>
+                                  </tbody>
+                                </table>
                               </div>
                             </div>
-                            {group.rows.length === 0 ? (
-                              <div className="rounded-lg border border-dashed border-slate-300 bg-white p-5 text-center text-xs text-slate-500">
-                                No cutting history recorded for this article and size yet.
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const matchingItem = order.items.find(item =>
-                                      (item.title || item.gloveType || '').trim().toLocaleLowerCase() === group.article.trim().toLocaleLowerCase()
-                                    );
-                                    onOpenCuttingModalForOrder(order.id, matchingItem?.id);
-                                  }}
-                                  className="ml-2 font-bold text-blue-700 hover:underline"
-                                >
-                                  Add cutting entry
-                                </button>
-                              </div>
-                            ) : (
-                              <>
-                                <div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
-                                  <table className="w-full min-w-[850px] border-collapse text-left text-xs">
-                                    <thead>
-                                      <tr className="bg-blue-400 font-bold text-white">
-                                        <th className="border border-slate-300 px-3 py-2">Sr #</th>
-                                        <th className="border border-slate-300 px-3 py-2">Date</th>
-                                        <th className="border border-slate-300 px-3 py-2">Cutter Name / Worker</th>
-                                        <th className="border border-slate-300 px-3 py-2 text-right">Cutting (Pairs)</th>
-                                        <th className="border border-slate-300 px-3 py-2 text-right">Rate</th>
-                                        <th className="border border-slate-300 px-3 py-2 text-right">Total Amount</th>
-                                        <th className="border border-slate-300 px-3 py-2">Status</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {group.rows.map((row, rowIndex) => (
-                                        <tr key={row.id} className={rowIndex % 2 ? 'bg-slate-100' : 'bg-white'}>
-                                          <td className="border border-slate-300 px-3 py-2 font-mono">{rowIndex + 1}</td>
-                                          <td className="border border-slate-300 px-3 py-2 font-mono">{formatDate(row.date)}</td>
-                                          <td className="border border-slate-300 px-3 py-2">
-                                            <button
-                                              type="button"
-                                              onClick={() => setSelectedCutterHistory({
-                                                article: group.article,
-                                                size: group.size,
-                                                cutterName: row.cutterName,
-                                                rows: group.rows.filter(item => item.cutterName === row.cutterName)
-                                              })}
-                                              className="font-bold text-blue-700 underline decoration-dotted underline-offset-2 hover:text-blue-900"
-                                            >
-                                              {row.cutterName}
-                                            </button>
-                                          </td>
-                                          <td className="border border-slate-300 px-3 py-2 text-right font-mono font-bold">{row.qty.toLocaleString()}</td>
-                                          <td className="border border-slate-300 px-3 py-2 text-right font-mono">{row.rate > 0 ? `Rs. ${row.rate}` : '-'}</td>
-                                          <td className="border border-slate-300 px-3 py-2 text-right font-mono">{row.amount > 0 ? `Rs. ${row.amount.toLocaleString()}` : '-'}</td>
-                                          <td className="border border-slate-300 px-3 py-2">
-                                            <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${row.type === 'GIVE' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
-                                              {row.status}
-                                            </span>
-                                          </td>
-                                        </tr>
-                                      ))}
-                                      <tr className="bg-amber-50 font-black">
-                                        <td className="border border-slate-300 px-3 py-2" colSpan={3}>TOTAL ISSUED / RECEIVED</td>
-                                        <td className="border border-slate-300 px-3 py-2 text-right font-mono">{issuedPairs.toLocaleString()} / {receivedPairs.toLocaleString()}</td>
-                                        <td className="border border-slate-300 px-3 py-2" />
-                                        <td className="border border-slate-300 px-3 py-2 text-right font-mono">
-                                          Rs. {group.rows.reduce((sum, row) => sum + row.amount, 0).toLocaleString()}
-                                        </td>
-                                        <td className="border border-slate-300 px-3 py-2" />
-                                      </tr>
-                                    </tbody>
-                                  </table>
-                                </div>
-                                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                  {[...cutterTotals.entries()].map(([cutterName, totals]) => (
-                                    <button
-                                      key={cutterName}
-                                      type="button"
-                                      onClick={() => setSelectedCutterHistory({
-                                        article: group.article,
-                                        size: group.size,
-                                        cutterName,
-                                        rows: totals.rows
-                                      })}
-                                      className="rounded-lg border border-slate-200 bg-white p-3 text-left text-xs hover:border-blue-300 hover:bg-blue-50/50"
-                                    >
-                                      <span className="block font-bold text-slate-900">{cutterName}</span>
-                                      <span className="mt-1 block text-slate-600">
-                                        Issued: {totals.issued.toLocaleString()} · Received: {totals.received.toLocaleString()} Pairs
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                                <p className="mt-3 text-right text-sm font-black text-slate-900">
-                                  Total Cutting: {issuedPairs.toLocaleString()} Pairs
-                                </p>
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </section>
-                    );
-                  })}
-              </div>
-            )}
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Tab 3: Stitching History */}
-        {activeTab === 'stitching' && (
-          <div className="space-y-4 p-4 sm:p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="relative w-full sm:max-w-sm">
-                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                <input
-                  type="search"
-                  value={stitchingArticleSearch}
-                  onChange={event => setStitchingArticleSearch(event.target.value)}
-                  placeholder="Search by article or size"
-                  className="w-full rounded-xl border border-slate-300 py-2 pl-9 pr-3 text-sm"
-                />
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setNewCuttingArticle('');
-                    setNewCuttingSize('');
-                    setIsAddArticleSizeOpen(true);
-                  }}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-50"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add Article &amp; Size
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openAddStitchingEntry()}
-                  disabled={availableStitchingGroups.length === 0 || !stitchers.some(stitcher => stitcher.isActive)}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-bold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Scissors className="h-4 w-4" />
-                  Add Stitching Entry
-                </button>
-              </div>
-            </div>
-
-            {stitchingArticleGroups.filter(group => {
-              const query = stitchingArticleSearch.trim().toLocaleLowerCase();
-              return !query || group.article.toLocaleLowerCase().includes(query) || group.size.toLocaleLowerCase().includes(query);
-            }).length === 0 ? (
-              <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-slate-500">
-                <Scissors className="mx-auto mb-2 h-8 w-8 opacity-40" />
-                <p className="text-sm font-semibold">
-                  {stitchingArticleSearch ? 'No matching articles or sizes.' : 'No article or size groups are available for this order.'}
+        {/* 3. DELIVERY HISTORY SECTION — ALL DELIVERIES WITH GATE PASS (Shown in 'all' or 'delivery') */}
+        {(activeTab === 'all' || activeTab === 'delivery') && (
+          <div>
+            <div className="bg-emerald-50/80 px-4 py-3 sm:px-5 border-b border-emerald-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-lg bg-emerald-200 text-emerald-800 flex items-center justify-center text-xs font-black">3</span>
+                  <h3 className="text-sm font-black text-emerald-950 uppercase tracking-wider flex items-center gap-2">
+                    <Truck className="w-4 h-4 text-emerald-600" />
+                    <span>Delivery History — All Dispatches &amp; Gate Passes</span>
+                  </h3>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Complete delivery log with auto-generated Gate Pass No., linked Bill No., and real-time remaining balance.
                 </p>
               </div>
-            ) : (
-              <div className="space-y-2">
-                {stitchingArticleGroups.filter(group => {
-                  const query = stitchingArticleSearch.trim().toLocaleLowerCase();
-                  return !query || group.article.toLocaleLowerCase().includes(query) || group.size.toLocaleLowerCase().includes(query);
-                }).map(group => {
-                  const issuedEntries = group.rows.filter(entry => entry.type === 'ISSUE');
-                  const issuedPairs = issuedEntries.reduce((total, entry) => total + (Number(entry.quantity) || 0), 0);
-                  const remainingPairs = Math.max(0, group.cuttingReceivedPairs - issuedPairs);
-                  const progress = group.cuttingReceivedPairs > 0
-                    ? Math.min(100, Math.round((issuedPairs / group.cuttingReceivedPairs) * 100))
-                    : 0;
-                  const expanded = expandedStitchingGroup === group.key;
-                  return (
-                    <section key={group.key} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                      <button
-                        type="button"
-                        onClick={() => setExpandedStitchingGroup(expanded ? null : group.key)}
-                        aria-expanded={expanded}
-                        className={`grid w-full grid-cols-1 gap-3 p-4 text-left transition hover:bg-blue-50/70 sm:grid-cols-[minmax(180px,1.3fr)_minmax(90px,.45fr)_repeat(3,minmax(115px,.7fr))_auto] sm:items-center ${expanded ? 'bg-blue-50/70' : ''}`}
-                      >
-                        <span className="flex min-w-0 items-center gap-2">
-                          {expanded
-                            ? <ChevronDown className="h-4 w-4 shrink-0 text-blue-700" />
-                            : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
-                          <span className="min-w-0">
-                            <span className="block truncate text-sm font-black text-slate-900">{group.article}</span>
-                            <span className="block text-[11px] text-slate-500">Article</span>
-                          </span>
-                        </span>
-                        <span>
-                          <span className="block text-sm font-bold text-slate-800">{group.size}</span>
-                          <span className="block text-[11px] text-slate-500">Size</span>
-                        </span>
-                        <span>
-                          <span className="block text-sm font-bold text-slate-800">{issuedEntries.length} Entries</span>
-                          <span className="block text-[11px] text-slate-500">History records</span>
-                        </span>
-                        <span>
-                          <span className="block text-sm font-black text-amber-700">{issuedPairs.toLocaleString()} Pairs</span>
-                          <span className="block text-[11px] text-slate-500">Stitching issued</span>
-                        </span>
-                        <span>
-                          <span className="block text-sm font-bold text-blue-800">{remainingPairs.toLocaleString()} Pairs</span>
-                          <span className="block text-[11px] text-slate-500">Remaining from Cutting Received</span>
-                        </span>
-                        <span className="flex items-center gap-2 sm:min-w-[95px]">
-                          <span className="h-2 min-w-14 flex-1 overflow-hidden rounded-full bg-slate-200">
-                            <span className={`block h-full rounded-full ${progress === 100 ? 'bg-emerald-500' : 'bg-blue-600'}`} style={{ width: `${progress}%` }} />
-                          </span>
-                          <span className="text-xs font-bold text-slate-600">{progress}%</span>
-                        </span>
-                      </button>
-                      {expanded && (
-                        <div className="border-t border-blue-200 bg-slate-50 p-3 sm:p-4">
-                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                            <div>
-                              <h4 className="text-sm font-black text-slate-900">Article: {group.article} <span className="text-slate-400">|</span> Size: {group.size}</h4>
-                              <p className="mt-1 text-xs text-slate-600">
-                                Cutting Received: {group.cuttingReceivedPairs.toLocaleString()} · Stitching Issued: {issuedPairs.toLocaleString()} · Remaining: {remainingPairs.toLocaleString()} Pairs
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              disabled={remainingPairs === 0 || !stitchers.some(stitcher => stitcher.isActive)}
-                              onClick={() => openAddStitchingEntry(group.key)}
-                              className="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              Add Stitching Entry
-                            </button>
-                          </div>
-                          {group.cuttingReceivedPairs === 0 && (
-                            <div className="mb-3 rounded-lg border border-dashed border-slate-300 bg-white p-4 text-center text-xs text-slate-500">
-                              No cutting history received for this article and size yet.
-                              <button
-                                type="button"
-                                onClick={() => onOpenCuttingModalForOrder(order.id)}
-                                className="ml-2 font-bold text-blue-700 hover:underline"
-                              >
-                                Add cutting entry
-                              </button>
-                            </div>
-                          )}
-                          {issuedEntries.length === 0 ? (
-                            <div className="rounded-lg border border-dashed border-slate-300 bg-white p-5 text-center text-xs text-slate-500">
-                              No stitching history recorded for this article and size yet.
-                            </div>
-                          ) : (
-                            <div className="overflow-x-auto rounded-lg border border-slate-300 bg-white">
-                              <table className="w-full min-w-[850px] border-collapse text-left text-xs">
-                                <thead>
-                                  <tr className="bg-blue-400 font-bold text-white">
-                                    <th className="border border-slate-300 px-3 py-2">Date</th>
-                                    <th className="border border-slate-300 px-3 py-2">Customer Name</th>
-                                    <th className="border border-slate-300 px-3 py-2">Article</th>
-                                    <th className="border border-slate-300 px-3 py-2">Size</th>
-                                    <th className="border border-slate-300 px-3 py-2 text-right">Pairs</th>
-                                    <th className="border border-slate-300 px-3 py-2 text-right">Rate</th>
-                                    <th className="border border-slate-300 px-3 py-2 text-right">Total Balance</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {issuedEntries.map((entry, rowIndex) => (
-                                    <tr key={entry.id} className={rowIndex % 2 ? 'bg-slate-100' : 'bg-white'}>
-                                      <td className="border border-slate-300 px-3 py-2 font-mono">{formatDate(entry.date)}</td>
-                                      <td className="border border-slate-300 px-3 py-2">{entry.customerName}</td>
-                                      <td className="border border-slate-300 px-3 py-2 font-bold text-slate-900">{entry.article}</td>
-                                      <td className="border border-slate-300 px-3 py-2">{entry.size || group.size}</td>
-                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono font-bold">{entry.quantity.toLocaleString()}</td>
-                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono">Rs. {entry.rate.toLocaleString()}</td>
-                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono">Rs. {entry.amount.toLocaleString()}</td>
-                                    </tr>
-                                  ))}
-                                  <tr className="bg-amber-50 font-black">
-                                    <td className="border border-slate-300 px-3 py-2" colSpan={4}>TOTAL STITCHING ISSUED</td>
-                                    <td className="border border-slate-300 px-3 py-2 text-right font-mono">{issuedPairs.toLocaleString()}</td>
-                                    <td className="border border-slate-300 px-3 py-2" />
-                                    <td className="border border-slate-300 px-3 py-2 text-right font-mono">Rs. {issuedEntries.reduce((total, entry) => total + (Number(entry.amount) || 0), 0).toLocaleString()}</td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </section>
-                  );
-                })}
-              </div>
-            )}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <h3 className="mb-2 flex items-center gap-2 text-sm font-black text-slate-900"><ShieldCheck className="h-4 w-4 text-blue-600" />Stitching History &amp; Audit Trail</h3>
-              {orderStitchingHistory.length === 0
-                ? <p className="text-xs text-slate-500">No stitching audit events have been recorded yet.</p>
-                : (
-                  <div className="space-y-4">
-                    {orderStitchingOrders.map(stitchingOrder => (
-                      <div key={stitchingOrder.id} className="border-b border-slate-200 pb-3 last:border-0 last:pb-0">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-xs">
-                            <b className="text-slate-800">{stitchingOrder.article}</b>
-                            <span className="ml-2 text-slate-500">{stitchingOrder.stitcherName} · {stitchingOrder.status}</span>
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            <button type="button" onClick={() => void handleStitchingStatusChange(stitchingOrder.id, 'Customer Stock Created')} className="rounded-md bg-blue-600 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-blue-700">Create Customer Stock</button>
-                            <button type="button" onClick={() => void handleStitchingStatusChange(stitchingOrder.id, 'Stock Received')} className="rounded-md bg-green-600 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-green-700">Stock Received</button>
-                            <button type="button" onClick={() => void handleStitchingStatusChange(stitchingOrder.id, 'Ready for Stitching')} className="rounded-md bg-amber-500 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-amber-600">Ready for Stitching</button>
-                            <button type="button" onClick={() => void handleStitchingStatusChange(stitchingOrder.id, 'Packing')} className="rounded-md bg-slate-700 px-2 py-1.5 text-[10px] font-bold text-white hover:bg-slate-800">Packing</button>
-                          </div>
-                        </div>
-                        <ol className="mt-2 space-y-1">
-                          {orderStitchingHistory.filter(entry => entry.stitchingOrderId === stitchingOrder.id).map(entry => (
-                            <li key={entry.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                              <span className="font-mono text-slate-500">{formatDate(entry.date)}</span>
-                              <b className="text-slate-800">{entry.type === 'STATUS' ? entry.status || 'Status updated' : entry.type === 'ISSUE' ? 'Stitching issued' : 'Stitching received'}</b>
-                              <span className="text-slate-600">{entry.article} · {entry.quantity} pairs · {entry.stitcherName}</span>
-                              {entry.remarks && <span className="text-slate-500">{entry.remarks}</span>}
-                            </li>
-                          ))}
-                        </ol>
-                      </div>
-                    ))}
-                  </div>
-                )}
-            </div>
-          </div>
-        )}
 
-        {/* Tab 3 Content: Stock Movement (from stock_ledger) */}
-        {activeTab === 'stock' && (
-          <div className="overflow-x-auto">
-            {orderStockLedger.length === 0 ? (
-              <div className="p-8 text-center text-slate-400">
-                <Boxes className="w-8 h-8 mx-auto mb-2 opacity-40" />
-                <p className="text-xs">No stock ledger movements logged for this order yet.</p>
-              </div>
-            ) : (
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
-                    <th className="py-3 px-4">Date</th>
-                    <th className="py-3 px-4">Movement Type</th>
-                    <th className="py-3 px-4">Product / Item</th>
-                    <th className="py-3 px-4 text-right">Quantity</th>
-                    <th className="py-3 px-4">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 font-medium">
-                  {orderStockLedger.map(entry => (
-                    <tr key={entry.id} className="hover:bg-slate-50/70 transition">
-                      <td className="py-3 px-4 font-mono">{formatDate(entry.date)}</td>
-                      <td className="py-3 px-4">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          entry.type === 'in' || entry.type === 'cutting_received'
-                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : 'bg-rose-50 text-rose-700 border border-rose-200'
-                        }`}>
-                          {entry.type === 'in' || entry.type === 'cutting_received' ? 'Stock In (+)' : 'Stock Out / Sale (-)'}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 font-bold text-slate-900">{entry.productName}</td>
-                      <td className="py-3 px-4 text-right font-mono font-black text-slate-900">{entry.qty} Pairs</td>
-                      <td className="py-3 px-4 text-slate-500">{entry.notes || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {/* Tab 4 Content: Dispatch / Billing History (from sales_invoices + order_dispatch_history) */}
-        {activeTab === 'dispatch' && (
-          <div className="overflow-x-auto">
-            {orderInvoices.length === 0 && orderDispatches.length === 0 ? (
-              <div className="p-8 text-center text-slate-400">
-                <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40" />
-                <p className="text-xs">No customer sales invoices or dispatches created yet.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                  <input
+                    type="search"
+                    value={deliverySearch}
+                    onChange={e => setDeliverySearch(e.target.value)}
+                    placeholder="Search Gate Pass (e.g. GP-001), Bill, Vehicle..."
+                    className="rounded-xl border border-slate-300 py-1.5 pl-8 pr-3 text-xs bg-white w-64 shadow-xs"
+                  />
+                </div>
                 <button
-                  onClick={() => onOpenInvoiceModalForOrder(order.id)}
-                  className="mt-3 px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 transition"
+                  type="button"
+                  onClick={handleOpenQuickDeliver}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 text-xs font-bold shadow-xs cursor-pointer transition active:scale-95"
                 >
-                  + Create Sale Invoice & Dispatch
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Deliver Stock / Gate Pass</span>
                 </button>
               </div>
-            ) : (
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
-                    <th className="py-3 px-4">Date</th>
-                    <th className="py-3 px-4">Invoice / Action</th>
-                    <th className="py-3 px-4">Customer Name</th>
-                    <th className="py-3 px-4 text-right">Dispatched Qty</th>
-                    <th className="py-3 px-4 text-right">Invoice Value</th>
-                    <th className="py-3 px-4">Payment</th>
-                    <th className="py-3 px-4">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 font-medium">
-                  {orderInvoices.map(inv => {
-                    const totalInvPairs = (inv.items || []).reduce((s, i) => s + (Number(i.qty) || 0), 0);
-                    return (
-                      <tr key={inv.id} className="hover:bg-slate-50/70 transition">
-                        <td className="py-3 px-4 font-mono">{formatDate(inv.date)}</td>
-                        <td className="py-3 px-4">
-                          <span className="font-mono font-bold text-blue-700">#{inv.invoiceNo}</span>
+            </div>
+
+            {/* Delivery History Table */}
+            <div className="overflow-x-auto" ref={deliveryTableScrollRef}>
+              {filteredDeliveryRecords.length === 0 ? (
+                <div className="p-8 text-center text-slate-400">
+                  <Truck className="w-10 h-10 mx-auto mb-2 opacity-30 text-emerald-600" />
+                  <p className="text-sm font-semibold text-slate-600">
+                    {deliverySearch ? `No deliveries matching "${deliverySearch}"` : 'No deliveries recorded yet for this order.'}
+                  </p>
+                  <button
+                    onClick={handleOpenQuickDeliver}
+                    className="mt-3 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition cursor-pointer"
+                  >
+                    + Record First Delivery
+                  </button>
+                </div>
+              ) : (
+                <table className="w-full min-w-[1100px] text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-700 font-black border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                      <th className="py-3 px-3">Date</th>
+                      <th className="py-3 px-3">Delivery / Bill No.</th>
+                      <th className="py-3 px-3">Gate Pass No.</th>
+                      <th className="py-3 px-3">Article</th>
+                      <th className="py-3 px-3">Size</th>
+                      <th className="py-3 px-3 text-right font-black text-emerald-700">Qty Delivered (Pairs)</th>
+                      <th className="py-3 px-3 text-right">Rate</th>
+                      <th className="py-3 px-3 text-right font-bold">Amount</th>
+                      <th className="py-3 px-3">Delivered To</th>
+                      <th className="py-3 px-3">Vehicle / Driver / Bilty</th>
+                      <th className="py-3 px-3">Status</th>
+                      <th className="py-3 px-3 text-right font-black text-blue-700">Balance Remaining</th>
+                      <th className="py-3 px-3 text-center">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium">
+                    {filteredDeliveryRecords.map((row, idx) => (
+                      <tr key={row.id || idx} className="hover:bg-slate-50/80 transition">
+                        <td className="py-3 px-3 font-mono text-slate-700 whitespace-nowrap">
+                          {formatDate(row.date)}
                         </td>
-                        <td className="py-3 px-4 font-bold text-slate-900">{inv.customerName}</td>
-                        <td className="py-3 px-4 text-right font-mono font-black text-slate-900">{totalInvPairs} Pairs</td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-800">
-                          {formatCurrency(inv.grandTotal, settings.currency)}
+                        <td className="py-3 px-3 font-mono font-bold text-slate-900 whitespace-nowrap">
+                          {row.billNo}
                         </td>
-                        <td className="py-3 px-4">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            inv.paymentStatus === 'paid' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
-                          }`}>
-                            {inv.paymentStatus.toUpperCase()} ({inv.paymentMode})
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedGatePass(row)}
+                            className="inline-flex items-center gap-1 font-mono font-black text-xs px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 hover:border-emerald-400 transition cursor-pointer"
+                            title="Click to view &amp; print Gate Pass slip"
+                          >
+                            <FileText className="w-3 h-3 text-emerald-600" />
+                            <span>{row.gatePassNo}</span>
+                          </button>
+                        </td>
+                        <td className="py-3 px-3 font-bold text-slate-900">
+                          {row.article}
+                        </td>
+                        <td className="py-3 px-3 font-mono text-slate-700">
+                          {row.size}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-black text-emerald-700 text-sm">
+                          {row.qty.toLocaleString()}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono text-slate-600">
+                          {row.rate > 0 ? `Rs. ${row.rate.toLocaleString()}` : '-'}
+                        </td>
+                        <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
+                          {row.amount > 0 ? `Rs. ${row.amount.toLocaleString()}` : '-'}
+                        </td>
+                        <td className="py-3 px-3 font-bold text-slate-800">
+                          {row.deliveredTo || order.customerName}
+                        </td>
+                        <td className="py-3 px-3 text-[11px] text-slate-600">
+                          <span className="font-bold text-slate-800 block">{row.vehicleNo}</span>
+                          <span className="text-slate-500 block">{row.driverName} &bull; {row.biltyNo}</span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                            {row.status}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-slate-500">{inv.notes || '-'}</td>
+                        <td className="py-3 px-3 text-right font-mono font-black text-blue-700 text-sm">
+                          {row.balanceRemaining.toLocaleString()} <span className="text-[10px] font-normal text-slate-400">pairs</span>
+                        </td>
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedGatePass(row)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-bold text-blue-700 hover:bg-blue-50 border border-blue-200 cursor-pointer"
+                            title="Print Gate Pass Slip"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                            <span>Print GP</span>
+                          </button>
+                        </td>
                       </tr>
-                    );
-                  })}
-                  {orderDispatches.map(disp => (
-                    <tr key={disp.id} className="hover:bg-slate-50/70 transition bg-slate-50/30">
-                      <td className="py-3 px-4 font-mono">{formatDate(disp.date)}</td>
-                      <td className="py-3 px-4">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
-                          Dispatch Entry
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 font-bold text-slate-900">{disp.personName || order.customerName}</td>
-                      <td className="py-3 px-4 text-right font-mono font-black text-slate-900">{disp.quantity} Pairs</td>
-                      <td className="py-3 px-4 text-right text-slate-400 font-mono">-</td>
-                      <td className="py-3 px-4 text-slate-400">-</td>
-                      <td className="py-3 px-4 text-slate-500">{disp.notes || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Bottom Summary as explicitly shown in reference video */}
+            <div className="p-4 sm:p-5 bg-slate-50 border-t border-slate-200">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-3xl ml-auto">
+                <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Total Ordered</span>
+                  <span className="text-xl font-black font-mono text-slate-900 mt-0.5 block">
+                    {totalOriginalPairs.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                  </span>
+                </div>
+                <div className="bg-white p-3.5 rounded-xl border border-emerald-200 shadow-xs text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 block">Total Delivered</span>
+                  <span className="text-xl font-black font-mono text-emerald-700 mt-0.5 block">
+                    {totalDeliveredPairs.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                  </span>
+                </div>
+                <div className="bg-white p-3.5 rounded-xl border border-blue-200 shadow-xs text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-600 block">Remaining To Deliver</span>
+                  <span className="text-xl font-black font-mono text-blue-700 mt-0.5 block">
+                    {remainingToDeliverPairs.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </section>
@@ -1718,147 +1493,387 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         </div>
       )}
 
-      {isAddStitchingOpen && (
+      {/* =========================================================================
+          QUICK DELIVER / CREATE GATE PASS MODAL
+          ========================================================================= */}
+      {isDeliverModalOpen && (
         <div 
           onClick={(e) => {
-            if (e.target === e.currentTarget) setIsAddStitchingOpen(false);
+            if (e.target === e.currentTarget) setIsDeliverModalOpen(false);
           }}
           className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
         >
           <form 
             onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSaveStitchingEntry} 
-            className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl my-auto max-h-[92vh] overflow-y-auto"
+            onSubmit={handleSaveQuickDelivery} 
+            className="w-full max-w-lg rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto max-h-[92vh] overflow-y-auto"
           >
-            <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
               <div>
-                <h3 className="text-lg font-bold text-slate-900">Add Stitching Entry</h3>
-                <p className="mt-1 text-xs text-slate-500">Issue only pairs already received from Cutting.</p>
+                <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                  <Truck className="w-5 h-5 text-emerald-600" />
+                  <span>Deliver Stock &amp; Issue Gate Pass</span>
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Deliver stock for Order #{order.orderNo} ({order.customerName}). Auto-generates Gate Pass slip.
+                </p>
               </div>
               <button
                 type="button"
-                onClick={() => setIsAddStitchingOpen(false)}
+                onClick={() => setIsDeliverModalOpen(false)}
                 className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 cursor-pointer"
                 title="Close / Back (Esc)"
-                aria-label="Close / Back"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
+
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label className="text-sm font-semibold text-slate-700">
-                Article &amp; Size *
-                <select
+              <label className="text-xs font-bold text-slate-700">
+                Gate Pass No. (Auto / Unique) *
+                <input
                   required
-                  value={stitchingForm.articleSizeKey}
-                  onChange={event => setStitchingForm({ ...stitchingForm, articleSizeKey: event.target.value })}
-                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                >
-                  <option value="">Select article and size</option>
-                  {stitchingArticleGroups.map(group => {
-                    const remaining = Math.max(0, group.cuttingReceivedPairs - group.rows
-                      .filter(entry => entry.type === 'ISSUE')
-                      .reduce((total, entry) => total + (Number(entry.quantity) || 0), 0));
-                    return (
-                      <option key={group.key} value={group.key} disabled={remaining === 0}>
-                        {group.article} / {group.size} — {remaining} pairs available
-                      </option>
-                    );
-                  })}
-                </select>
+                  value={deliveryForm.gatePassNo}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, gatePassNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 font-mono font-bold text-emerald-700 px-3 py-2 text-xs bg-emerald-50/50"
+                  placeholder="GP-001"
+                />
               </label>
-              <label className="text-sm font-semibold text-slate-700">
-                Stitcher Name *
-                <select
+
+              <label className="text-xs font-bold text-slate-700">
+                Bill / Invoice No. *
+                <input
                   required
-                  value={stitchingForm.stitcherId}
-                  onChange={event => {
-                    const stitcher = stitchers.find(item => item.id === event.target.value);
-                    setStitchingForm({
-                      ...stitchingForm,
-                      stitcherId: event.target.value,
-                      rate: stitcher?.perPairRate ? String(stitcher.perPairRate) : stitchingForm.rate
-                    });
-                  }}
-                  className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                >
-                  <option value="">Select a stitcher</option>
-                  {stitchers.filter(stitcher => stitcher.isActive).map(stitcher => (
-                    <option key={stitcher.id} value={stitcher.id}>{stitcher.name}</option>
-                  ))}
-                </select>
+                  value={deliveryForm.billNo}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, billNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 font-mono font-bold px-3 py-2 text-xs"
+                  placeholder="Bill No. 19"
+                />
               </label>
-              <label className="text-sm font-semibold text-slate-700">
-                Date (WASOOLI DATE) *
+
+              <label className="text-xs font-bold text-slate-700">
+                Delivery Date *
                 <input
                   required
                   type="date"
-                  value={stitchingForm.date}
-                  onChange={event => setStitchingForm({ ...stitchingForm, date: event.target.value })}
-                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2"
+                  value={deliveryForm.date}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, date: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
                 />
               </label>
-              <label className="text-sm font-semibold text-slate-700">
+
+              <label className="text-xs font-bold text-slate-700">
                 Customer Name
                 <input
                   readOnly
                   value={order.customerName}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-slate-500"
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600 font-bold"
                 />
               </label>
-              <label className="text-sm font-semibold text-slate-700">
-                Pairs *
+
+              <label className="text-xs font-bold text-slate-700">
+                Article *
                 <input
                   required
-                  min="1"
-                  max={selectedStitchingAvailablePairs}
-                  type="number"
-                  value={stitchingForm.qty}
-                  onChange={event => setStitchingForm({ ...stitchingForm, qty: event.target.value })}
-                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2"
+                  value={deliveryForm.article}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, article: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
+                  placeholder="1202"
                 />
-                <span className="mt-1 block text-[11px] font-normal text-slate-500">
-                  {selectedStitchingAvailablePairs} Cutting Received pairs available
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Size *
+                <input
+                  required
+                  value={deliveryForm.size}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, size: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  placeholder="10"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Quantity Delivered (Pairs) *
+                <input
+                  required
+                  type="number"
+                  min="1"
+                  value={deliveryForm.qty}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, qty: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono font-bold text-emerald-700"
+                  placeholder="1000"
+                />
+                <span className="mt-1 block text-[10px] text-slate-500 font-normal">
+                  Remaining order balance: {remainingToDeliverPairs.toLocaleString()} pairs
                 </span>
               </label>
-              <label className="text-sm font-semibold text-slate-700">
-                Rate (Rs.) *
+
+              <label className="text-xs font-bold text-slate-700">
+                Rate per Pair (Rs.)
                 <input
-                  required
+                  type="number"
                   min="0"
                   step="0.01"
-                  type="number"
-                  value={stitchingForm.rate}
-                  onChange={event => setStitchingForm({ ...stitchingForm, rate: event.target.value })}
-                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2"
+                  value={deliveryForm.rate}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, rate: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  placeholder="235"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Vehicle No.
+                <input
+                  value={deliveryForm.vehicleNo}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, vehicleNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono uppercase"
+                  placeholder="LES-8921"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Driver Name
+                <input
+                  value={deliveryForm.driverName}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, driverName: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs"
+                  placeholder="Muhammad Akram"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700 sm:col-span-2">
+                Bilty / Reference No.
+                <input
+                  value={deliveryForm.biltyNo}
+                  onChange={e => setDeliveryForm({ ...deliveryForm, biltyNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  placeholder="BL-4491"
                 />
               </label>
             </div>
-            <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm">
-              <span className="font-semibold text-blue-800">Total</span>
-              <span className="float-right font-mono font-black text-blue-900">
-                Rs. {((Number(stitchingForm.qty) || 0) * (Number(stitchingForm.rate) || 0)).toLocaleString()}
-              </span>
+
+            {/* Calculations preview */}
+            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/70 p-3 flex items-center justify-between text-xs">
+              <div>
+                <span className="text-slate-600 block">Total Delivery Value</span>
+                <span className="font-mono font-black text-emerald-900 text-sm">
+                  Rs. {((Number(deliveryForm.qty) || 0) * (Number(deliveryForm.rate) || 0)).toLocaleString()}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-slate-600 block">Remaining After Delivery</span>
+                <span className="font-mono font-black text-blue-800 text-sm">
+                  {Math.max(0, remainingToDeliverPairs - (Number(deliveryForm.qty) || 0)).toLocaleString()} Pairs
+                </span>
+              </div>
             </div>
-            <div className="mt-5 flex justify-end gap-2">
+
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
               <button
                 type="button"
-                onClick={() => setIsAddStitchingOpen(false)}
-                disabled={isSavingStitching}
-                className="flex items-center gap-1 rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                onClick={() => setIsDeliverModalOpen(false)}
+                disabled={isSavingDelivery}
+                className="flex items-center gap-1 rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 Cancel / Back
               </button>
               <button
                 type="submit"
-                disabled={isSavingStitching || !selectedStitchingAvailablePairs}
-                className="rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-white hover:bg-amber-600 disabled:opacity-60 cursor-pointer"
+                disabled={isSavingDelivery}
+                className="rounded-xl bg-emerald-600 hover:bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-60 cursor-pointer flex items-center gap-1.5 shadow-sm"
               >
-                {isSavingStitching ? 'Saving...' : 'Save Stitching Entry'}
+                <Truck className="w-3.5 h-3.5" />
+                <span>{isSavingDelivery ? 'Delivering...' : 'Confirm Delivery & Gate Pass'}</span>
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* =========================================================================
+          GATE PASS PRINT SLIP MODAL (Exact layout as shown in reference video)
+          ========================================================================= */}
+      {selectedGatePass && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSelectedGatePass(null);
+          }}
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/70 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-2xl rounded-2xl bg-white shadow-2xl my-auto overflow-hidden flex flex-col print:m-0 print:w-full print:shadow-none"
+          >
+            {/* Modal Actions Bar (hidden when printing) */}
+            <div className="flex items-center justify-between bg-slate-900 px-5 py-3 text-white shrink-0 print:hidden">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-emerald-400" />
+                <span className="font-mono font-bold text-sm">Gate Pass #{selectedGatePass.gatePassNo}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-xs font-bold text-white cursor-pointer transition active:scale-95"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print Gate Pass Slip</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedGatePass(null)}
+                  className="rounded-lg p-1 text-slate-300 hover:text-white hover:bg-slate-800 cursor-pointer"
+                  title="Close (Esc)"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Printable Gate Pass Slip Content */}
+            <div className="p-6 sm:p-8 bg-white print:p-6" id="gate-pass-print-slip">
+              {/* Company Header */}
+              <div className="text-center border-b-2 border-slate-900 pb-4">
+                <h1 className="text-2xl font-black text-slate-900 uppercase tracking-wider">
+                  {settings.factoryName || 'GLOVES FACTORY ERP'}
+                </h1>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Manufacturers &amp; Exporters of High Quality Leather Gloves
+                </p>
+                <div className="inline-block mt-2 px-4 py-1 rounded-md bg-slate-900 text-white font-black text-xs uppercase tracking-widest">
+                  OUTWARD GATE PASS
+                </div>
+              </div>
+
+              {/* Meta Grid */}
+              <div className="grid grid-cols-2 gap-4 mt-6 text-xs border border-slate-300 rounded-xl p-4 bg-slate-50/50">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Gate Pass Number</span>
+                  <span className="text-lg font-black font-mono text-emerald-700">{selectedGatePass.gatePassNo}</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Date of Outward</span>
+                  <span className="text-sm font-black font-mono text-slate-900">{formatDate(selectedGatePass.date)}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Customer / Party Name</span>
+                  <span className="text-sm font-black text-slate-900">{selectedGatePass.deliveredTo || order.customerName}</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Delivery / Bill No.</span>
+                  <span className="text-sm font-black font-mono text-blue-700">{selectedGatePass.billNo}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Customer Order Reference</span>
+                  <span className="text-xs font-mono font-bold text-slate-800">#{order.orderNo}</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Bilty / Reference No.</span>
+                  <span className="text-xs font-mono font-bold text-slate-800">{selectedGatePass.biltyNo || '-'}</span>
+                </div>
+              </div>
+
+              {/* Items Table */}
+              <div className="mt-5 border border-slate-900 rounded-xl overflow-hidden">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-900 text-white font-bold text-[10px] uppercase tracking-wider">
+                      <th className="py-2.5 px-3">#</th>
+                      <th className="py-2.5 px-3">Article Description</th>
+                      <th className="py-2.5 px-3">Size</th>
+                      <th className="py-2.5 px-3 text-right">Quantity (Pairs)</th>
+                      <th className="py-2.5 px-3 text-right">Rate</th>
+                      <th className="py-2.5 px-3 text-right">Total Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 font-medium">
+                    <tr>
+                      <td className="py-3 px-3 font-mono text-slate-400">1</td>
+                      <td className="py-3 px-3 font-bold text-slate-900">{selectedGatePass.article}</td>
+                      <td className="py-3 px-3 font-mono">{selectedGatePass.size}</td>
+                      <td className="py-3 px-3 text-right font-mono font-black text-slate-900 text-sm">
+                        {selectedGatePass.qty.toLocaleString()} Pairs
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono">
+                        {selectedGatePass.rate > 0 ? `Rs. ${selectedGatePass.rate.toLocaleString()}` : '-'}
+                      </td>
+                      <td className="py-3 px-3 text-right font-mono font-bold text-slate-900">
+                        {selectedGatePass.amount > 0 ? `Rs. ${selectedGatePass.amount.toLocaleString()}` : '-'}
+                      </td>
+                    </tr>
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100 font-black border-t-2 border-slate-900">
+                      <td colSpan={3} className="py-2.5 px-3 uppercase text-[10px] tracking-wider text-right">
+                        Total Quantity Dispatched:
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono text-sm text-emerald-800">
+                        {selectedGatePass.qty.toLocaleString()} Pairs
+                      </td>
+                      <td className="py-2.5 px-3" />
+                      <td className="py-2.5 px-3 text-right font-mono text-sm text-slate-900">
+                        {selectedGatePass.amount > 0 ? `Rs. ${selectedGatePass.amount.toLocaleString()}` : '-'}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+
+              {/* Transport & Vehicle Details */}
+              <div className="mt-5 grid grid-cols-2 gap-4 border border-slate-200 rounded-xl p-3 text-xs bg-slate-50/50">
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Vehicle / Truck No.</span>
+                  <span className="font-mono font-bold text-slate-900 uppercase">{selectedGatePass.vehicleNo || 'LES-8921'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Driver Name</span>
+                  <span className="font-bold text-slate-900">{selectedGatePass.driverName || 'Muhammad Akram'}</span>
+                </div>
+              </div>
+
+              {/* Signature Blocks */}
+              <div className="mt-10 pt-6 grid grid-cols-3 gap-6 text-center text-xs text-slate-700">
+                <div>
+                  <div className="border-t border-slate-900 pt-1 font-bold">Prepared By / Store Incharge</div>
+                  <span className="text-[10px] text-slate-400 block mt-0.5">Factory Store</span>
+                </div>
+                <div>
+                  <div className="border-t border-slate-900 pt-1 font-bold">Driver / Carrier Signature</div>
+                  <span className="text-[10px] text-slate-400 block mt-0.5">Goods Received in Good Condition</span>
+                </div>
+                <div>
+                  <div className="border-t border-slate-900 pt-1 font-bold">Gate Security Incharge</div>
+                  <span className="text-[10px] text-slate-400 block mt-0.5">Outward Verification</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Bottom Footer (hidden on print) */}
+            <div className="p-4 border-t border-slate-200 bg-slate-50 flex justify-between items-center shrink-0 print:hidden">
+              <span className="text-xs text-slate-500 font-mono">
+                Order #{order.orderNo} &bull; Linked with {selectedGatePass.billNo}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedGatePass(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200 cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print Slip</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

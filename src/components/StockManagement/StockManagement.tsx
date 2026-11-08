@@ -672,12 +672,18 @@ export const StockManagement: React.FC = () => {
         (s.article || s.articleName || '').trim().toLowerCase() === deliverTarget.articleName.trim().toLowerCase()
       );
       if (matched) {
+        const orderItem = order.items?.find(i => (i.title || i.gloveType || '').toLowerCase() === deliverTarget.articleName.toLowerCase());
+        const rate = orderItem?.rate || 0;
         await deliverFromStock({
           stockId: matched.id,
           orderId: order.id,
           customerName: order.customerName || 'Customer',
           quantity: qty,
-          date: deliverDate
+          date: deliverDate,
+          article: deliverTarget.articleName,
+          size: orderItem?.size || 'Standard',
+          rate,
+          amount: qty * rate
         });
       } else {
         await addStockReceipt({
@@ -912,7 +918,13 @@ export const StockManagement: React.FC = () => {
             orderId: targetOrder.id,
             customerName: customer,
             quantity: qty,
-            date: bulkDeliveryDate
+            date: bulkDeliveryDate,
+            billNo: bulkBillNo,
+            biltyNo: bulkReferenceNo.trim(),
+            rate: item.rate || 0,
+            amount: item.amount || (qty * (item.rate || 0)),
+            article: item.articleName,
+            size: item.size || 'Standard'
           });
         } else if (db) {
           const normId = item.articleName.replace(/[^a-zA-Z0-9_-]/g, '_');
