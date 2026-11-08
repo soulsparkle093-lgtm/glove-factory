@@ -31,7 +31,8 @@ import {
 import { useFactory } from '../context/FactoryContext';
 import { formatDate, safeStringCompare } from '../utils/factoryFormatters';
 import { Cutter, CutterCategory, CuttingEntry, CuttingTransaction } from '../types/factory';
-import { collection, db, deleteDoc, doc, onSnapshot, runTransaction, serverTimestamp } from '../firebase';
+import { collection, db, deleteDoc, doc, onSnapshot, runTransaction, serverTimestamp, updateDoc } from '../firebase';
+import { useDragToScroll } from '../hooks/useDragToScroll';
 
 const formatConfirmationDate = (value: string): string => {
   const date = new Date(`${value}T00:00:00`);
@@ -145,6 +146,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     cuttingEntries = [],
     articlesMaster,
     createArticleMaster,
+    createCustomerOrder,
     updateCuttingEntry,
     deleteCuttingEntry,
     updateCuttingReturn,
@@ -162,6 +164,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
   // Search filter
   const [searchQuery, setSearchQuery] = useState('');
+  const ledgerTableScrollRef = useDragToScroll<HTMLDivElement>();
 
   // Add Cutter Modal State
   const [isAddCutterOpen, setIsAddCutterOpen] = useState(false);
@@ -196,8 +199,21 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const [formBillNo, setFormBillNo] = useState('');
   // 7. Factory / Notes (e.g. "Shoaib Factory")
   const [formFactoryNotes, setFormFactoryNotes] = useState('');
-  // 8. Delivery choice for Receive Cutting: LINKED_TO_PO | DIRECT_CUTTING_NO_PO | SEND_TO_STOCK
-  const [deliveryChoice, setDeliveryChoice] = useState<'LINKED_TO_PO' | 'DIRECT_CUTTING_NO_PO' | 'SEND_TO_STOCK'>('LINKED_TO_PO');
+  
+  // Delivery choice for Receive Cutting: Checkboxes
+  // 1. Add to Stock - Stock Management (independent)
+  // 2. Add to Existing Order (mutually exclusive with 3)
+  // 3. Add to New Order (mutually exclusive with 2)
+  const [deliveryToStock, setDeliveryToStock] = useState(true);
+  const [deliveryToExistingOrder, setDeliveryToExistingOrder] = useState(false);
+  const [deliveryToNewOrder, setDeliveryToNewOrder] = useState(false);
+  const [newOrderCustomerName, setNewOrderCustomerName] = useState('');
+
+  // Size rows for free-text typing & multiple size matrix
+  const [cuttingSizeRows, setCuttingSizeRows] = useState<Array<{ id: string; size: string; qty: string; average: string; rate: string }>>([
+    { id: '1', size: '', qty: '', average: '', rate: '' }
+  ]);
+
   const [showNewArticleForm, setShowNewArticleForm] = useState(false);
   const [newArticleForm, setNewArticleForm] = useState({ articleName: '', sizeName: '', pairs: '' });
 
@@ -243,6 +259,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   });
   const [isSavingPayment, setIsSavingPayment] = useState(false);
   const savingPaymentRef = useRef(false);
+  const [editingPayment, setEditingPayment] = useState<NasimLedgerPayment | null>(null);
+  const [editPaymentForm, setEditPaymentForm] = useState({
+    date: '',
+    amount: '',
+    paymentMethod: 'Cash' as 'Cash' | 'Easypaisa' | 'JazzCash' | 'Bank Transfer',
+    billNo: ''
+  });
+  const [isSavingEditPayment, setIsSavingEditPayment] = useState(false);
   const [articleSearch, setArticleSearch] = useState('');
   const [isArticlePickerOpen, setIsArticlePickerOpen] = useState(false);
   const articlePickerRef = useRef<HTMLDivElement>(null);
@@ -264,6 +288,39 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [isArticlePickerOpen]);
+
+  // Global ESC key listener to dismiss any active modal and prevent screen freeze
+  useEffect(() => {
+    const handleGlobalEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (paymentModalType) setPaymentModalType(null);
+        else if (editingPayment) setEditingPayment(null);
+        else if (isReturnCuttingModalOpen) setIsReturnCuttingModalOpen(false);
+        else if (returnTarget) setReturnTarget(null);
+        else if (editingEntry) setEditingEntry(null);
+        else if (deletingEntry) setDeletingEntry(null);
+        else if (cutterDeleteTarget) setCutterDeleteTarget(null);
+        else if (cutterStatusTarget) setCutterStatusTarget(null);
+        else if (isAddCutterOpen) setIsAddCutterOpen(false);
+        else if (txModalType) handleCloseTxModal();
+        else if (pdfExportMode) setPdfExportMode(null);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalEscape);
+    return () => window.removeEventListener('keydown', handleGlobalEscape);
+  }, [
+    paymentModalType,
+    editingPayment,
+    isReturnCuttingModalOpen,
+    returnTarget,
+    editingEntry,
+    deletingEntry,
+    cutterDeleteTarget,
+    cutterStatusTarget,
+    isAddCutterOpen,
+    txModalType,
+    pdfExportMode
+  ]);
 
   // Filter cutters for selected category
   const categoryCutters = useMemo(() => {
@@ -532,13 +589,19 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     setFormCustomerName('');
     setFormSize('');
     setFormAverage('');
-    setFormRate('');
+    setFormRate(activeCutter?.perPairRate ? String(activeCutter.perPairRate) : '');
     setFormArticle('');
     setFormOrderId('');
     setFormCustomerName('');
     setFormBillNo('');
     setFormFactoryNotes(activeCutter?.name ? `${activeCutter.name} Unit` : '');
-    setDeliveryChoice('LINKED_TO_PO');
+    setDeliveryToStock(true);
+    setDeliveryToExistingOrder(false);
+    setDeliveryToNewOrder(false);
+    setNewOrderCustomerName('');
+    setCuttingSizeRows([
+      { id: '1', size: '', qty: '', average: '', rate: activeCutter?.perPairRate ? String(activeCutter.perPairRate) : '' }
+    ]);
     setShowNewArticleForm(false);
     setNewArticleForm({ articleName: '', sizeName: '', pairs: '' });
     setArticleSearch('');
@@ -617,8 +680,52 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       return;
     }
 
-    if (txModalType === 'RECEIVE' && deliveryChoice === 'LINKED_TO_PO' && !formOrderId) {
-      showToast('Select a customer order for direct linked delivery.', 'error');
+    if (txModalType === 'RECEIVE') {
+      if (!deliveryToStock && !deliveryToExistingOrder && !deliveryToNewOrder) {
+        showToast('Please select at least one destination: Stock / Order / New Order', 'error');
+        return;
+      }
+      if (deliveryToExistingOrder && !formOrderId) {
+        showToast('Select a customer order (PO).', 'error');
+        return;
+      }
+      if (deliveryToNewOrder && !newOrderCustomerName.trim()) {
+        showToast('Please enter customer/company name for the new order.', 'error');
+        return;
+      }
+    }
+
+    // Collect size rows
+    const rowsToProcess: Array<{ size: string; qty: number; average: string; rate: number }> = [];
+    if (txModalType === 'RECEIVE') {
+      cuttingSizeRows.forEach(r => {
+        const q = safeParse(r.qty);
+        if (q > 0 || r.size.trim()) {
+          const rRate = safeParse(r.rate) > 0 ? safeParse(r.rate) : (safeParse(formRate) > 0 ? safeParse(formRate) : (activeCutter.perPairRate || 0));
+          rowsToProcess.push({
+            size: r.size.trim() || 'Standard',
+            qty: q,
+            average: r.average.trim() || formAverage.trim(),
+            rate: rRate
+          });
+        }
+      });
+    }
+
+    if (rowsToProcess.length === 0) {
+      const fallbackQty = safeParse(formQty);
+      if (fallbackQty > 0) {
+        rowsToProcess.push({
+          size: formSize.trim() || 'Standard',
+          qty: fallbackQty,
+          average: formAverage.trim(),
+          rate: safeParse(formRate) > 0 ? safeParse(formRate) : (activeCutter.perPairRate || 0)
+        });
+      }
+    }
+
+    if (rowsToProcess.length === 0 || rowsToProcess.every(r => r.qty <= 0)) {
+      showToast('Enter a valid pair quantity.', 'error');
       return;
     }
 
@@ -633,7 +740,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           try {
             await createArticleMaster({
               articleName: finalArticle,
-              sizes: [{ sizeName: formSize.trim() || '-', pairs: 1 }]
+              sizes: rowsToProcess.map(r => ({ sizeName: r.size, pairs: r.qty }))
             });
             console.log(`Auto-saved new article to master catalog: "${finalArticle}"`);
           } catch (autoSaveErr) {
@@ -642,50 +749,79 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         }
       }
 
-      // Find selected order if linked to PO
-      const targetOrder = deliveryChoice === 'LINKED_TO_PO' ? orders.find(o => o.id === formOrderId) : undefined;
-      const finalRate = Number.isFinite(parsedRate) && parsedRate >= 0 ? parsedRate : 0;
-      const totalBalance = parsedQty * finalRate;
+      // Check destinations
+      let effectiveOrderId: string | undefined = undefined;
+      let targetOrder = deliveryToExistingOrder ? orders.find(o => o.id === formOrderId) : undefined;
 
-      // Determine customer name and destination description
-      let effectiveCustomerName = 'Direct Cutting';
-      let effectiveCustomerOrder = 'Direct Cutting / Not Linked to Specific PO';
-
-      if (deliveryChoice === 'LINKED_TO_PO') {
-        effectiveCustomerName = targetOrder?.customerName || formCustomerName.trim() || 'PRO4';
-        effectiveCustomerOrder = targetOrder ? `${targetOrder.customerName} - ${targetOrder.orderNo}` : 'Customer PO';
-      } else if (deliveryChoice === 'SEND_TO_STOCK') {
-        effectiveCustomerName = 'Stock Management';
-        effectiveCustomerOrder = 'Stock Management - Direct to Stock';
-      } else {
-        effectiveCustomerName = formCustomerName.trim() || 'Direct Cutting';
-        effectiveCustomerOrder = 'Direct Cutting / Other Order - Without PO';
+      if (txModalType === 'RECEIVE' && deliveryToNewOrder) {
+        const totalOrderPairs = rowsToProcess.reduce((sum, r) => sum + r.qty, 0);
+        const newOrder = await createCustomerOrder({
+          customerName: newOrderCustomerName.trim(),
+          orderDate: formDate,
+          deliveryDate: formDate,
+          items: [{
+            title: finalArticle,
+            gloveType: finalArticle,
+            customSizes: rowsToProcess.map(r => ({ size: r.size, quantity: r.qty })),
+            totalPairs: totalOrderPairs,
+            sizes: { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 }
+          }],
+          notes: formFactoryNotes.trim() || `Created from Cutting Receive (${activeCutter.name})`
+        });
+        if (newOrder) {
+          effectiveOrderId = newOrder.id;
+          targetOrder = newOrder;
+        }
+      } else if (txModalType === 'RECEIVE' && deliveryToExistingOrder) {
+        effectiveOrderId = formOrderId || undefined;
+      } else if (txModalType === 'GIVE') {
+        effectiveOrderId = formOrderId || undefined;
+        targetOrder = orders.find(o => o.id === formOrderId);
       }
 
-      await saveCuttingTransaction({
-        cutterId: activeCutter.id,
-        cutterName: activeCutter.name,
-        cutterType: activeCutter.cutterType,
-        type: txModalType,
-        date: formDate,
-        qty: parsedQty,
-        totalQty: parsedQty,
-        rate: finalRate,
-        article: finalArticle,
-        articleTitle: finalArticle,
-        orderId: deliveryChoice === 'LINKED_TO_PO' ? formOrderId || undefined : undefined,
-        orderNo: targetOrder?.orderNo || undefined,
-        customerName: effectiveCustomerName,
-        size: formSize.trim() || '-',
-        sizeName: formSize.trim() || '-',
-        average: parsedAverage > 0 ? String(parsedAverage) : formAverage.trim(),
-        totalBalance,
-        customerOrder: effectiveCustomerOrder,
-        billNo: formBillNo.trim() || undefined,
-        factoryName: formFactoryNotes.trim() || undefined,
-        addToStock: txModalType === 'RECEIVE' ? deliveryChoice === 'SEND_TO_STOCK' : false,
-        notes: formFactoryNotes.trim() || undefined
-      });
+      for (const r of rowsToProcess) {
+        const totalBalance = r.qty * r.rate;
+
+        let effectiveCustomerName = 'Stock Management';
+        let effectiveCustomerOrder = 'Stock Management - Direct to Stock';
+
+        if (effectiveOrderId && targetOrder) {
+          effectiveCustomerName = targetOrder.customerName;
+          effectiveCustomerOrder = `${targetOrder.customerName} - ${targetOrder.orderNo}`;
+        } else if (deliveryToExistingOrder) {
+          effectiveCustomerName = formCustomerName.trim() || 'Customer Order';
+          effectiveCustomerOrder = formCustomerName.trim() || 'Customer Order';
+        } else if (txModalType === 'GIVE') {
+          effectiveCustomerName = targetOrder?.customerName || formCustomerName.trim() || 'Direct Cutting';
+          effectiveCustomerOrder = targetOrder ? `${targetOrder.customerName} - ${targetOrder.orderNo}` : 'Direct Cutting';
+        }
+
+        await saveCuttingTransaction({
+          cutterId: activeCutter.id,
+          cutterName: activeCutter.name,
+          cutterType: activeCutter.cutterType,
+          type: txModalType,
+          date: formDate,
+          qty: r.qty,
+          totalQty: r.qty,
+          rate: r.rate,
+          article: finalArticle,
+          articleTitle: finalArticle,
+          orderId: effectiveOrderId,
+          orderNo: targetOrder?.orderNo || undefined,
+          customerName: effectiveCustomerName,
+          size: r.size,
+          sizeName: r.size,
+          average: r.average,
+          totalBalance,
+          customerOrder: effectiveCustomerOrder,
+          billNo: formBillNo.trim() || undefined,
+          factoryName: formFactoryNotes.trim() || undefined,
+          addToStock: txModalType === 'RECEIVE' ? deliveryToStock : false,
+          notes: formFactoryNotes.trim() || undefined
+        });
+      }
+
       setFormQty('');
       setFormArticle('');
       setFormSize('');
@@ -696,10 +832,12 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       setFormBillNo('');
       setFormFactoryNotes('');
       setArticleSearch('');
+      setNewOrderCustomerName('');
+      setCuttingSizeRows([{ id: '1', size: '', qty: '', average: '', rate: '' }]);
       handleCloseTxModal();
       showToast(
-        deliveryChoice === 'SEND_TO_STOCK' 
-          ? 'Cutting received and sent directly to Stock Management.' 
+        deliveryToStock 
+          ? 'Cutting received and updated in Stock Management.' 
           : 'Cutting entry saved successfully.'
       );
     } catch (err) {
@@ -1301,10 +1439,61 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     try {
       await deleteDoc(doc(db, 'nasim_ledger_payments', paymentId));
       setLedgerPayments(previous => previous.filter(payment => payment.id !== paymentId));
-      showToast('Payment deleted.');
+      showToast('Payment deleted. Balance recalculated.');
     } catch (error) {
       console.error('Unable to delete Nasim ledger payment:', error);
       showToast(error instanceof Error ? error.message : 'The payment could not be deleted.', 'error');
+    }
+  };
+
+  const handleOpenEditPayment = (p: NasimLedgerPayment) => {
+    setEditingPayment(p);
+    setEditPaymentForm({
+      date: p.date,
+      amount: String(p.amount),
+      paymentMethod: (p.paymentMethod as any) || 'Cash',
+      billNo: p.billNo || ''
+    });
+  };
+
+  const handleUpdatePayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPayment || !db) return;
+    const amt = Number(editPaymentForm.amount);
+    if (!editPaymentForm.date || isNaN(amt) || amt <= 0) {
+      showToast('Enter a valid date and positive amount.', 'error');
+      return;
+    }
+    setIsSavingEditPayment(true);
+    try {
+      const pRef = doc(db, 'nasim_ledger_payments', editingPayment.id);
+      await updateDoc(pRef, {
+        date: editPaymentForm.date,
+        amount: amt,
+        paymentMethod: editPaymentForm.paymentMethod,
+        billNo: editPaymentForm.billNo.trim(),
+        updatedAt: serverTimestamp()
+      });
+      setLedgerPayments(prev => prev.map(p => p.id === editingPayment.id ? {
+        ...p,
+        date: editPaymentForm.date,
+        amount: amt,
+        paymentMethod: editPaymentForm.paymentMethod as any,
+        billNo: editPaymentForm.billNo.trim()
+      } : p));
+      setEditingPayment(null);
+      showToast('Payment updated successfully. Balance recalculated.');
+    } catch (err) {
+      console.error('Error updating payment:', err);
+      showToast('Failed to update payment.', 'error');
+    } finally {
+      setIsSavingEditPayment(false);
+    }
+  };
+
+  const confirmDeletePayment = (paymentId: string) => {
+    if (window.confirm('Are you sure you want to delete this payment? Balance will recalculate.')) {
+      void handleDeletePayment(paymentId);
     }
   };
 
@@ -1863,7 +2052,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               </div>
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto" ref={ledgerTableScrollRef}>
               {visibleLedgerEntries.length === 0 ? (
                 <div className="p-12 text-center text-slate-400">
                   <BookOpen className="w-8 h-8 mx-auto mb-2 opacity-40" />
@@ -1873,54 +2062,181 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                   </p>
                 </div>
               ) : (
-                <table className="min-w-[1250px] w-full text-left text-xs">
+                <table className="min-w-[1050px] w-full text-left text-xs border-collapse">
                   <thead>
-                    <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
-                      <th className="py-3 px-3">1. Date (Wasool)</th>
+                    <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                      <th className="py-3 px-3.5 sticky left-0 bg-slate-100 z-10 border-r border-slate-200 shadow-xs">
+                        1. Date
+                      </th>
                       <th className="py-3 px-3">2. Customer</th>
-                      <th className="py-3 px-3">Article</th>
-                      <th className="py-3 px-2">Size</th>
-                      <th className="py-3 px-3 text-right">Pairs</th>
-                      <th className="py-3 px-2">Avg</th>
-                      <th className="py-3 px-3 text-right">Rate (Rs.)</th>
-                      <th className="py-3 px-3 text-right">Total Amount</th>
-                      <th className="py-3 px-3 text-right text-emerald-700">Paid Amount</th>
-                      <th className="py-3 px-3 text-right text-rose-700">Remaining</th>
-                      <th className="py-3 px-3 text-center">Status</th>
-                      <th className="py-3 px-3 text-right">Balance</th>
-                      <th className="py-3 px-3 text-center">Action</th>
+                      <th className="py-3 px-3">3. Article</th>
+                      <th className="py-3 px-2 text-center">4. Size</th>
+                      <th className="py-3 px-3 text-right">5. Pairs</th>
+                      <th className="py-3 px-2 text-center">6. Average</th>
+                      <th className="py-3 px-3 text-right">7. Rate</th>
+                      <th className="py-3 px-3 text-right">8. Amount</th>
+                      <th className="py-3 px-3 text-right bg-blue-50/70 border-l border-blue-100 font-black text-blue-900">
+                        9. Balance
+                      </th>
+                      <th className="py-3 px-3 text-center w-24">
+                        10. Action
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-medium">
-                    {visibleLedgerEntries.map(entry => {
-                      const totalAmt = Math.abs(entry.pairs) * (Number(entry.rate) || 0);
-                      const paidAmt = lotPaidMap[entry.id] || 0;
-                      const remAmt = Math.max(0, totalAmt - paidAmt);
-                      return (
-                        <tr key={entry.id} className={entry.type === 'RETURN' ? 'bg-[#ffe6e6] font-bold text-[#cc0000]' : 'hover:bg-slate-50/70 transition'}>
-                          <td className="py-3.5 px-3 font-mono">{formatDate(entry.date)}</td>
-                          <td className="py-3.5 px-3">{entry.customerName || 'PRO4'}</td>
-                          <td className="py-3.5 px-3 font-bold text-slate-900">
-                            {entry.articleTitle || entry.article}
-                            {entry.type === 'RETURN' && <span className="mt-1 block text-[10px] font-semibold text-[#cc0000]">{entry.remarks}</span>}
-                          </td>
-                          <td className="py-3.5 px-2">{entry.sizeName || entry.size || '-'}</td>
-                          {(['pairs'] as const).map(field => (
+                    {(() => {
+                      const cuttingRows = visibleLedgerEntries.map(entry => {
+                        const isReturn = entry.type === 'RETURN';
+                        const amount = isReturn ? -Math.abs(entry.pairs * (Number(entry.rate) || 0)) : Math.abs(entry.pairs) * (Number(entry.rate) || 0);
+                        return {
+                          id: entry.id,
+                          kind: 'cutting' as const,
+                          date: entry.date,
+                          customer: entry.customerName || 'PRO4',
+                          article: entry.articleTitle || entry.article || '-',
+                          size: entry.sizeName || entry.size || '-',
+                          pairs: entry.pairs,
+                          average: entry.average || '-',
+                          rate: entry.rate,
+                          amount,
+                          type: entry.type,
+                          remarks: entry.remarks,
+                          rawEntry: entry
+                        };
+                      });
+
+                      const paymentRows = dateFilteredPayments.map(payment => {
+                        const isCashOut = payment.type === 'cash_out';
+                        const amount = isCashOut ? -payment.amount : payment.amount;
+                        return {
+                          id: payment.id,
+                          kind: 'payment' as const,
+                          date: payment.date,
+                          customer: isCashOut ? 'Cash Paid (Out)' : 'Cash In Adjustment',
+                          article: isCashOut ? `Paid to ${activeCutter.name}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}` : `Cash In from ${activeCutter.name}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}`,
+                          size: '—',
+                          pairs: '—',
+                          average: '—',
+                          rate: '—',
+                          amount,
+                          type: payment.type,
+                          paymentType: payment.type,
+                          billNo: payment.billNo,
+                          method: payment.paymentMethod,
+                          rawPayment: payment
+                        };
+                      });
+
+                      // Chronological sorting: earliest date first; for same date, cuttings before payments
+                      const combined = [...cuttingRows, ...paymentRows];
+                      combined.sort((a, b) => {
+                        const cmp = (a.date || '').localeCompare(b.date || '');
+                        if (cmp !== 0) return cmp;
+                        if (a.kind !== b.kind) return a.kind === 'cutting' ? -1 : 1;
+                        return (a.id || '').localeCompare(b.id || '');
+                      });
+
+                      let runningBalance = 0;
+                      const unifiedRows = combined.map(row => {
+                        runningBalance += row.amount;
+                        return {
+                          ...row,
+                          runningBal: runningBalance
+                        };
+                      });
+
+                      if (unifiedRows.length === 0) {
+                        return (
+                          <tr>
+                            <td colSpan={10} className="py-12 text-center text-slate-400">
+                              No entries or transactions found for the selected filter.
+                            </td>
+                          </tr>
+                        );
+                      }
+
+                      return unifiedRows.map((row) => {
+                        if (row.kind === 'payment') {
+                          const isCashOut = row.paymentType === 'cash_out';
+                          return (
+                            <tr key={row.id} className={isCashOut ? 'bg-rose-50/40 hover:bg-rose-50/70 transition' : 'bg-emerald-50/40 hover:bg-emerald-50/70 transition'}>
+                              <td className="py-3 px-3.5 font-mono sticky left-0 bg-white z-10 border-r border-slate-200 font-bold whitespace-nowrap">
+                                {formatDate(row.date)}
+                              </td>
+                              <td className="py-3 px-3 font-bold">
+                                <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-bold ${
+                                  isCashOut ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'
+                                }`}>
+                                  {isCashOut ? 'Cash Paid Out' : 'Cash In'}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 font-semibold text-slate-800">
+                                {row.article}
+                              </td>
+                              <td className="py-3 px-2 text-center text-slate-400">—</td>
+                              <td className="py-3 px-3 text-right text-slate-400">—</td>
+                              <td className="py-3 px-2 text-center text-slate-400">—</td>
+                              <td className="py-3 px-3 text-right text-slate-400">—</td>
+                              <td className={`py-3 px-3 text-right font-mono font-black ${
+                                isCashOut ? 'text-rose-700' : 'text-emerald-700'
+                              }`}>
+                                {isCashOut ? `-Rs. ${Math.abs(row.amount).toLocaleString()}` : `+Rs. ${row.amount.toLocaleString()}`}
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono font-black text-blue-900 bg-blue-50/60 border-l border-blue-100">
+                                Rs. {row.runningBal.toLocaleString()}
+                              </td>
+                              <td className="py-3 px-3 text-center">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenEditPayment(row.rawPayment)}
+                                    className="p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
+                                    title="Edit Payment"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => confirmDeletePayment(row.id)}
+                                    className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                    title="Delete Payment"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        const entry = row.rawEntry;
+                        const isReturn = entry.type === 'RETURN';
+
+                        return (
+                          <tr key={entry.id} className={isReturn ? 'bg-[#ffe6e6] font-bold text-[#cc0000]' : 'hover:bg-slate-50/70 transition'}>
+                            <td className="py-3.5 px-3.5 font-mono sticky left-0 bg-white z-10 border-r border-slate-200 whitespace-nowrap">
+                              {formatDate(entry.date)}
+                            </td>
+                            <td className="py-3.5 px-3 text-slate-700 font-semibold">{entry.customerName || 'PRO4'}</td>
+                            <td className="py-3.5 px-3 font-bold text-slate-900">
+                              {entry.articleTitle || entry.article}
+                              {isReturn && <span className="mt-0.5 block text-[10px] font-semibold text-[#cc0000]">{entry.remarks}</span>}
+                            </td>
+                            <td className="py-3.5 px-2 text-center font-semibold text-slate-800">{entry.sizeName || entry.size || '-'}</td>
                             <td
-                              key={field}
                               className="py-3.5 px-3 text-right font-mono"
-                              title={entry.type === 'RETURN' ? undefined : 'Double-click to quick edit'}
-                              onDoubleClick={entry.type === 'RETURN' ? undefined : () => setInlineEdit({
+                              title={isReturn ? undefined : 'Double-click to quick edit'}
+                              onDoubleClick={isReturn ? undefined : () => setInlineEdit({
                                 entry,
-                                field,
-                                value: String(entry[field])
+                                field: 'pairs',
+                                value: String(entry.pairs)
                               })}
                             >
-                              {inlineEdit?.entry.id === entry.id && inlineEdit.field === field ? (
+                              {inlineEdit?.entry.id === entry.id && inlineEdit.field === 'pairs' ? (
                                 <input
                                   autoFocus
                                   type="number"
-                                  min={field === 'pairs' ? '1' : '0'}
+                                  min="1"
                                   value={inlineEdit.value}
                                   onChange={e => setInlineEdit({ ...inlineEdit, value: e.target.value })}
                                   onBlur={e => {
@@ -1938,270 +2254,106 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                                   className="w-20 px-2 py-1 text-right rounded border border-amber-400 outline-none"
                                 />
                               ) : (
-                                <span className={entry.type === 'RETURN' ? 'font-black text-[#cc0000]' : 'cursor-text'}>
-                                  {entry.type === 'RETURN' ? '-' : ''}{Math.abs(entry[field])}
+                                <span className={isReturn ? 'font-black text-[#cc0000]' : 'cursor-text font-bold text-slate-900'}>
+                                  {isReturn ? '-' : ''}{Math.abs(entry.pairs).toLocaleString()}
                                 </span>
                               )}
                             </td>
-                          ))}
-                          <td className="py-3.5 px-2">{entry.average || '-'}</td>
-                          <td
-                            className="py-3.5 px-3 text-right font-mono"
-                            title={entry.type === 'RETURN' ? undefined : 'Double-click to quick edit'}
-                            onDoubleClick={entry.type === 'RETURN' ? undefined : () => setInlineEdit({ entry, field: 'rate', value: String(entry.rate) })}
-                          >
-                            {inlineEdit?.entry.id === entry.id && inlineEdit.field === 'rate' ? (
-                              <input
-                                autoFocus
-                                type="number"
-                                min="0"
-                                value={inlineEdit.value}
-                                onChange={e => setInlineEdit({ ...inlineEdit, value: e.target.value })}
-                                onBlur={e => {
-                                  if (e.currentTarget.dataset.cancelled !== 'true') void saveInlineEdit();
-                                }}
-                                onKeyDown={e => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    e.currentTarget.blur();
-                                  } else if (e.key === 'Escape') {
-                                    e.currentTarget.dataset.cancelled = 'true';
-                                    setInlineEdit(null);
-                                  }
-                                }}
-                                className="w-20 rounded border border-amber-400 px-2 py-1 text-right outline-none"
-                              />
-                            ) : (
-                              <span className={entry.rate ? 'cursor-text' : 'cursor-text text-rose-600'}>
-                                {entry.rate ? `Rs. ${entry.rate}` : 'Rs. 0'}
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Total Amount */}
-                          <td className={`py-3.5 px-3 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-slate-900'}`}>
-                            {entry.type === 'RETURN' ? `-Rs. ${totalAmt.toLocaleString()}` : `Rs. ${totalAmt.toLocaleString()}`}
-                          </td>
-
-                          {/* Paid Amount */}
-                          <td className="py-3.5 px-3 text-right font-mono font-bold text-emerald-700">
-                            {entry.type === 'RETURN' ? '—' : `Rs. ${paidAmt.toLocaleString()}`}
-                          </td>
-
-                          {/* Remaining Balance */}
-                          <td className="py-3.5 px-3 text-right font-mono font-bold text-rose-700">
-                            {entry.type === 'RETURN' ? '—' : `Rs. ${remAmt.toLocaleString()}`}
-                          </td>
-
-                          {/* Status Badge */}
-                          <td className="py-3.5 px-3 text-center">
-                            {entry.type === 'RETURN' ? (
-                              <span className="rounded-full bg-rose-100 text-rose-800 px-2 py-0.5 text-[10px] font-bold border border-rose-200">
-                                Return
-                              </span>
-                            ) : (
-                              remAmt === 0 && totalAmt > 0 ? (
-                                <span className="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-[10px] font-bold border border-emerald-300">
-                                  Paid
-                                </span>
-                              ) : paidAmt > 0 ? (
-                                <span className="rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 text-[10px] font-bold border border-amber-300">
-                                  Partial
-                                </span>
+                            <td className="py-3.5 px-2 text-center text-slate-600">{entry.average || '-'}</td>
+                            <td
+                              className="py-3.5 px-3 text-right font-mono"
+                              title={isReturn ? undefined : 'Double-click to quick edit'}
+                              onDoubleClick={isReturn ? undefined : () => setInlineEdit({ entry, field: 'rate', value: String(entry.rate) })}
+                            >
+                              {inlineEdit?.entry.id === entry.id && inlineEdit.field === 'rate' ? (
+                                <input
+                                  autoFocus
+                                  type="number"
+                                  min="0"
+                                  value={inlineEdit.value}
+                                  onChange={e => setInlineEdit({ ...inlineEdit, value: e.target.value })}
+                                  onBlur={e => {
+                                    if (e.currentTarget.dataset.cancelled !== 'true') void saveInlineEdit();
+                                  }}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      e.currentTarget.blur();
+                                    } else if (e.key === 'Escape') {
+                                      e.currentTarget.dataset.cancelled = 'true';
+                                      setInlineEdit(null);
+                                    }
+                                  }}
+                                  className="w-20 rounded border border-amber-400 px-2 py-1 text-right outline-none"
+                                />
                               ) : (
-                                <span className="rounded-full bg-rose-100 text-rose-800 px-2 py-0.5 text-[10px] font-bold border border-rose-300">
-                                  Unpaid
+                                <span className={entry.rate ? 'cursor-text text-slate-800' : 'cursor-text text-rose-600'}>
+                                  {entry.rate ? `Rs. ${entry.rate}` : 'Rs. 0'}
                                 </span>
-                              )
-                            )}
-                          </td>
-
-                          {/* Running Balance */}
-                          <td className={`py-3.5 px-3 text-right font-mono font-bold ${entry.type === 'RETURN' ? 'text-[#cc0000]' : 'text-blue-800 bg-blue-50/50'}`}>
-                            Rs. {entry.runningBalance?.toLocaleString() ?? 0}
-                          </td>
-
-                          {/* Action */}
-                          <td className="py-3.5 px-3 text-center">
-                            <div className="flex items-center justify-center gap-1.5">
-                              {entry.type !== 'RETURN' && remAmt > 0 && (
+                              )}
+                            </td>
+                            <td className={`py-3.5 px-3 text-right font-mono font-bold ${isReturn ? 'text-[#cc0000]' : 'text-slate-900'}`}>
+                              {isReturn ? `-Rs. ${Math.abs(row.amount).toLocaleString()}` : `Rs. ${row.amount.toLocaleString()}`}
+                            </td>
+                            <td className={`py-3.5 px-3 text-right font-mono font-bold border-l border-blue-100 ${isReturn ? 'text-[#cc0000]' : 'text-blue-900 bg-blue-50/50'}`}>
+                              Rs. {row.runningBal.toLocaleString()}
+                            </td>
+                            <td className="py-3.5 px-3 text-center">
+                              <div className="flex items-center justify-center gap-1.5">
                                 <button
                                   type="button"
-                                  onClick={() => openPaymentModal('cash_out', entry.id)}
-                                  className="px-2 py-1 rounded-md bg-rose-50 text-rose-700 hover:bg-rose-100 font-bold text-[10px] border border-rose-200 transition cursor-pointer"
-                                  title="Pay for this lot"
+                                  onClick={() => setEditingEntry(entry)}
+                                  className="p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
+                                  title="Edit Cutting Entry"
                                 >
-                                  Pay
+                                  <Pencil className="w-3.5 h-3.5" />
                                 </button>
-                              )}
-                              <button
-                                onClick={() => openEditEntry(entry)}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
-                                title="View / Edit entry"
-                              >
-                                <Pencil className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => setDeletingEntry(entry)}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
-                                title="Delete entry"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                                <button
+                                  type="button"
+                                  onClick={() => setDeletingEntry(entry)}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                  title="Delete Cutting Entry"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
                   </tbody>
-                  <tfoot>
-                    <tr className="border-t-2 border-slate-300 bg-slate-50 font-black text-xs">
-                      <td className="px-3 py-3" colSpan={4}>TOTAL</td>
-                      <td className="px-3 py-3 text-right">{visibleLedgerEntries.reduce((sum, entry) => sum + entry.pairs, 0).toLocaleString()}</td>
-                      <td colSpan={2}></td>
-                      <td className="px-3 py-3 text-right text-slate-900">
-                        Rs. {visibleLedgerEntries.reduce((sum, entry) => sum + (entry.type === 'RETURN' ? -Math.abs(entry.pairs * entry.rate) : entry.pairs * entry.rate), 0).toLocaleString()}
+                  <tfoot className="border-t-2 border-slate-300 bg-slate-50 font-black text-xs">
+                    <tr>
+                      <td className="px-3.5 py-3.5 sticky left-0 bg-slate-100 z-10 border-r border-slate-200">
+                        TOTAL
                       </td>
-                      <td className="px-3 py-3 text-right text-emerald-700">
-                        Rs. {visibleLedgerEntries.filter(e => e.type !== 'RETURN').reduce((sum, entry) => sum + (lotPaidMap[entry.id] || 0), 0).toLocaleString()}
+                      <td className="px-3 py-3.5 text-slate-700">
+                        Paid: Rs. {totalPaid.toLocaleString()}
                       </td>
-                      <td className="px-3 py-3 text-right text-rose-700">
-                        Rs. {visibleLedgerEntries.filter(e => e.type !== 'RETURN').reduce((sum, entry) => sum + Math.max(0, entry.pairs * entry.rate - (lotPaidMap[entry.id] || 0)), 0).toLocaleString()}
+                      <td className="px-3 py-3.5 text-slate-700">
+                        {totalCashIn > 0 ? `Cash In: Rs. ${totalCashIn.toLocaleString()}` : ''}
                       </td>
-                      <td></td>
-                      <td className="px-3 py-3 text-right text-blue-800" colSpan={2}>
+                      <td className="px-2 py-3.5 text-center text-slate-400">—</td>
+                      <td className="px-3 py-3.5 text-right font-mono text-slate-900">
+                        {visibleLedgerEntries.reduce((sum, entry) => sum + (entry.type === 'RETURN' ? -Math.abs(entry.pairs) : Math.abs(entry.pairs)), 0).toLocaleString()} Pairs
+                      </td>
+                      <td className="px-2 py-3.5 text-center text-slate-400">—</td>
+                      <td className="px-3 py-3.5 text-right text-slate-400">—</td>
+                      <td className="px-3 py-3.5 text-right font-mono text-slate-900">
+                        Rs. {cuttingEntriesBillsTotal.toLocaleString()}
+                      </td>
+                      <td className="px-3 py-3.5 text-right font-mono text-sm text-blue-900 bg-blue-100/60 border-l border-blue-200">
                         Pending: Rs. {remainingBalance.toLocaleString()}
                       </td>
+                      <td className="px-3 py-3.5 text-center text-slate-400">—</td>
                     </tr>
                   </tfoot>
                 </table>
               )}
+              </div>
             </div>
           </div>
-
-          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs">
-            <div className="border-b border-slate-200 px-4 py-4 sm:px-5">
-              <h3 className="font-bold text-slate-900">Payment History</h3>
-              <p className="mt-1 text-xs text-slate-500">Cash in and cash out records for {activeCutter.name}, filtered by the selected date range.</p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[760px] text-left text-sm">
-                <thead className="bg-slate-100 text-[11px] uppercase tracking-wide text-slate-600">
-                  <tr>
-                    <th className="px-4 py-3">Date</th>
-                    <th className="px-4 py-3 text-right">Amount</th>
-                    <th className="px-4 py-3">Method</th>
-                    <th className="px-4 py-3">Bill No</th>
-                    <th className="px-4 py-3">Lot No / Allocated Lot</th>
-                    <th className="px-4 py-3">Type</th>
-                    <th className="px-4 py-3 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {dateFilteredPayments.map(payment => (
-                    <tr key={payment.id} className="hover:bg-slate-50 transition">
-                      <td className="px-4 py-3 font-mono text-slate-800">{formatDate(payment.date)}</td>
-                      <td className="px-4 py-3 text-right font-mono">
-                        {payment.type === 'cash_out' ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-rose-100 text-rose-700 border border-rose-200 font-mono shadow-2xs">
-                            <Minus className="w-3 h-3 stroke-[3]" /> Rs. {payment.amount.toLocaleString()}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-200 font-mono shadow-2xs">
-                            <Plus className="w-3 h-3 stroke-[3]" /> Rs. {payment.amount.toLocaleString()}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 font-medium text-slate-700">{payment.paymentMethod}</td>
-                      <td className="px-4 py-3 font-mono text-slate-500">{payment.billNo || '-'}</td>
-                      <td className="px-4 py-3 font-mono text-slate-700 text-xs">
-                        {payment.splitAllocations && payment.splitAllocations.length > 0 ? (
-                          <div className="flex flex-col gap-0.5">
-                            <span className="font-bold text-blue-700 text-xs">Split ({payment.splitAllocations.length} lots)</span>
-                            <span className="text-[10px] text-slate-500 font-normal">
-                              {payment.splitAllocations.map(s => `Lot #${s.lotNo}: Rs. ${s.amount.toLocaleString()}`).join(', ')}
-                            </span>
-                          </div>
-                        ) : payment.lotNo || payment.lotId ? (
-                          <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-800">
-                            Lot #{payment.lotNo || payment.lotId?.slice(-4)}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400 text-xs italic">Unallocated</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 font-bold">
-                        {payment.type === 'cash_out' ? (
-                          <span className="inline-flex items-center gap-1.5 text-xs text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg font-bold border border-rose-200">
-                            <span className="w-2 h-2 rounded-full bg-rose-500"></span> Cash Paid (Out)
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-lg font-bold border border-emerald-200">
-                            <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Cash In
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <button type="button" onClick={() => void handleDeletePayment(payment.id)} className="rounded-lg p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer" aria-label="Delete payment">
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {dateFilteredPayments.length === 0 && <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">No payments in this date range.</td></tr>}
-                </tbody>
-                <tfoot className="border-t-2 border-slate-300 bg-slate-50 text-xs sm:text-sm font-black divide-y divide-slate-200">
-                  <tr>
-                    <td className="px-4 py-3 font-bold">1. Cutting entries in this date range</td>
-                    <td className="px-4 py-3 text-right font-mono text-amber-700 font-black">Rs. {cuttingEntriesBillsTotal.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>Sum of all full cutting bills in selected date range</td>
-                  </tr>
-                  {cuttingReturnsTotal > 0 && (
-                    <tr>
-                      <td className="px-4 py-3 text-rose-700 font-bold">2. Return Cutting Deducted</td>
-                      <td className="px-4 py-3 text-right font-mono text-rose-700 font-black">- Rs. {cuttingReturnsTotal.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>Sum of all return cutting entries deducted</td>
-                    </tr>
-                  )}
-                  <tr>
-                    <td className="px-4 py-3 text-rose-700 font-bold">
-                      {cuttingReturnsTotal > 0 ? '3. Cash Paid / Cash Out in this date range' : '2. Cash Paid / Cash Out in this date range'}
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono text-rose-700 font-black">
-                      - Rs. {totalPaid.toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>
-                      Cash payments paid out to {activeCutter.name}
-                    </td>
-                  </tr>
-                  {totalCashIn > 0 && totalCashOut > 0 && (
-                    <tr>
-                      <td className="px-4 py-3 text-emerald-700 font-bold">
-                        Cash In Adjustment
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-emerald-700 font-black">
-                        + Rs. {totalCashIn.toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3 text-slate-500 font-normal" colSpan={5}>
-                        Adjustments or cash received back from contractor
-                      </td>
-                    </tr>
-                  )}
-                  <tr className="bg-blue-50/90 border-t-2 border-blue-200">
-                    <td className="px-4 py-3.5 text-blue-900 uppercase font-black">PENDING BALANCE</td>
-                    <td className={`px-4 py-3.5 text-right font-mono text-base font-black ${remainingBalance < 0 ? 'text-emerald-700' : 'text-blue-800'}`}>
-                      Rs. {remainingBalance.toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3.5 text-slate-700 font-semibold" colSpan={5}>
-                      Formula: SUM(Cutting: Rs.{cuttingEntriesBillsTotal.toLocaleString()}) - Cash Paid(Rs.{totalPaid.toLocaleString()}){cuttingReturnsTotal > 0 ? ` - Returns(Rs.${cuttingReturnsTotal.toLocaleString()})` : ''} = Rs.{remainingBalance.toLocaleString()}
-                      {extraPaid > 0 && <span className="ml-2 text-emerald-700 font-black">&bull; Extra Paid: Rs. {extraPaid.toLocaleString()}</span>}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </section>
-        </div>
         )
       )}
 
@@ -2209,22 +2361,33 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           MODAL 1: ADD CUTTER (Cutting Man / Cutting Maker / Product Cutter)
           ========================================================================= */}
       {isAddCutterOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAddCutterOpen(false);
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden my-auto max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="px-5 py-4 bg-amber-500 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Scissors className="w-5 h-5 text-white" />
                 <h3 className="font-bold text-base">{editingCutter ? 'Edit Cutter' : `Add New ${catMeta.singular}`}</h3>
               </div>
               <button
+                type="button"
                 onClick={() => setIsAddCutterOpen(false)}
-                className="p-1 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+                className="p-1.5 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateCutter} className="p-5 space-y-4">
+            <form onSubmit={handleCreateCutter} className="p-5 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Cutter / Worker Name *
@@ -2295,14 +2458,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 />
               </div>
 
-              <div className="pt-2 flex items-center justify-end gap-2">
+              <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsAddCutterOpen(false)}
                   disabled={isSavingCutter}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
                 >
-                  Cancel
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Cancel / Back</span>
                 </button>
                 <button
                   type="submit"
@@ -2330,10 +2494,18 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           Save Button label: "Save Entry"
           ========================================================================= */}
       {txModalType && activeCutter && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className={`px-5 py-4 text-white flex items-center justify-between ${
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) handleCloseTxModal();
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden my-auto max-h-[85vh] sm:max-h-[88vh] flex flex-col animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header - Sticky */}
+            <div className={`px-5 py-4 text-white flex items-center justify-between shrink-0 ${
               txModalType === 'GIVE' ? 'bg-amber-500' : 'bg-emerald-600'
             }`}>
               <div className="flex items-center gap-2.5">
@@ -2349,15 +2521,19 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               </div>
 
               <button
+                type="button"
                 onClick={handleCloseTxModal}
-                className="p-1 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+                className="p-1.5 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Entry Form strictly following requested sequence */}
-            <form onSubmit={handleSubmitTransaction} className="p-5 sm:p-6 space-y-4">
+            <form onSubmit={handleSubmitTransaction} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6 space-y-4 overscroll-contain">
               {/* Field 1: Date (Date Picker, default today) */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
@@ -2480,72 +2656,113 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 )}
               </div>
 
-              {/* Task 4: 3-Way Delivery Choice */}
+              {/* Destination Summary banner */}
               {txModalType === 'RECEIVE' && (
-                <fieldset className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs font-bold text-slate-800 flex items-center justify-between">
+                  <span className="text-slate-600 font-semibold">This entry will go to:</span>
+                  <span className="text-blue-700 font-black">
+                    {[
+                      deliveryToStock && 'Stock ✓',
+                      deliveryToExistingOrder && (formOrderId ? `Order ${orders.find(o => o.id === formOrderId)?.orderNo || 'Selected'} ✓` : 'Existing Order (Select Below)'),
+                      deliveryToNewOrder && `New Order (${newOrderCustomerName || 'Type Customer Name'}) ✓`
+                    ].filter(Boolean).join(', ') || 'Please select at least one destination'}
+                  </span>
+                </div>
+              )}
+
+              {/* Task 4: Multi-Select Checkboxes for Delivery Destination */}
+              {txModalType === 'RECEIVE' && (
+                <fieldset className="space-y-2.5 rounded-xl border border-slate-200 bg-slate-50 p-3.5">
                   <legend className="px-1 text-xs font-bold text-slate-700 uppercase tracking-wider">
-                    Delivery Choice *
+                    Delivery Choice * (Check destination)
                   </legend>
+
                   <div className="space-y-2">
+                    {/* Checkbox 1: Add to Stock - Stock Management (Independent) */}
                     <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
-                      deliveryChoice === 'LINKED_TO_PO' 
-                        ? 'border-blue-500 bg-blue-50/80 text-blue-900 shadow-2xs' 
+                      deliveryToStock 
+                        ? 'border-emerald-500 bg-emerald-50/80 text-emerald-950 shadow-2xs' 
                         : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
                     }`}>
                       <input 
-                        type="radio" 
-                        name="receive-destination" 
-                        value="LINKED_TO_PO"
-                        checked={deliveryChoice === 'LINKED_TO_PO'} 
-                        onChange={() => setDeliveryChoice('LINKED_TO_PO')} 
-                        className="mt-0.5 text-blue-600"
+                        type="checkbox" 
+                        checked={deliveryToStock} 
+                        onChange={e => setDeliveryToStock(e.target.checked)} 
+                        className="mt-0.5 h-4 w-4 rounded text-emerald-600 focus:ring-emerald-500"
                       />
                       <div>
-                        <span className="font-bold block">OPTION 1: Direct Deliver to Customer Order - Linked to PO</span>
+                        <span className="font-bold flex items-center gap-1.5">
+                          <span>1. Add to Stock - Stock Management</span>
+                          {deliveryToStock && <span className="text-emerald-600 font-black">✓</span>}
+                        </span>
                         <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
-                          Links directly to customer order PO, updates fulfillment progress & customer ledger.
+                          Direct to Stock: increases available pairs in Stock Management inventory.
                         </span>
                       </div>
                     </label>
 
+                    {/* Checkbox 2: Add to Existing Order (Mutually exclusive with 3) */}
                     <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
-                      deliveryChoice === 'DIRECT_CUTTING_NO_PO' 
-                        ? 'border-amber-500 bg-amber-50/80 text-amber-900 shadow-2xs' 
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                      deliveryToExistingOrder 
+                        ? 'border-blue-500 bg-blue-50/80 text-blue-950 shadow-2xs' 
+                        : deliveryToNewOrder
+                          ? 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed opacity-60'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
                     }`}>
                       <input 
-                        type="radio" 
-                        name="receive-destination" 
-                        value="DIRECT_CUTTING_NO_PO"
-                        checked={deliveryChoice === 'DIRECT_CUTTING_NO_PO'} 
-                        onChange={() => setDeliveryChoice('DIRECT_CUTTING_NO_PO')} 
-                        className="mt-0.5 text-amber-600"
+                        type="checkbox" 
+                        disabled={deliveryToNewOrder}
+                        checked={deliveryToExistingOrder} 
+                        onChange={e => {
+                          if (e.target.checked) {
+                            setDeliveryToExistingOrder(true);
+                            setDeliveryToNewOrder(false);
+                          } else {
+                            setDeliveryToExistingOrder(false);
+                          }
+                        }} 
+                        className="mt-0.5 h-4 w-4 rounded text-blue-600 focus:ring-blue-500 disabled:opacity-40"
                       />
                       <div>
-                        <span className="font-bold block">OPTION 2: Direct Cutting / Other Order - Without PO</span>
+                        <span className="font-bold flex items-center gap-1.5">
+                          <span>2. Add to Existing Order</span>
+                          {deliveryToExistingOrder && <span className="text-blue-600 font-black">✓</span>}
+                        </span>
                         <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
-                          Saves as unassigned direct cutting lot not tied to a customer PO.
+                          Links directly to an existing customer order and updates fulfillment & cutting progress.
                         </span>
                       </div>
                     </label>
 
+                    {/* Checkbox 3: Add to New Order (Mutually exclusive with 2) */}
                     <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
-                      deliveryChoice === 'SEND_TO_STOCK' 
-                        ? 'border-emerald-500 bg-emerald-50/80 text-emerald-900 shadow-2xs' 
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                      deliveryToNewOrder 
+                        ? 'border-indigo-500 bg-indigo-50/80 text-indigo-950 shadow-2xs' 
+                        : deliveryToExistingOrder
+                          ? 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed opacity-60'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
                     }`}>
                       <input 
-                        type="radio" 
-                        name="receive-destination" 
-                        value="SEND_TO_STOCK"
-                        checked={deliveryChoice === 'SEND_TO_STOCK'} 
-                        onChange={() => setDeliveryChoice('SEND_TO_STOCK')} 
-                        className="mt-0.5 text-emerald-600"
+                        type="checkbox" 
+                        disabled={deliveryToExistingOrder}
+                        checked={deliveryToNewOrder} 
+                        onChange={e => {
+                          if (e.target.checked) {
+                            setDeliveryToNewOrder(true);
+                            setDeliveryToExistingOrder(false);
+                          } else {
+                            setDeliveryToNewOrder(false);
+                          }
+                        }} 
+                        className="mt-0.5 h-4 w-4 rounded text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
                       />
                       <div>
-                        <span className="font-bold block">OPTION 3: Send to Stock Management - Direct to Stock</span>
-                        <span className="text-[11px] text-emerald-700 font-semibold block mt-0.5">
-                          This receipt automatically increases available stock in Stock Management.
+                        <span className="font-bold flex items-center gap-1.5">
+                          <span>3. Add to New Order</span>
+                          {deliveryToNewOrder && <span className="text-indigo-600 font-black">✓</span>}
+                        </span>
+                        <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
+                          Creates a brand-new Customer Order with this Article & Size matrix automatically.
                         </span>
                       </div>
                     </label>
@@ -2553,11 +2770,11 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </fieldset>
               )}
 
-              {/* Field 3: Customer Order selection (Only when LINKED_TO_PO or when txModalType is GIVE) */}
-              {txModalType === 'RECEIVE' && deliveryChoice === 'LINKED_TO_PO' && (
+              {/* Field 3: Customer Order selection (When deliveryToExistingOrder is checked) */}
+              {txModalType === 'RECEIVE' && deliveryToExistingOrder && (
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span>3. Customer Order (PO) *</span>
+                    <span>Select Customer Order (PO) *</span>
                     <span className="text-[10px] text-blue-600 font-bold">Linked Order Required</span>
                   </label>
                   <select
@@ -2571,7 +2788,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     }}
                     className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                   >
-                    <option value="">-- Select Customer Order --</option>
+                    <option value="">-- Select Customer Order (PO) --</option>
                     {filteredOrdersForArticle.map(ord => (
                       <option key={ord.id} value={ord.id}>
                         {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}
@@ -2581,18 +2798,19 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </div>
               )}
 
-              {/* Reference note for DIRECT_CUTTING_NO_PO */}
-              {txModalType === 'RECEIVE' && deliveryChoice === 'DIRECT_CUTTING_NO_PO' && (
+              {/* Field 3b: New Order Name / Customer Name (When deliveryToNewOrder is checked) */}
+              {txModalType === 'RECEIVE' && deliveryToNewOrder && (
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    3. Reference Note / Other Order Name <span className="text-slate-400 font-normal">(Optional)</span>
+                    New Order Name / Customer Name <span className="text-rose-500">*</span>
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Unassigned / Direct Cutting / Extra Lot"
-                    value={formCustomerName}
-                    onChange={e => setFormCustomerName(e.target.value)}
-                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                    required
+                    placeholder="e.g. Al-Madina Traders, Shoaib Enterprises"
+                    value={newOrderCustomerName}
+                    onChange={e => setNewOrderCustomerName(e.target.value)}
+                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                   />
                 </div>
               )}
@@ -2624,79 +2842,150 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </div>
               )}
 
-              {/* Field 5: Independent size, average, quantity, rate, balance and remarks */}
-              {/* Task 5: AVERAGE and RATE are OPTIONAL - never block save */}
-              <div className="rounded-xl bg-[#f0f6ff] p-[15px]">
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-3">
-                  5. SIZE / QTY / AVERAGE / RATE / TOTAL - 5 BOXES
-                </label>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-                  <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">QUANTITY *</label>
-                    <input
-                      id="quantity"
-                      type="number"
-                      min="1"
-                      required
-                      placeholder="Qty"
-                      value={formQty}
-                      onChange={e => setFormQty(e.target.value)}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold"
-                    />
-                  </div>
-                  <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">SIZE</label>
-                    {txModalType === 'RECEIVE' && articlesMaster.find(article => article.articleName === formArticle)?.sizes.length ? (
-                      <select id="sizeName" value={formSize} onChange={event => {
-                        const selected = articlesMaster.find(article => article.articleName === formArticle)?.sizes.find(size => size.sizeName === event.target.value);
-                        setFormSize(event.target.value);
-                        if (selected && selected.pairs > 0) setFormQty(String(selected.pairs));
-                      }} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm">
-                        <option value="">Select size (Optional)</option>
-                        {articlesMaster.find(article => article.articleName === formArticle)?.sizes.map(size => <option key={size.sizeName} value={size.sizeName}>{size.sizeName} ({size.pairs})</option>)}
-                      </select>
-                    ) : (
-                      <input id="sizeName" type="text" placeholder="Size (e.g. 10)" value={formSize} onChange={e => setFormSize(e.target.value)} className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm" />
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">
-                      AVERAGE <span className="font-normal text-slate-400">(Optional)</span>
+              {/* Field 5: Free-text Size & Quantity Rows */}
+              <div className="rounded-xl bg-[#f0f6ff] p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="block text-[11px] font-black uppercase tracking-wider text-slate-700">
+                      5. SIZE / QTY / AVERAGE / RATE / TOTAL - FREE TEXT TYPING
                     </label>
-                    <input
-                      id="average"
-                      type="text"
-                      placeholder="Avg (Optional)"
-                      value={formAverage}
-                      onChange={e => setFormAverage(e.target.value)}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
-                    />
+                    <p className="text-[11px] text-slate-500">
+                      Type exact size like 8, 9, 10, 7.5, Ladies Large. Never normalized.
+                    </p>
                   </div>
-                  <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">
-                      RATE <span className="font-normal text-slate-400">(Optional)</span>
-                    </label>
-                    <input
-                      id="rate"
-                      type="number"
-                      min="0"
-                      step="any"
-                      placeholder="Rate (Optional)"
-                      value={formRate}
-                      onChange={e => setFormRate(e.target.value)}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
-                    />
-                  </div>
-                  <div className="min-w-0">
-                    <label className="mb-1 block text-[10px] font-bold text-blue-700">TOTAL BALANCE</label>
-                    <input
-                      id="totalBalance"
-                      type="text"
-                      readOnly
-                      value={Number(formQty) > 0 ? String(Number(formQty) * (Number(formRate) || 0)) : ''}
-                      className="h-[45px] w-full rounded-lg border border-slate-300 bg-slate-100 px-3 text-sm font-bold text-slate-900"
-                    />
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCuttingSizeRows(prev => [
+                        ...prev,
+                        { id: String(Date.now()), size: '', qty: '', average: '', rate: activeCutter?.perPairRate ? String(activeCutter.perPairRate) : '' }
+                      ]);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold rounded-lg bg-blue-600 text-white hover:bg-blue-700 cursor-pointer shadow-2xs"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Add Size Row</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {cuttingSizeRows.map((row, rIdx) => {
+                    const rowQty = Number(row.qty) || 0;
+                    const rowRate = Number(row.rate) || 0;
+                    const rowTotal = rowQty * rowRate;
+
+                    return (
+                      <div key={row.id || rIdx} className="p-3 bg-white rounded-xl border border-slate-200 shadow-2xs space-y-2">
+                        <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 border-b border-slate-100 pb-1.5">
+                          <span>Size Row #{rIdx + 1}</span>
+                          {cuttingSizeRows.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCuttingSizeRows(prev => prev.filter((_, idx) => idx !== rIdx));
+                              }}
+                              className="text-slate-400 hover:text-rose-600 transition cursor-pointer p-0.5"
+                              title="Remove size row"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                          <div>
+                            <label className="block text-[10px] font-bold text-blue-700 mb-1">
+                              QUANTITY (PAIRS) *
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              required
+                              placeholder="e.g. 1000"
+                              value={row.qty}
+                              onChange={e => {
+                                const val = e.target.value;
+                                setCuttingSizeRows(prev => prev.map((r, i) => i === rIdx ? { ...r, qty: val } : r));
+                                if (rIdx === 0) setFormQty(val);
+                              }}
+                              className="h-[42px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-bold font-mono"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold text-blue-700 mb-1">
+                              SIZE (FREE TEXT)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="e.g. 8, 10, Large, Ladies Large"
+                              value={row.size}
+                              onChange={e => {
+                                const val = e.target.value;
+                                setCuttingSizeRows(prev => prev.map((r, i) => i === rIdx ? { ...r, size: val } : r));
+                                if (rIdx === 0) setFormSize(val);
+                              }}
+                              className="h-[42px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold text-blue-700 mb-1">
+                              AVERAGE <span className="font-normal text-slate-400">(Optional)</span>
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="Avg (Optional)"
+                              value={row.average}
+                              onChange={e => {
+                                const val = e.target.value;
+                                setCuttingSizeRows(prev => prev.map((r, i) => i === rIdx ? { ...r, average: val } : r));
+                                if (rIdx === 0) setFormAverage(val);
+                              }}
+                              className="h-[42px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold text-blue-700 mb-1">
+                              RATE <span className="font-normal text-slate-400">(Optional)</span>
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              placeholder="Rate"
+                              value={row.rate}
+                              onChange={e => {
+                                const val = e.target.value;
+                                setCuttingSizeRows(prev => prev.map((r, i) => i === rIdx ? { ...r, rate: val } : r));
+                                if (rIdx === 0) setFormRate(val);
+                              }}
+                              className="h-[42px] w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-mono"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-[10px] font-bold text-blue-700 mb-1">
+                              TOTAL BALANCE
+                            </label>
+                            <input
+                              type="text"
+                              readOnly
+                              value={rowTotal > 0 ? `Rs. ${rowTotal.toLocaleString()}` : 'Rs. 0'}
+                              className="h-[42px] w-full rounded-lg border border-slate-200 bg-slate-100 px-3 text-sm font-bold text-slate-900 font-mono"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Rows Summary */}
+                <div className="flex items-center justify-between p-2.5 bg-blue-100/60 rounded-xl text-xs font-bold text-blue-900">
+                  <span>Total Pairs: {cuttingSizeRows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0).toLocaleString()}</span>
+                  <span>Total Amount: Rs. {cuttingSizeRows.reduce((sum, r) => sum + ((Number(r.qty) || 0) * (Number(r.rate) || 0)), 0).toLocaleString()}</span>
                 </div>
               </div>
 
@@ -2746,14 +3035,17 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </span>
               </div>
 
-              {/* Actions: Save Button labeled "Save / Index" */}
-              <div className="pt-2 flex items-center justify-end gap-3">
+              </div>
+
+              {/* Actions: Sticky footer with Save and Cancel always visible */}
+              <div className="shrink-0 p-4 sm:px-6 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-3 z-10">
                 <button
                   type="button"
                   onClick={handleCloseTxModal}
-                  className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                  className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/70 border border-slate-300 transition cursor-pointer flex items-center gap-1.5"
                 >
-                  Cancel
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Cancel / Back</span>
                 </button>
 
                 <button
@@ -2775,14 +3067,29 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       )}
 
       {pdfExportMode && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4">
-          <form onSubmit={handleFilteredPdfDownload} className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl">
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPdfExportMode(null);
+          }}
+        >
+          <form
+            onSubmit={handleFilteredPdfDownload}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+          >
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="text-lg font-bold text-slate-900">Generate Date-Range PDF</h3>
                 <p className="mt-1 text-sm text-slate-500">The PDF will download directly to your device.</p>
               </div>
-              <button type="button" onClick={() => setPdfExportMode(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100" aria-label="Close PDF options">
+              <button
+                type="button"
+                onClick={() => setPdfExportMode(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -2808,11 +3115,21 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 />
               </label>
             </div>
-            <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => setPdfExportMode(null)} disabled={isGeneratingPdf} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">
-                Cancel
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setPdfExportMode(null)}
+                disabled={isGeneratingPdf}
+                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
               </button>
-              <button type="submit" disabled={isGeneratingPdf} className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-60">
+              <button
+                type="submit"
+                disabled={isGeneratingPdf}
+                className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-60 transition cursor-pointer"
+              >
                 {isGeneratingPdf && <Loader2 className="h-4 w-4 animate-spin" />}
                 {isGeneratingPdf ? 'Generating PDF...' : 'Download PDF'}
               </button>
@@ -2822,14 +3139,30 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       )}
 
       {returnTarget && (
-        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-4">
-          <form onSubmit={handleSaveReturn} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
+        <div
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setReturnTarget(null);
+          }}
+        >
+          <form
+            onSubmit={handleSaveReturn}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+          >
             <div className="flex items-start justify-between gap-4 border-b border-rose-100 pb-3">
               <div>
                 <h3 className="text-lg font-bold text-rose-700">Return Cutting</h3>
                 <p className="mt-1 text-sm text-slate-500">{returnTarget.articleTitle || returnTarget.article} · {returnTarget.sizeName || returnTarget.size || '—'}</p>
               </div>
-              <button type="button" onClick={() => setReturnTarget(null)} disabled={isSavingReturn} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100" aria-label="Close return modal">
+              <button
+                type="button"
+                onClick={() => setReturnTarget(null)}
+                disabled={isSavingReturn}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -2869,8 +3202,20 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               <input required type="date" value={returnForm.date} onChange={event => setReturnForm(form => ({ ...form, date: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
             </label>
             <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
-              <button type="button" onClick={() => setReturnTarget(null)} disabled={isSavingReturn} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-              <button type="submit" disabled={isSavingReturn} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60">
+              <button
+                type="button"
+                onClick={() => setReturnTarget(null)}
+                disabled={isSavingReturn}
+                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingReturn}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition cursor-pointer"
+              >
                 {isSavingReturn ? 'Saving...' : 'Confirm Return'}
               </button>
             </div>
@@ -2880,8 +3225,17 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
       {/* NEW CONTRACTOR RETURN CUTTING ENTRY MODAL (Requirement: NAEM Ledger button click) */}
       {isReturnCuttingModalOpen && activeCutter && (
-        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-          <form onSubmit={handleSubmitReturnCutting} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+        <div
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsReturnCuttingModalOpen(false);
+          }}
+        >
+          <form
+            onSubmit={handleSubmitReturnCutting}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto max-h-[92vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150"
+          >
             <div className="flex items-start justify-between gap-4 border-b border-rose-100 pb-3">
               <div>
                 <div className="flex items-center gap-2">
@@ -2898,8 +3252,9 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 type="button"
                 onClick={() => setIsReturnCuttingModalOpen(false)}
                 disabled={isSavingReturn}
-                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 transition"
-                aria-label="Close modal"
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -3047,9 +3402,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 type="button"
                 onClick={() => setIsReturnCuttingModalOpen(false)}
                 disabled={isSavingReturn}
-                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 transition"
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
               >
-                Cancel
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
               </button>
               <button
                 type="submit"
@@ -3065,8 +3421,17 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       )}
 
       {paymentModalType && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-          <form onSubmit={handleSavePayment} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPaymentModalType(null);
+          }}
+        >
+          <form
+            onSubmit={handleSavePayment}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto max-h-[92vh] overflow-y-auto animate-in fade-in zoom-in-95 duration-150"
+          >
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-3">
               <div>
                 <h3 className={`text-lg font-black flex items-center gap-2 ${paymentModalType === 'cash_in' ? 'text-emerald-700' : 'text-rose-700'}`}>
@@ -3079,7 +3444,13 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     : `Cash received back or advance credit from ${activeCutter?.name || 'contractor'}`}
                 </p>
               </div>
-              <button type="button" onClick={() => setPaymentModalType(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition cursor-pointer" aria-label="Close payment modal">
+              <button
+                type="button"
+                onClick={() => setPaymentModalType(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -3295,7 +3666,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               <input type="text" placeholder="e.g. BILL-001 or VCH-002" value={paymentForm.billNo} onChange={event => setPaymentForm(form => ({ ...form, billNo: event.target.value }))} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-rose-500/20" />
             </div>
             <div className="flex justify-end gap-2.5 border-t border-slate-100 pt-4">
-              <button type="button" onClick={() => setPaymentModalType(null)} disabled={isSavingPayment} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer">Cancel</button>
+              <button
+                type="button"
+                onClick={() => setPaymentModalType(null)}
+                disabled={isSavingPayment}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
+              </button>
               <button type="submit" disabled={isSavingPayment} className={`rounded-xl px-5 py-2 text-sm font-bold text-white shadow-md transition cursor-pointer disabled:opacity-60 ${paymentModalType === 'cash_in' ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/25' : 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/25'}`}>
                 {isSavingPayment ? 'Saving…' : (paymentModalType === 'cash_out' ? 'Save Cash Out (- Payment)' : 'Save Cash In')}
               </button>
@@ -3305,11 +3684,25 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       )}
 
       {editingEntry && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60">
-          <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingEntry(null);
+          }}
+        >
+          <div
+            className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center justify-between bg-blue-600 px-5 py-4 text-white">
               <h3 className="font-bold">Edit Cutting Entry</h3>
-              <button onClick={() => setEditingEntry(null)} type="button" aria-label="Close edit form">
+              <button
+                type="button"
+                onClick={() => setEditingEntry(null)}
+                className="rounded-lg p-1 hover:bg-white/20 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -3342,19 +3735,20 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               <div className="rounded-lg bg-slate-50 p-3 text-right text-sm font-bold">
                 Total: Rs. {(Number(editForm.pairs) || 0) * (Number(editForm.rate) || 0)}
               </div>
-              <div className="flex justify-end gap-2 pt-1">
+              <div className="flex justify-end gap-2 pt-1 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setEditingEntry(null)}
                   disabled={isSavingEdit}
-                  className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100"
+                  className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
                 >
-                  Cancel
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Cancel / Back</span>
                 </button>
                 <button
                   type="submit"
                   disabled={isSavingEdit}
-                  className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                  className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60 transition cursor-pointer"
                 >
                   {isSavingEdit && <Loader2 className="h-4 w-4 animate-spin" />}
                   {isSavingEdit ? 'Saving...' : 'Save Changes'}
@@ -3366,26 +3760,46 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       )}
 
       {deletingEntry && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60">
-          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
-            <h3 className="text-lg font-bold text-slate-900">Delete Cutting Entry?</h3>
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDeletingEntry(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-900">Delete Cutting Entry?</h3>
+              <button
+                type="button"
+                onClick={() => setDeletingEntry(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
             <p className="mt-3 text-sm text-slate-600">
               Delete this entry permanently? Date: {formatConfirmationDate(deletingEntry.date)}, Customer: {deletingEntry.customerName || '-'}, Pairs: {deletingEntry.pairs}, Total: Rs.{deletingEntry.pairs * deletingEntry.rate}. This action cannot be undone.
             </p>
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
               <button
                 type="button"
                 onClick={() => setDeletingEntry(null)}
                 disabled={isDeletingEntry}
-                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100"
+                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
               >
-                Cancel
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
               </button>
               <button
                 type="button"
                 onClick={handleDeleteEntry}
                 disabled={isDeletingEntry}
-                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60"
+                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition cursor-pointer"
               >
                 {isDeletingEntry ? 'Deleting...' : 'Delete Entry'}
               </button>
@@ -3394,10 +3808,149 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         </div>
       )}
 
+      {editingPayment && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingPayment(null);
+          }}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-black text-slate-900">
+                  Edit Payment &bull; {editingPayment.type === 'cash_out' ? 'Cash Out (Payment)' : 'Cash In'}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Update payment details. Balance will recalculate automatically.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingPayment(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <form onSubmit={handleUpdatePayment} className="space-y-4 pt-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Payment Date *
+                </label>
+                <input
+                  type="date"
+                  required
+                  value={editPaymentForm.date}
+                  onChange={e => setEditPaymentForm(f => ({ ...f, date: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-semibold text-slate-800 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Amount (Rs.) *
+                </label>
+                <input
+                  type="number"
+                  required
+                  min="1"
+                  step="any"
+                  value={editPaymentForm.amount}
+                  onChange={e => setEditPaymentForm(f => ({ ...f, amount: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-mono font-bold text-slate-900 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Payment Method
+                  </label>
+                  <select
+                    value={editPaymentForm.paymentMethod}
+                    onChange={e => setEditPaymentForm(f => ({ ...f, paymentMethod: e.target.value as any }))}
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs bg-white text-slate-800 focus:border-blue-500 focus:outline-none"
+                  >
+                    <option value="Cash">Cash</option>
+                    <option value="Easypaisa">Easypaisa</option>
+                    <option value="JazzCash">JazzCash</option>
+                    <option value="Bank Transfer">Bank Transfer</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Bill / Voucher No
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. BILL-001"
+                    value={editPaymentForm.billNo}
+                    onChange={e => setEditPaymentForm(f => ({ ...f, billNo: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs text-slate-800 focus:border-blue-500 focus:outline-none font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2.5 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingPayment(null)}
+                  disabled={isSavingEditPayment}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Cancel / Back</span>
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEditPayment}
+                  className="rounded-xl bg-blue-600 hover:bg-blue-700 px-5 py-2 text-xs font-bold text-white shadow-md shadow-blue-600/20 transition cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
+                >
+                  {isSavingEditPayment ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>Save Changes</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {cutterDeleteTarget && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
-            <h3 className="text-lg font-bold text-slate-900">Delete Cutter?</h3>
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCutterDeleteTarget(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-900">Delete Cutter?</h3>
+              <button
+                type="button"
+                onClick={() => setCutterDeleteTarget(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
             <p className="mt-3 text-sm text-slate-600">
               Delete the ledger for {getCutterLedgerName(cutterDeleteTarget)}?
             </p>
@@ -3412,9 +3965,22 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               </label>
             </div>
             <p className="mt-3 text-xs text-rose-600">Deleted data cannot be recovered.</p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button type="button" disabled={isSavingCutter} onClick={() => setCutterDeleteTarget(null)} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-              <button type="button" disabled={isSavingCutter} onClick={handleDeleteCutter} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60">
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                disabled={isSavingCutter}
+                onClick={() => setCutterDeleteTarget(null)}
+                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
+              </button>
+              <button
+                type="button"
+                disabled={isSavingCutter}
+                onClick={handleDeleteCutter}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60 transition cursor-pointer"
+              >
                 {isSavingCutter ? 'Deleting...' : 'Delete Cutter'}
               </button>
             </div>
@@ -3423,9 +3989,28 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       )}
 
       {cutterStatusTarget && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
-            <h3 className="text-lg font-bold text-slate-900">{cutterStatusTarget.isActive === false ? 'Activate Cutter?' : 'Deactivate Cutter?'}</h3>
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCutterStatusTarget(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h3 className="text-lg font-bold text-slate-900">{cutterStatusTarget.isActive === false ? 'Activate Cutter?' : 'Deactivate Cutter?'}</h3>
+              <button
+                type="button"
+                onClick={() => setCutterStatusTarget(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 transition cursor-pointer"
+                aria-label="Close / Back"
+                title="Close / Back (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
             <p className="mt-3 text-sm text-slate-600">
               {cutterStatusTarget.isActive === false
                 ? `Activate ${cutterStatusTarget.name} again?`
@@ -3444,9 +4029,20 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 </p>
               ) : null;
             })()}
-            <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => setCutterStatusTarget(null)} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-              <button type="button" onClick={handleCutterStatusChange} className={`rounded-xl px-4 py-2 text-sm font-bold text-white ${cutterStatusTarget.isActive === false ? 'bg-emerald-600' : 'bg-rose-600'}`}>
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setCutterStatusTarget(null)}
+                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCutterStatusChange}
+                className={`rounded-xl px-4 py-2 text-sm font-bold text-white transition cursor-pointer ${cutterStatusTarget.isActive === false ? 'bg-emerald-600' : 'bg-rose-600'}`}
+              >
                 {cutterStatusTarget.isActive === false ? 'Activate Cutter' : 'Deactivate Cutter'}
               </button>
             </div>

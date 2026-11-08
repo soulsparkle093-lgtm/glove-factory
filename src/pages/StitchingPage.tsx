@@ -103,6 +103,34 @@ export const StitchingPage: React.FC = () => {
     return () => window.removeEventListener('popstate', restoreStitcherRoute);
   }, []);
 
+  // Close any open modal on Escape key
+  useEffect(() => {
+    const hasAnyModal = isOrderModalOpen || isStitcherModalOpen || isPaymentModalOpen || 
+      isReceiveModalOpen || Boolean(editingLedgerRow) || Boolean(deletingLedgerRow) || 
+      showStitcherModal || Boolean(deleteStitcherTarget) || isDatePdfModalOpen;
+    if (!hasAnyModal) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsOrderModalOpen(false);
+        setIsStitcherModalOpen(false);
+        setEditingStitcher(null);
+        setIsPaymentModalOpen(false);
+        setIsReceiveModalOpen(false);
+        setEditingLedgerRow(null);
+        setDeletingLedgerRow(null);
+        setShowStitcherModal(false);
+        setDeleteStitcherTarget(null);
+        setIsDatePdfModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    isOrderModalOpen, isStitcherModalOpen, isPaymentModalOpen, isReceiveModalOpen,
+    editingLedgerRow, deletingLedgerRow, showStitcherModal, deleteStitcherTarget, isDatePdfModalOpen
+  ]);
+
   const readyOrderIds = useMemo(() => {
     const ids = new Set<string>();
     cuttings.filter(cutting => cutting.status === 'Received').forEach(cutting => ids.add(cutting.orderId));
@@ -957,41 +985,167 @@ export const StitchingPage: React.FC = () => {
       ))}
 
       {isOrderModalOpen && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-3 sm:p-5">
-          <form onSubmit={handleCreateOrder} className="max-h-[92vh] w-full max-w-2xl space-y-4 overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-6">
-            <div className="flex items-start justify-between"><div><h2 className="text-lg font-black text-slate-900">{selectedStitcherForActions && form.stitcherId === selectedStitcherForActions.id ? 'Issue Stitching' : 'Add New Stitching Order'}</h2><p className="text-xs text-slate-500">Assign work from a customer order and record the stitcher's khata.</p></div><button type="button" onClick={() => setIsOrderModalOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"><X className="h-5 w-5" /></button></div>
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsOrderModalOpen(false);
+          }}
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-3 sm:p-5 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleCreateOrder} 
+            className="my-auto max-h-[92vh] w-full max-w-2xl space-y-4 overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-6"
+          >
+            <div className="flex items-start justify-between">
+              <div>
+                <h2 className="text-lg font-black text-slate-900">{selectedStitcherForActions && form.stitcherId === selectedStitcherForActions.id ? 'Issue Stitching' : 'Add New Stitching Order'}</h2>
+                <p className="text-xs text-slate-500">Assign work from a customer order and record the stitcher's khata.</p>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setIsOrderModalOpen(false)} 
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
             <label className="block text-xs font-bold text-slate-700">Job Card / Customer Order *<select required value={form.orderId} onChange={event => { const order = orders.find(item => item.id === event.target.value); const item = order?.items[0]; setForm(current => ({ ...current, orderId: event.target.value, orderItemId: item?.id || '', qty: String(item?.totalPairs || item?.qty || ''), small: String(item?.sizes?.small || 0), medium: String(item?.sizes?.medium || 0), large: String(item?.sizes?.large || 0), xl: String(item?.sizes?.xl || 0), dueDate: order?.deliveryDate || current.dueDate })); }} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm">{orders.length === 0 && <option value="">No customer orders</option>}{orders.map(order => <option key={order.id} value={order.id}>#{order.orderNo} · {order.customerName}</option>)}</select></label>
             {selectedCustomerOrder && <label className="block text-xs font-bold text-slate-700">Article No / Style No *<select required value={form.orderItemId} onChange={event => { const item = selectedCustomerOrder.items.find(entry => entry.id === event.target.value); setForm(current => ({ ...current, orderItemId: event.target.value, qty: String(item?.totalPairs || item?.qty || ''), small: String(item?.sizes?.small || 0), medium: String(item?.sizes?.medium || 0), large: String(item?.sizes?.large || 0), xl: String(item?.sizes?.xl || 0) })); }} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm">{selectedCustomerOrder.items.map(item => <option key={item.id} value={item.id}>{item.title || item.gloveType}</option>)}</select></label>}
-            <div className="grid gap-3 sm:grid-cols-[1fr_auto]"><label className="block text-xs font-bold text-slate-700">Stitcher *<select required value={form.stitcherId} onChange={event => { const worker = stitchers.find(item => item.id === event.target.value); setForm(current => ({ ...current, stitcherId: event.target.value, rate: String(worker?.perPairRate || current.rate) })); }} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm"><option value="">Select stitcher</option>{stitchers.filter(worker => worker.isActive).map(worker => <option key={worker.id} value={worker.id}>{worker.name}{worker.phone ? ` · ${worker.phone}` : ''}</option>)}</select></label><button type="button" onClick={() => openStitcherEditor()} className="self-end rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100"><Plus className="mr-1 inline h-4 w-4" />Add New Stitcher</button></div>
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto]"><label className="block text-xs font-bold text-slate-700">Stitcher *<select required value={form.stitcherId} onChange={event => { const worker = stitchers.find(item => item.id === event.target.value); setForm(current => ({ ...current, stitcherId: event.target.value, rate: String(worker?.perPairRate || current.rate) })); }} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm"><option value="">Select stitcher</option>{stitchers.filter(worker => worker.isActive).map(worker => <option key={worker.id} value={worker.id}>{worker.name}{worker.phone ? ` · ${worker.phone}` : ''}</option>)}</select></label><button type="button" onClick={() => openStitcherEditor()} className="self-end rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-bold text-blue-700 hover:bg-blue-100 cursor-pointer"><Plus className="mr-1 inline h-4 w-4" />Add New Stitcher</button></div>
             {form.stitcherId && <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">Stitcher ID: <b>{form.stitcherId}</b><span className="mx-2 text-slate-300">|</span>Phone Number: <b>{stitchers.find(worker => worker.id === form.stitcherId)?.phone || 'Not provided'}</b></p>}
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{(['small', 'medium', 'large', 'xl'] as const).map((size, index) => <label key={size} className="text-xs font-bold text-slate-700">{['S', 'M', 'L', 'XL'][index]} Quantity<input min="0" type="number" value={form[size]} onChange={event => { const next = { ...form, [size]: event.target.value }; setForm({ ...next, qty: String(numberValue(next.small) + numberValue(next.medium) + numberValue(next.large) + numberValue(next.xl)) }); }} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label>)}</div>
             <div className="grid gap-3 sm:grid-cols-2"><label className="text-xs font-bold text-slate-700">Quantity *<input required min="1" type="number" value={form.qty} onChange={event => setForm({ ...form, qty: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label><label className="text-xs font-bold text-slate-700">Rate Per Piece *<input required min="0" type="number" step="0.01" value={form.rate} onChange={event => setForm({ ...form, rate: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label><label className="text-xs font-bold text-slate-700">Issue Date *<input required type="date" value={form.issueDate} onChange={event => setForm({ ...form, issueDate: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label><label className="text-xs font-bold text-slate-700">Due Date<input type="date" value={form.dueDate} onChange={event => setForm({ ...form, dueDate: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label><label className="text-xs font-bold text-slate-700">Advance Paid<input min="0" type="number" step="0.01" value={form.advancePaid} onChange={event => setForm({ ...form, advancePaid: event.target.value })} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label><label className="text-xs font-bold text-slate-700">Status<select value={form.status} onChange={event => setForm({ ...form, status: event.target.value as StitchingOrderStatus })} className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"><option>Pending</option><option>In Progress</option><option>Completed</option><option>Received</option><option>Returned</option><option>Cancelled</option></select></label></div>
             <div className="rounded-xl bg-blue-50 p-3 text-sm"><span className="font-semibold text-blue-800">Total Amount: </span><b className="text-blue-950">{formatCurrency(numberValue(form.qty) * numberValue(form.rate))}</b><span className="ml-4 font-semibold text-amber-800">Remaining: </span><b>{formatCurrency(Math.max(0, numberValue(form.qty) * numberValue(form.rate) - numberValue(form.advancePaid)))}</b></div>
             <label className="block text-xs font-bold text-slate-700">Remarks / Notes<textarea value={form.remarks} onChange={event => setForm({ ...form, remarks: event.target.value })} rows={2} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" /></label>
-            <div className="flex justify-end gap-2"><button type="button" onClick={() => setIsOrderModalOpen(false)} className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button><button disabled={saving || !selectedItem} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60">{saving ? 'Saving...' : selectedStitcherForActions && form.stitcherId === selectedStitcherForActions.id ? 'Issue Stitching' : 'Create Stitching Order'}</button></div>
+            <div className="flex justify-end gap-2">
+              <button 
+                type="button" 
+                onClick={() => setIsOrderModalOpen(false)} 
+                className="flex items-center gap-1 rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button disabled={saving || !selectedItem} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60 cursor-pointer">{saving ? 'Saving...' : selectedStitcherForActions && form.stitcherId === selectedStitcherForActions.id ? 'Issue Stitching' : 'Create Stitching Order'}</button>
+            </div>
           </form>
         </div>
       )}
 
-      {isStitcherModalOpen && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4"><form onSubmit={handleAddStitcher} className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl"><div className="flex justify-between"><h3 className="font-black">{editingStitcher ? 'Edit Stitcher' : 'Add New Stitcher'}</h3><button type="button" onClick={() => { setIsStitcherModalOpen(false); setEditingStitcher(null); }}><X className="h-5 w-5" /></button></div><label className="block text-xs font-bold">Stitcher Name *<input required value={stitcherForm.name} onChange={event => setStitcherForm({ ...stitcherForm, name: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" /></label><label className="block text-xs font-bold">Category<select value={stitcherForm.stitcherType} onChange={event => setStitcherForm({ ...stitcherForm, stitcherType: event.target.value as StitcherCategory })} className="mt-1 w-full rounded-lg border bg-white p-2.5"><option value="factory_worker">Stitching Man</option><option value="stitching_maker">Stitching Maker / Outside Contractors</option><option value="product">Product / Purchase</option></select></label><label className="block text-xs font-bold">Phone Number<input value={stitcherForm.phone} onChange={event => setStitcherForm({ ...stitcherForm, phone: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" /></label><label className="block text-xs font-bold">City<input value={stitcherForm.city} onChange={event => setStitcherForm({ ...stitcherForm, city: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" /></label><label className="block text-xs font-bold">Rate Per Piece<input min="0" type="number" step="0.01" value={stitcherForm.perPairRate} onChange={event => setStitcherForm({ ...stitcherForm, perPairRate: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" /></label><label className="flex items-center gap-2 text-xs font-bold text-slate-700"><input type="checkbox" checked={stitcherForm.isActive} onChange={event => setStitcherForm({ ...stitcherForm, isActive: event.target.checked })} className="h-4 w-4 rounded border-slate-300" />Active stitcher</label><div className="flex justify-end gap-2"><button type="button" onClick={() => { setIsStitcherModalOpen(false); setEditingStitcher(null); }} className="rounded-lg px-3 py-2 text-sm font-bold text-slate-600">Cancel</button><button disabled={saving} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Saving...' : editingStitcher ? 'Update Stitcher' : 'Save Stitcher'}</button></div></form></div>}
+      {isStitcherModalOpen && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setIsStitcherModalOpen(false);
+              setEditingStitcher(null);
+            }
+          }}
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleAddStitcher} 
+            className="my-auto max-h-[92vh] w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl overflow-y-auto"
+          >
+            <div className="flex justify-between items-center">
+              <h3 className="font-black text-slate-900">{editingStitcher ? 'Edit Stitcher' : 'Add New Stitcher'}</h3>
+              <button 
+                type="button" 
+                onClick={() => { setIsStitcherModalOpen(false); setEditingStitcher(null); }}
+                className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <label className="block text-xs font-bold text-slate-700">Stitcher Name *<input required value={stitcherForm.name} onChange={event => setStitcherForm({ ...stitcherForm, name: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
+            <label className="block text-xs font-bold text-slate-700">Category<select value={stitcherForm.stitcherType} onChange={event => setStitcherForm({ ...stitcherForm, stitcherType: event.target.value as StitcherCategory })} className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2.5"><option value="factory_worker">Stitching Man</option><option value="stitching_maker">Stitching Maker / Outside Contractors</option><option value="product">Product / Purchase</option></select></label>
+            <label className="block text-xs font-bold text-slate-700">Phone Number<input value={stitcherForm.phone} onChange={event => setStitcherForm({ ...stitcherForm, phone: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
+            <label className="block text-xs font-bold text-slate-700">City<input value={stitcherForm.city} onChange={event => setStitcherForm({ ...stitcherForm, city: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
+            <label className="block text-xs font-bold text-slate-700">Rate Per Piece<input min="0" type="number" step="0.01" value={stitcherForm.perPairRate} onChange={event => setStitcherForm({ ...stitcherForm, perPairRate: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-700"><input type="checkbox" checked={stitcherForm.isActive} onChange={event => setStitcherForm({ ...stitcherForm, isActive: event.target.checked })} className="h-4 w-4 rounded border-slate-300" />Active stitcher</label>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button 
+                type="button" 
+                onClick={() => { setIsStitcherModalOpen(false); setEditingStitcher(null); }} 
+                className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button disabled={saving} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50 cursor-pointer">{saving ? 'Saving...' : editingStitcher ? 'Update Stitcher' : 'Save Stitcher'}</button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {isDatePdfModalOpen && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-4">
-          <form onSubmit={event => { event.preventDefault(); printDateRangeKhata(); }} className="w-full max-w-md space-y-4 rounded-xl bg-white p-6 shadow-xl">
-            <div className="flex items-center justify-between"><h3 className="text-lg font-bold text-slate-900">Date-Range Ledger PDF</h3><button type="button" onClick={() => setIsDatePdfModalOpen(false)} aria-label="Close date range form"><X className="h-5 w-5 text-slate-500" /></button></div>
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsDatePdfModalOpen(false);
+          }}
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={event => { event.preventDefault(); printDateRangeKhata(); }} 
+            className="my-auto max-h-[92vh] w-full max-w-md space-y-4 rounded-xl bg-white p-6 shadow-xl overflow-y-auto"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-900">Date-Range Ledger PDF</h3>
+              <button 
+                type="button" 
+                onClick={() => setIsDatePdfModalOpen(false)} 
+                className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5 text-slate-500" />
+              </button>
+            </div>
             <label className="block text-xs font-bold text-slate-700">From Date<input required type="date" value={pdfFromDate} onChange={event => setPdfFromDate(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
             <label className="block text-xs font-bold text-slate-700">To Date<input required type="date" min={pdfFromDate || undefined} value={pdfToDate} onChange={event => setPdfToDate(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
-            <div className="flex justify-end gap-2"><button type="button" onClick={() => setIsDatePdfModalOpen(false)} className="rounded-lg px-4 py-2 text-sm font-bold text-slate-600">Cancel</button><button className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-bold text-white hover:bg-orange-600">Generate PDF</button></div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button 
+                type="button" 
+                onClick={() => setIsDatePdfModalOpen(false)} 
+                className="flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button className="rounded-lg bg-orange-500 px-4 py-2 text-sm font-bold text-white hover:bg-orange-600 cursor-pointer">Generate PDF</button>
+            </div>
           </form>
         </div>
       )}
 
       {editingLedgerRow && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4">
-          <form onSubmit={handleSaveLedgerEdit} className="max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-xl bg-white p-6 shadow-xl">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingLedgerRow(null);
+          }}
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleSaveLedgerEdit} 
+            className="my-auto max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-xl bg-white p-6 shadow-xl"
+          >
             <div className="flex items-center justify-between">
               <div><h3 className="text-lg font-bold text-slate-900">Edit Notebook Ledger Entry</h3><p className="text-xs text-slate-500">{editingLedgerRow.description}</p></div>
-              <button type="button" onClick={() => setEditingLedgerRow(null)} aria-label="Close edit form"><X className="h-5 w-5 text-slate-500" /></button>
+              <button 
+                type="button" 
+                onClick={() => setEditingLedgerRow(null)} 
+                className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5 text-slate-500" />
+              </button>
             </div>
             {stitchingHistory.some(entry => entry.id === editingLedgerRow.id) ? (
               <>
@@ -1013,44 +1167,100 @@ export const StitchingPage: React.FC = () => {
                 <p className="rounded-lg bg-amber-50 p-2.5 text-xs text-amber-800">Changing a linked payment type or amount also recalculates the order advance and remaining balance.</p>
               </>
             )}
-            <div className="flex justify-end gap-2"><button type="button" onClick={() => setEditingLedgerRow(null)} className="rounded-lg px-4 py-2 text-sm font-bold text-slate-600">Cancel</button><button disabled={saving} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Saving...' : 'Save Changes'}</button></div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button 
+                type="button" 
+                onClick={() => setEditingLedgerRow(null)} 
+                className="flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button disabled={saving} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50 cursor-pointer">{saving ? 'Saving...' : 'Save Changes'}</button>
+            </div>
           </form>
         </div>
       )}
 
       {deletingLedgerRow && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !saving) setDeletingLedgerRow(null);
+          }}
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="my-auto max-h-[92vh] w-full max-w-md rounded-xl bg-white p-6 shadow-xl overflow-y-auto"
+          >
             <h3 className="text-lg font-bold text-slate-900">Delete Ledger Entry?</h3>
             <p className="mt-2 text-sm text-slate-600">This action cannot be undone. Removing a stitching issue also removes its linked order and khata entries. A received entry cannot be deleted until the issue is reconciled.</p>
-            <div className="mt-5 flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setDeletingLedgerRow(null)} className="rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button><button type="button" disabled={saving} onClick={() => void handleDeleteLedgerRow()} className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Deleting...' : 'Delete Entry'}</button></div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button 
+                type="button" 
+                disabled={saving} 
+                onClick={() => setDeletingLedgerRow(null)} 
+                className="flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button type="button" disabled={saving} onClick={() => void handleDeleteLedgerRow()} className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50 cursor-pointer">{saving ? 'Deleting...' : 'Delete Entry'}</button>
+            </div>
           </div>
         </div>
       )}
 
       {showStitcherModal && selectedStitcherForActions && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-4" onClick={() => setShowStitcherModal(false)}>
-          <div className="w-full max-w-[400px] rounded-xl bg-white p-6 shadow-xl" onClick={event => event.stopPropagation()}>
+        <div 
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs overflow-y-auto" 
+          onClick={() => setShowStitcherModal(false)}
+        >
+          <div className="my-auto max-h-[92vh] w-full max-w-[400px] rounded-xl bg-white p-6 shadow-xl overflow-y-auto" onClick={event => event.stopPropagation()}>
             <div className="mb-5">
               <h3 className="text-lg font-bold text-slate-900">{selectedStitcherForActions.name}</h3>
               <p className="mt-1 text-sm text-gray-500">{selectedStitcherForActions.phone || 'No phone'} | {selectedStitcherForActions.city || 'No city'}</p>
             </div>
             <div className="flex flex-col gap-3">
-              <button type="button" onClick={() => startIssueStitching(selectedStitcherForActions)} className="w-full rounded-lg bg-blue-600 p-3 text-left font-bold text-white hover:bg-blue-700">1. Issue Stitching</button>
-              <button type="button" onClick={() => openReceivingForm(selectedStitcherForActions)} disabled={stitcherOrdersForReceiving.length === 0} className="w-full rounded-lg bg-green-600 p-3 text-left font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50">2. Receive Stitching</button>
-              <button type="button" onClick={() => openStitcherKhata(selectedStitcherForActions)} className="w-full rounded-lg bg-gray-800 p-3 text-left font-bold text-white hover:bg-gray-900">3. Khata / Ledger</button>
+              <button type="button" onClick={() => startIssueStitching(selectedStitcherForActions)} className="w-full rounded-lg bg-blue-600 p-3 text-left font-bold text-white hover:bg-blue-700 cursor-pointer">1. Issue Stitching</button>
+              <button type="button" onClick={() => openReceivingForm(selectedStitcherForActions)} disabled={stitcherOrdersForReceiving.length === 0} className="w-full rounded-lg bg-green-600 p-3 text-left font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer">2. Receive Stitching</button>
+              <button type="button" onClick={() => openStitcherKhata(selectedStitcherForActions)} className="w-full rounded-lg bg-gray-800 p-3 text-left font-bold text-white hover:bg-gray-900 cursor-pointer">3. Khata / Ledger</button>
             </div>
-            <button type="button" onClick={() => setShowStitcherModal(false)} className="mt-4 w-full rounded-lg border border-gray-200 p-2.5 text-sm font-semibold text-gray-600 hover:bg-gray-50">Close</button>
+            <button 
+              type="button" 
+              onClick={() => setShowStitcherModal(false)} 
+              className="mt-4 w-full flex items-center justify-center gap-1 rounded-lg border border-gray-200 p-2.5 text-sm font-semibold text-gray-600 hover:bg-gray-50 cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              Close / Back
+            </button>
           </div>
         </div>
       )}
 
       {isReceiveModalOpen && selectedStitcherForActions && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4">
-          <form onSubmit={handleReceiveStitching} className="w-full max-w-lg space-y-4 rounded-xl bg-white p-6 shadow-xl">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsReceiveModalOpen(false);
+          }}
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleReceiveStitching} 
+            className="my-auto max-h-[92vh] w-full max-w-lg space-y-4 rounded-xl bg-white p-6 shadow-xl overflow-y-auto"
+          >
             <div className="flex items-start justify-between">
               <div><h3 className="text-lg font-bold text-slate-900">Receive Stitching</h3><p className="text-sm text-gray-500">{selectedStitcherForActions.name}</p></div>
-              <button type="button" onClick={() => setIsReceiveModalOpen(false)} aria-label="Close receiving form"><X className="h-5 w-5 text-slate-500" /></button>
+              <button 
+                type="button" 
+                onClick={() => setIsReceiveModalOpen(false)} 
+                className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5 text-slate-500" />
+              </button>
             </div>
             <label className="block text-xs font-bold text-slate-700">Stitching Order *<select required value={receiveForm.stitchingOrderId} onChange={event => { const order = stitcherOrdersForReceiving.find(item => item.id === event.target.value); setReceiveForm(current => ({ ...current, stitchingOrderId: event.target.value, receivedQuantity: String(Math.max(0, (order?.qty || 0) - (order?.receivedQuantity || 0) - (order?.lossQuantity || 0))) })); }} className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2.5">{stitcherOrdersForReceiving.map(order => <option key={order.id} value={order.id}>#{order.orderNo} · {order.article} · Issued {order.qty}</option>)}</select></label>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -1060,22 +1270,96 @@ export const StitchingPage: React.FC = () => {
               {receivingOrder && <div className="self-end rounded-lg bg-slate-50 p-2.5 text-xs text-slate-600">Issued: <b>{receivingOrder.qty}</b> · Previously received: <b>{receivingOrder.receivedQuantity || 0}</b></div>}
             </div>
             <label className="block text-xs font-bold text-slate-700">Remarks<textarea rows={2} value={receiveForm.remarks} onChange={event => setReceiveForm({ ...receiveForm, remarks: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
-            <div className="flex justify-end gap-2"><button type="button" onClick={() => setIsReceiveModalOpen(false)} className="rounded-lg px-4 py-2 text-sm font-bold text-slate-600">Cancel</button><button disabled={saving || !receivingOrder} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Saving...' : 'Save Receipt'}</button></div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button 
+                type="button" 
+                onClick={() => setIsReceiveModalOpen(false)} 
+                className="flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button disabled={saving || !receivingOrder} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50 cursor-pointer">{saving ? 'Saving...' : 'Save Receipt'}</button>
+            </div>
           </form>
         </div>
       )}
 
       {deleteStitcherTarget && (
-        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !saving) setDeleteStitcherTarget(null);
+          }}
+          className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="my-auto max-h-[92vh] w-full max-w-md rounded-xl bg-white p-6 shadow-xl overflow-y-auto"
+          >
             <h3 className="text-lg font-bold text-slate-900">Delete Stitcher?</h3>
             <p className="mt-2 text-sm text-slate-600">Are you sure you want to delete {deleteStitcherTarget.name}? Existing stitching orders and khata history will be retained.</p>
-            <div className="mt-5 flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setDeleteStitcherTarget(null)} className="rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">Cancel</button><button type="button" disabled={saving} onClick={() => void handleDeleteStitcher()} className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Deleting...' : 'Delete Stitcher'}</button></div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button 
+                type="button" 
+                disabled={saving} 
+                onClick={() => setDeleteStitcherTarget(null)} 
+                className="flex items-center gap-1 rounded-lg px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button type="button" disabled={saving} onClick={() => void handleDeleteStitcher()} className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50 cursor-pointer">{saving ? 'Deleting...' : 'Delete Stitcher'}</button>
+            </div>
           </div>
         </div>
       )}
 
-      {isPaymentModalOpen && selectedStitcher && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4"><form onSubmit={handleSavePayment} className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl"><div className="flex justify-between"><div><h3 className="font-black">Stitcher Payment Entry</h3><p className="text-xs text-slate-500">{selectedStitcher.name}</p></div><button type="button" onClick={() => setIsPaymentModalOpen(false)}><X className="h-5 w-5" /></button></div><label className="block text-xs font-bold">Entry Type<select value={paymentForm.type} onChange={event => setPaymentForm({ ...paymentForm, type: event.target.value as 'ADVANCE' | 'PAYMENT_RETURN' })} className="mt-1 w-full rounded-lg border bg-white p-2.5"><option value="ADVANCE">Advance Dena / Jama (Paid to stitcher)</option><option value="PAYMENT_RETURN">Payment Return (Received from stitcher)</option></select></label><label className="block text-xs font-bold">Link Stitching Order (optional)<select value={paymentForm.stitchingOrderId} onChange={event => setPaymentForm({ ...paymentForm, stitchingOrderId: event.target.value })} className="mt-1 w-full rounded-lg border bg-white p-2.5"><option value="">No linked order</option>{selectedStitcherOrders.map(order => <option key={order.id} value={order.id}>#{order.orderNo} · {order.article}</option>)}</select></label><label className="block text-xs font-bold">Date<input required type="date" value={paymentForm.date} onChange={event => setPaymentForm({ ...paymentForm, date: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" /></label><label className="block text-xs font-bold">Amount<input required min="0.01" type="number" step="0.01" value={paymentForm.amount} onChange={event => setPaymentForm({ ...paymentForm, amount: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" /></label><label className="block text-xs font-bold">Description<input value={paymentForm.description} onChange={event => setPaymentForm({ ...paymentForm, description: event.target.value })} className="mt-1 w-full rounded-lg border p-2.5" placeholder="Payment note" /></label><div className="flex justify-end gap-2"><button type="button" onClick={() => setIsPaymentModalOpen(false)} className="rounded-lg px-3 py-2 text-sm font-bold text-slate-600">Cancel</button><button disabled={saving} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50">{saving ? 'Saving...' : 'Save Entry'}</button></div></form></div>}
+      {isPaymentModalOpen && selectedStitcher && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsPaymentModalOpen(false);
+          }}
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleSavePayment} 
+            className="my-auto max-h-[92vh] w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl overflow-y-auto"
+          >
+            <div className="flex justify-between items-center">
+              <div>
+                <h3 className="font-black text-slate-900">Stitcher Payment Entry</h3>
+                <p className="text-xs text-slate-500">{selectedStitcher.name}</p>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setIsPaymentModalOpen(false)}
+                className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <label className="block text-xs font-bold text-slate-700">Entry Type<select value={paymentForm.type} onChange={event => setPaymentForm({ ...paymentForm, type: event.target.value as 'ADVANCE' | 'PAYMENT_RETURN' })} className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2.5"><option value="ADVANCE">Advance Dena / Jama (Paid to stitcher)</option><option value="PAYMENT_RETURN">Payment Return (Received from stitcher)</option></select></label>
+            <label className="block text-xs font-bold text-slate-700">Link Stitching Order (optional)<select value={paymentForm.stitchingOrderId} onChange={event => setPaymentForm({ ...paymentForm, stitchingOrderId: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2.5"><option value="">No linked order</option>{selectedStitcherOrders.map(order => <option key={order.id} value={order.id}>#{order.orderNo} · {order.article}</option>)}</select></label>
+            <label className="block text-xs font-bold text-slate-700">Date<input required type="date" value={paymentForm.date} onChange={event => setPaymentForm({ ...paymentForm, date: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
+            <label className="block text-xs font-bold text-slate-700">Amount<input required min="0.01" type="number" step="0.01" value={paymentForm.amount} onChange={event => setPaymentForm({ ...paymentForm, amount: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" /></label>
+            <label className="block text-xs font-bold text-slate-700">Description<input value={paymentForm.description} onChange={event => setPaymentForm({ ...paymentForm, description: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2.5" placeholder="Payment note" /></label>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button 
+                type="button" 
+                onClick={() => setIsPaymentModalOpen(false)} 
+                className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                Cancel / Back
+              </button>
+              <button disabled={saving} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-bold text-white disabled:opacity-50 cursor-pointer">{saving ? 'Saving...' : 'Save Entry'}</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

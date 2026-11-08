@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Wallet, ArrowDownLeft, ArrowUpRight, Search, Plus, Trash2, X } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Wallet, ArrowDownLeft, ArrowUpRight, Search, Plus, Trash2, X, ArrowLeft } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate } from '../utils/factoryFormatters';
 import { CashbookEntry } from '../types/factory';
@@ -11,6 +11,18 @@ export const CashbookPage: React.FC = () => {
   const [typeFilter, setTypeFilter] = useState<'all' | 'in' | 'out'>('all');
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [entryType, setEntryType] = useState<'in' | 'out'>('in');
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isAddOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsAddOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isAddOpen]);
 
   // Form states
   const [amount, setAmount] = useState('');
@@ -164,20 +176,33 @@ export const CashbookPage: React.FC = () => {
 
       {/* Add Modal */}
       {isAddOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className={`px-6 py-4 text-white flex items-center justify-between ${
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAddOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] flex flex-col"
+          >
+            <div className={`px-6 py-4 text-white flex items-center justify-between shrink-0 ${
               entryType === 'in' ? 'bg-emerald-600' : 'bg-rose-600'
             }`}>
               <h3 className="font-bold text-lg">
                 {entryType === 'in' ? 'Record Cash In' : 'Record Cash Out'}
               </h3>
-              <button onClick={() => setIsAddOpen(false)} className="p-1 text-white hover:bg-white/20 rounded-lg">
+              <button 
+                onClick={() => setIsAddOpen(false)} 
+                className="p-1 text-white hover:bg-white/20 rounded-lg cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Amount ({settings.currency}) *</label>
                 <input
@@ -241,13 +266,14 @@ export const CashbookPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddOpen(false)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100"
+                  className="flex items-center gap-1 px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  <ArrowLeft className="w-4 h-4" />
+                  Cancel / Back
                 </button>
                 <button
                   type="submit"
-                  className={`px-5 py-2 rounded-xl text-sm font-bold text-white shadow-sm ${
+                  className={`px-5 py-2 rounded-xl text-sm font-bold text-white shadow-sm cursor-pointer ${
                     entryType === 'in' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'
                   }`}
                 >

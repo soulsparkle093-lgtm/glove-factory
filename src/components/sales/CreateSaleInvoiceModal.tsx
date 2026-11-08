@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Receipt, CheckCircle2, AlertTriangle, User, DollarSign } from 'lucide-react';
+import { X, Receipt, CheckCircle2, AlertTriangle, User, DollarSign, ArrowLeft } from 'lucide-react';
 import { useFactory } from '../../context/FactoryContext';
 import { formatCurrency } from '../../utils/factoryFormatters';
 
@@ -34,6 +34,18 @@ export const CreateSaleInvoiceModal: React.FC<CreateSaleInvoiceModalProps> = ({
     setSelectedInvoiceId,
     settings 
   } = useFactory();
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
 
   const [orderId, setOrderId] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
@@ -168,9 +180,17 @@ export const CreateSaleInvoiceModal: React.FC<CreateSaleInvoiceModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95vh] animate-in fade-in zoom-in-95 duration-150">
-        <div className="px-6 py-4 bg-blue-600 text-white flex items-center justify-between">
+    <div 
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+    >
+      <div 
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95vh] my-auto animate-in fade-in zoom-in-95 duration-150"
+      >
+        <div className="px-6 py-4 bg-blue-600 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <Receipt className="w-5 h-5" />
             <div>
@@ -180,7 +200,9 @@ export const CreateSaleInvoiceModal: React.FC<CreateSaleInvoiceModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg hover:bg-white/20 text-white transition"
+            className="p-1 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+            title="Close / Back (Esc)"
+            aria-label="Close / Back"
           >
             <X className="w-5 h-5" />
           </button>
@@ -403,14 +425,15 @@ export const CreateSaleInvoiceModal: React.FC<CreateSaleInvoiceModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 transition"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
             >
-              Cancel
+              <ArrowLeft className="w-4 h-4" />
+              <span>Cancel / Back</span>
             </button>
             <button
               type="submit"
               disabled={subtotal <= 0}
-              className="px-6 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 transition active:scale-95 flex items-center gap-1.5"
+              className="px-6 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               <span>Generate Invoice & Deduct Stock</span>

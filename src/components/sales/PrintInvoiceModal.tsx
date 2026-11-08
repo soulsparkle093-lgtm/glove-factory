@@ -1,5 +1,5 @@
-import React from 'react';
-import { X, Printer, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import React, { useEffect } from 'react';
+import { X, Printer, ShieldCheck, CheckCircle2, ArrowLeft } from 'lucide-react';
 import { useFactory } from '../../context/FactoryContext';
 import { SaleInvoice } from '../../types/factory';
 import { formatCurrency, formatDate } from '../../utils/factoryFormatters';
@@ -12,6 +12,17 @@ interface PrintInvoiceModalProps {
 export const PrintInvoiceModal: React.FC<PrintInvoiceModalProps> = ({ invoice, onClose }) => {
   const { settings, parties } = useFactory();
 
+  // Close on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
   const customerParty = parties.find(p => p.id === invoice.customerId);
 
   const handlePrint = () => {
@@ -19,10 +30,18 @@ export const PrintInvoiceModal: React.FC<PrintInvoiceModalProps> = ({ invoice, o
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[96vh] animate-in fade-in zoom-in-95 duration-150">
+    <div 
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+    >
+      <div 
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[96vh] my-auto animate-in fade-in zoom-in-95 duration-150"
+      >
         {/* Top bar (hidden in print) */}
-        <div className="px-6 py-3.5 bg-slate-900 text-white flex items-center justify-between print:hidden">
+        <div className="px-6 py-3.5 bg-slate-900 text-white flex items-center justify-between print:hidden shrink-0">
           <div className="flex items-center gap-2">
             <span className="font-bold text-sm">Invoice #{invoice.invoiceNo}</span>
             <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
@@ -35,14 +54,25 @@ export const PrintInvoiceModal: React.FC<PrintInvoiceModalProps> = ({ invoice, o
           <div className="flex items-center gap-2">
             <button
               onClick={handlePrint}
-              className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
+              className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>Print Invoice</span>
             </button>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg hover:bg-white/20 text-white transition ml-2"
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition cursor-pointer"
+              title="Close / Back (Esc)"
+              aria-label="Close / Back"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+              title="Close / Back (Esc)"
+              aria-label="Close / Back"
             >
               <X className="w-5 h-5" />
             </button>

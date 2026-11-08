@@ -17,16 +17,32 @@ import {
   FileText,
   AlertCircle,
   Loader2,
-  Truck
+  Truck,
+  ChevronDown,
+  ChevronUp,
+  ChevronRight,
+  Layers,
+  PackageCheck,
+  Check
 } from 'lucide-react';
 import { useFactory } from '../../context/FactoryContext';
 import { DistinctArticleStock, StockInHistoryItem, StockOutHistoryItem } from '../../types/factory';
 import { formatCurrency, formatDate, safeStringCompare } from '../../utils/factoryFormatters';
+import { 
+  db, 
+  collection, 
+  doc, 
+  setDoc, 
+  updateDoc, 
+  increment, 
+  arrayUnion 
+} from '../../firebase';
 
 export const StockManagement: React.FC = () => {
   const { 
     orders = [],
     stockManagement = [],
+    deliveryHistory = [],
     getDistinctArticles, 
     getStockInHistory, 
     getStockOutHistory,
@@ -107,12 +123,121 @@ export const StockManagement: React.FC = () => {
   const [deliverQty, setDeliverQty] = useState('');
   const [isSavingDeliver, setIsSavingDeliver] = useState(false);
 
+  // Bulk Delivery modal state (New Delivery / Deliver Stock button)
+  const [isBulkDeliveryOpen, setIsBulkDeliveryOpen] = useState(false);
+  const [bulkBillNo, setBulkBillNo] = useState('Bill No. 19');
+  const [bulkDeliveryDate, setBulkDeliveryDate] = useState(new Date().toISOString().split('T')[0]);
+  const [bulkReferenceNo, setBulkReferenceNo] = useState('');
+  const [bulkCustomerType, setBulkCustomerType] = useState<'existing' | 'new'>('existing');
+  const [bulkSelectedOrderId, setBulkSelectedOrderId] = useState('');
+  const [bulkCustomerName, setBulkCustomerName] = useState('');
+  const [deliveredItems, setDeliveredItems] = useState<Array<{
+    id: string;
+    articleName: string;
+    size: string;
+    availableStock: number;
+    qty: number;
+    rate: number;
+    detail: string;
+    amount: number;
+  }>>([]);
+  const [bulkArticleRows, setBulkArticleRows] = useState<Array<{
+    articleName: string;
+    availableStock: number;
+    size: string;
+    selected: boolean;
+    deliverQty: string;
+  }>>([]);
+  const [isSavingBulkDelivery, setIsSavingBulkDelivery] = useState(false);
+
+  // "Add Items" modal state inside Deliver Stock
+  const [isDeliverItemPickerOpen, setIsDeliverItemPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState('');
+  const [pickerNewItemOpen, setPickerNewItemOpen] = useState(false);
+  const [pickerNewItemName, setPickerNewItemName] = useState('');
+  const [pickerNewItemSize, setPickerNewItemSize] = useState('Standard');
+  const [pickerNewItemStock, setPickerNewItemStock] = useState('1000');
+  const [pickerArticleRows, setPickerArticleRows] = useState<Array<{
+    articleName: string;
+    size: string;
+    availableStock: number;
+    selected: boolean;
+    qty: string;
+    rate: string;
+    detail: string;
+  }>>([]);
+
+  // Add Item / New Stock Entry modal state (+ Add Item / + New Stock Entry button)
+  const [isAddItemModalOpen, setIsAddItemModalOpen] = useState(false);
+  const [addItemDate, setAddItemDate] = useState(new Date().toISOString().split('T')[0]);
+  const [addItemSource, setAddItemSource] = useState('Factory Workshop / Direct Stock');
+  const [addItemBillNo, setAddItemBillNo] = useState('');
+  const [addItemSearch, setAddItemSearch] = useState('');
+  const [isAddingNewCustomArticle, setIsAddingNewCustomArticle] = useState(false);
+  const [newCustomArticleInput, setNewCustomArticleInput] = useState('');
+  const [addItemEntries, setAddItemEntries] = useState<Array<{
+    articleName: string;
+    size: string;
+    qty: string;
+    rate: string;
+    selected: boolean;
+  }>>([]);
+  const [isSavingAddItem, setIsSavingAddItem] = useState(false);
+
+  // Transfer to Order modal state (from Transaction History)
+  const [transferTargetRow, setTransferTargetRow] = useState<any | null>(null);
+  const [transferOrderId, setTransferOrderId] = useState('');
+  const [transferQty, setTransferQty] = useState('');
+  const [transferDate, setTransferDate] = useState(new Date().toISOString().split('T')[0]);
+  const [transferNote, setTransferNote] = useState('');
+  const [isSavingTransfer, setIsSavingTransfer] = useState(false);
+
+  // Expanded deliveries in Stock OUT Report
+  const [expandedDeliveries, setExpandedDeliveries] = useState<Set<string>>(new Set());
+
   // Edit return / wapsi state
   const [editingReturnItem, setEditingReturnItem] = useState<{ id: string; date: string; qty: number; remarks: string; rate?: number } | null>(null);
   const [editReturnDate, setEditReturnDate] = useState('');
   const [editReturnQty, setEditReturnQty] = useState('');
   const [editReturnRemarks, setEditReturnRemarks] = useState('');
   const [isSavingReturnEdit, setIsSavingReturnEdit] = useState(false);
+
+  // Global ESC key listener to dismiss any active modal and prevent screen freeze
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (isDeliverItemPickerOpen) setIsDeliverItemPickerOpen(false);
+        else if (isBulkDeliveryOpen) setIsBulkDeliveryOpen(false);
+        else if (isAddItemModalOpen) setIsAddItemModalOpen(false);
+        else if (transferTargetRow) setTransferTargetRow(null);
+        else if (deliverTarget) setDeliverTarget(null);
+        else if (isAllocateModalOpen) setIsAllocateModalOpen(false);
+        else if (isInModalOpen) setIsInModalOpen(false);
+        else if (isOutModalOpen) setIsOutModalOpen(false);
+        else if (isWapsiModalOpen) setIsWapsiModalOpen(false);
+        else if (editingInItem) setEditingInItem(null);
+        else if (editingOutItem) setEditingOutItem(null);
+        else if (editingReturnItem) setEditingReturnItem(null);
+        else if (deletingItem) setDeletingItem(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    isDeliverItemPickerOpen,
+    isBulkDeliveryOpen,
+    isAddItemModalOpen,
+    transferTargetRow,
+    deliverTarget,
+    isAllocateModalOpen,
+    isInModalOpen,
+    isOutModalOpen,
+    isWapsiModalOpen,
+    editingInItem,
+    editingOutItem,
+    editingReturnItem,
+    deletingItem
+  ]);
 
   // Sync URL hash with selected article (/stock-management/[article_name])
   useEffect(() => {
@@ -212,6 +337,7 @@ export const StockManagement: React.FC = () => {
     const list: Array<{
       id: string;
       date: string;
+      transferDate?: string;
       formattedDateTime: string;
       source: string;
       orderLink: string;
@@ -219,6 +345,7 @@ export const StockManagement: React.FC = () => {
       qtyOut?: number;
       type: 'IN' | 'OUT' | 'RETURN';
       billNo?: string;
+      canTransfer?: boolean;
       raw: any;
     }> = [];
 
@@ -226,13 +353,17 @@ export const StockManagement: React.FC = () => {
     selectedArticleInHistory.forEach(item => {
       const raw = item.rawEntry as Record<string, any> | undefined;
       const isReturn = raw?.type === 'RETURN' || Number(item.quantity) < 0;
+      const transferDate = raw?.transferDate || '';
       const orderLink = raw?.orderNo 
         ? `Against Order: ${raw.customerName ? `${raw.customerName} ` : ''}(${raw.orderNo})`
         : (raw?.customerOrder ? `Against Order: ${raw.customerOrder}` : 'Direct Cutting / Stock');
+      const isUnlinked = !raw?.orderId && (!raw?.orderNo || raw?.orderNo === '') && (!raw?.customerOrder || raw?.customerOrder.toLowerCase().includes('direct') || raw?.customerOrder.toLowerCase().includes('stock'));
+      const canTransfer = !isReturn && isUnlinked;
 
       list.push({
         id: item.id,
         date: item.date,
+        transferDate,
         formattedDateTime: item.formattedDateTime || `${formatDate(item.date)} ${item.time || ''}`.trim(),
         source: item.source || 'From Cutting Master',
         orderLink,
@@ -240,6 +371,7 @@ export const StockManagement: React.FC = () => {
         qtyOut: isReturn ? Math.abs(item.quantity) : undefined,
         type: isReturn ? 'RETURN' : 'IN',
         billNo: item.billNo || (raw?.billNo ? `Bill ${raw.billNo}` : '—'),
+        canTransfer,
         raw: item
       });
     });
@@ -254,12 +386,14 @@ export const StockManagement: React.FC = () => {
       list.push({
         id: item.id,
         date: item.date,
+        transferDate: raw?.transferDate || '',
         formattedDateTime: formatDate(item.date),
         source: item.customerName ? `Dispatched to Customer (${item.customerName})` : 'Dispatched to Customer',
         orderLink,
         qtyOut: item.quantity,
         type: 'OUT',
         billNo: raw?.billNo || '—',
+        canTransfer: false,
         raw: item
       });
     });
@@ -622,6 +756,502 @@ export const StockManagement: React.FC = () => {
     }
   };
 
+  // Handle Opening Bulk Delivery Modal
+  const handleOpenBulkDelivery = () => {
+    const nextBillNo = `Bill No. ${deliveryHistory.length + 19}`;
+    setBulkBillNo(nextBillNo);
+    setBulkDeliveryDate(new Date().toISOString().split('T')[0]);
+    setBulkReferenceNo('');
+    const firstOrder = orders.length > 0 ? orders[0] : null;
+    setBulkSelectedOrderId(firstOrder ? firstOrder.id : '');
+    setBulkCustomerName(firstOrder?.customerName || '');
+    setBulkCustomerType('existing');
+    setDeliveredItems([]);
+    setIsDeliverItemPickerOpen(false);
+    setIsBulkDeliveryOpen(true);
+  };
+
+  const handleOpenDeliverItemPicker = () => {
+    setPickerSearch('');
+    setPickerNewItemOpen(false);
+    setPickerNewItemName('');
+    const existingMap = new Map(deliveredItems.map(item => [item.articleName, item]));
+    const available = distinctArticles.filter(a => a.availableStock > 0);
+    setPickerArticleRows(
+      available.map(a => {
+        const existing = existingMap.get(a.articleName);
+        return {
+          articleName: a.articleName,
+          size: (a.sizes && a.sizes.length > 0) ? a.sizes.join(', ') : 'Standard',
+          availableStock: a.availableStock,
+          selected: !!existing,
+          qty: existing ? String(existing.qty) : '',
+          rate: existing && existing.rate > 0 ? String(existing.rate) : '',
+          detail: existing ? existing.detail : ''
+        };
+      })
+    );
+    setIsDeliverItemPickerOpen(true);
+  };
+
+  const handleTogglePickerRow = (articleName: string) => {
+    setPickerArticleRows(prev => prev.map(row => {
+      if (row.articleName === articleName) {
+        const nextSel = !row.selected;
+        return {
+          ...row,
+          selected: nextSel,
+          qty: nextSel && !row.qty ? (row.availableStock > 0 ? String(row.availableStock) : '100') : row.qty
+        };
+      }
+      return row;
+    }));
+  };
+
+  const handlePickerFieldChange = (articleName: string, field: 'qty' | 'rate' | 'detail', value: string) => {
+    setPickerArticleRows(prev => prev.map(row => {
+      if (row.articleName === articleName) {
+        return { ...row, [field]: value };
+      }
+      return row;
+    }));
+  };
+
+  const handleAddPickerCustomItem = () => {
+    const name = pickerNewItemName.trim();
+    if (!name) {
+      showToast('Enter article name', 'error');
+      return;
+    }
+    const stock = Number(pickerNewItemStock) || 1000;
+    const newRow = {
+      articleName: name,
+      size: pickerNewItemSize.trim() || 'Standard',
+      availableStock: stock,
+      selected: true,
+      qty: String(stock),
+      rate: '',
+      detail: ''
+    };
+    setPickerArticleRows(prev => [newRow, ...prev]);
+    setPickerNewItemName('');
+    setPickerNewItemOpen(false);
+    showToast(`Added ${name} to article list with ${stock.toLocaleString()} pairs stock.`);
+  };
+
+  const handleDonePicker = () => {
+    const selected = pickerArticleRows.filter(r => r.selected && Number(r.qty) > 0);
+    if (selected.length === 0) {
+      showToast('Select at least one article and enter quantity.', 'error');
+      return;
+    }
+    for (const r of selected) {
+      const q = Number(r.qty);
+      if (q > r.availableStock) {
+        showToast(`Quantity for ${r.articleName} (${q}) exceeds available stock (${r.availableStock}).`, 'error');
+        return;
+      }
+    }
+    const newDelivered = selected.map(r => {
+      const q = Number(r.qty);
+      const rateVal = Number(r.rate) || 0;
+      return {
+        id: `${r.articleName}-${Date.now()}`,
+        articleName: r.articleName,
+        size: r.size,
+        availableStock: r.availableStock,
+        qty: q,
+        rate: rateVal,
+        detail: r.detail.trim(),
+        amount: q * rateVal
+      };
+    });
+    setDeliveredItems(newDelivered);
+    setIsDeliverItemPickerOpen(false);
+    showToast(`Added ${newDelivered.length} article(s) to delivery bill.`);
+  };
+
+  const handleRemoveDeliveredItem = (articleName: string) => {
+    setDeliveredItems(prev => prev.filter(i => i.articleName !== articleName));
+  };
+
+  const handleSaveBulkDelivery = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (deliveredItems.length === 0) {
+      showToast('Please add at least one article to deliver using [+ Add Item].', 'error');
+      return;
+    }
+    const customer = bulkCustomerName.trim() || (bulkCustomerType === 'existing' && bulkSelectedOrderId ? (orders.find(o => o.id === bulkSelectedOrderId)?.customerName || 'Customer') : 'Direct Customer');
+    if (!bulkDeliveryDate) {
+      showToast('Please select a delivery date.', 'error');
+      return;
+    }
+    for (const item of deliveredItems) {
+      if (item.qty > item.availableStock) {
+        showToast(`Quantity for ${item.articleName} exceeds available stock (${item.availableStock}).`, 'error');
+        return;
+      }
+    }
+
+    setIsSavingBulkDelivery(true);
+    try {
+      const targetOrder = orders.find(o => o.id === bulkSelectedOrderId);
+      const now = new Date().toISOString();
+      const batchId = `DEL-${Date.now()}`;
+      const totalDelivered = deliveredItems.reduce((sum, item) => sum + item.qty, 0);
+
+      for (const item of deliveredItems) {
+        const qty = item.qty;
+        const matched = stockManagement.find(s => 
+          (s.article || s.articleName || '').trim().toLowerCase() === item.articleName.trim().toLowerCase()
+        );
+
+        if (matched && targetOrder && deliverFromStock) {
+          await deliverFromStock({
+            stockId: matched.id,
+            orderId: targetOrder.id,
+            customerName: customer,
+            quantity: qty,
+            date: bulkDeliveryDate
+          });
+        } else if (db) {
+          const normId = item.articleName.replace(/[^a-zA-Z0-9_-]/g, '_');
+          const deliveryRef = doc(collection(db, 'stock_delivery_history'));
+          const articleRef = doc(db, 'article_stock', normId);
+
+          const deliveryDoc = {
+            id: deliveryRef.id,
+            deliveryGroupId: batchId,
+            billNo: bulkBillNo,
+            referenceNo: bulkReferenceNo.trim(),
+            biltyNo: bulkReferenceNo.trim(),
+            orderId: targetOrder?.id || '',
+            orderNo: targetOrder?.orderNo || '',
+            date: bulkDeliveryDate,
+            deliveryDate: bulkDeliveryDate,
+            customerName: customer,
+            partyName: customer,
+            article: item.articleName,
+            size: item.size || 'Standard',
+            quantity: qty,
+            rate: item.rate || 0,
+            amount: item.amount || 0,
+            detail: item.detail || '',
+            createdAt: now
+          };
+
+          await setDoc(deliveryRef, deliveryDoc);
+          await updateDoc(articleRef, {
+            totalAvailable: increment(-qty),
+            totalDelivered: increment(qty),
+            deliveryHistory: arrayUnion({
+              date: bulkDeliveryDate,
+              orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Bilty: ${bulkReferenceNo}` : bulkBillNo),
+              customerName: customer,
+              pairs: qty,
+              remainingAfter: Math.max(0, item.availableStock - qty),
+              deliveryId: deliveryRef.id,
+              billNo: bulkBillNo,
+              rate: item.rate || 0,
+              amount: item.amount || 0,
+              detail: item.detail || ''
+            })
+          }).catch(async () => {
+            await setDoc(articleRef, {
+              articleName: item.articleName,
+              totalAvailable: Math.max(0, item.availableStock - qty),
+              totalDelivered: qty,
+              deliveryHistory: [{
+                date: bulkDeliveryDate,
+                orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Bilty: ${bulkReferenceNo}` : bulkBillNo),
+                customerName: customer,
+                pairs: qty,
+                remainingAfter: Math.max(0, item.availableStock - qty),
+                deliveryId: deliveryRef.id,
+                billNo: bulkBillNo,
+                rate: item.rate || 0,
+                amount: item.amount || 0,
+                detail: item.detail || ''
+              }]
+            }, { merge: true });
+          });
+
+          if (targetOrder) {
+            const subHistoryRef = doc(collection(db, 'customer_orders', targetOrder.id, 'order_history'));
+            await setDoc(subHistoryRef, {
+              date: bulkDeliveryDate,
+              actionType: 'dispatched_to_customer',
+              quantity: qty,
+              article: item.articleName,
+              size: item.size || 'Standard',
+              notes: bulkReferenceNo ? `Bilty/Ref: ${bulkReferenceNo}` : `${bulkBillNo} from Stock Management`,
+              createdAt: now
+            });
+          }
+        }
+      }
+
+      showToast(`Delivery recorded (${bulkBillNo}): ${totalDelivered.toLocaleString()} pairs across ${deliveredItems.length} article(s).`);
+      setIsBulkDeliveryOpen(false);
+      setDeliveredItems([]);
+    } catch (err) {
+      console.error('Error processing bulk delivery:', err);
+      showToast(err instanceof Error ? err.message : 'Could not process bulk delivery.', 'error');
+    } finally {
+      setIsSavingBulkDelivery(false);
+    }
+  };
+
+  // Handle Opening Add Item Modal
+  const handleOpenAddItemModal = () => {
+    setAddItemDate(new Date().toISOString().split('T')[0]);
+    setAddItemSource('Factory Workshop / Direct Stock');
+    setAddItemBillNo('');
+    setAddItemSearch('');
+    setIsAddingNewCustomArticle(false);
+    setNewCustomArticleInput('');
+    setAddItemEntries(
+      distinctArticles.map(a => ({
+        articleName: a.articleName,
+        size: (a.sizes && a.sizes.length > 0) ? a.sizes[0] : 'Standard',
+        qty: '',
+        rate: String(a.unitRate || 450),
+        selected: false
+      }))
+    );
+    setIsAddItemModalOpen(true);
+  };
+
+  const handleAddCustomArticleEntry = () => {
+    const trimmed = newCustomArticleInput.trim();
+    if (!trimmed) {
+      showToast('Enter article name first.', 'error');
+      return;
+    }
+    const already = addItemEntries.find(e => e.articleName.toLowerCase() === trimmed.toLowerCase());
+    if (already) {
+      showToast('Article already exists in list.', 'error');
+      return;
+    }
+    setAddItemEntries(prev => [
+      {
+        articleName: trimmed,
+        size: 'Standard',
+        qty: '',
+        rate: '450',
+        selected: true
+      },
+      ...prev
+    ]);
+    setNewCustomArticleInput('');
+    setIsAddingNewCustomArticle(false);
+    showToast(`Added ${trimmed} to stock entry list.`);
+  };
+
+  const handleToggleAddItem = (articleName: string) => {
+    setAddItemEntries(prev => prev.map(entry => {
+      if (entry.articleName === articleName) {
+        return { ...entry, selected: !entry.selected };
+      }
+      return entry;
+    }));
+  };
+
+  const handleAddItemFieldChange = (articleName: string, field: 'size' | 'qty' | 'rate', val: string) => {
+    setAddItemEntries(prev => prev.map(entry => {
+      if (entry.articleName === articleName) {
+        return { ...entry, [field]: val };
+      }
+      return entry;
+    }));
+  };
+
+  const handleSaveAddItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const selected = addItemEntries.filter(e => e.selected && Number(e.qty) > 0);
+    if (selected.length === 0) {
+      showToast('Select at least one item with a valid positive quantity.', 'error');
+      return;
+    }
+    if (!addItemDate) {
+      showToast('Please select a date.', 'error');
+      return;
+    }
+    setIsSavingAddItem(true);
+    try {
+      for (const item of selected) {
+        const qty = Number(item.qty);
+        const rate = Number(item.rate) || 0;
+        await addStockReceipt({
+          article: item.articleName,
+          size: item.size || 'Standard',
+          quantity: qty,
+          date: addItemDate,
+          source: addItemSource.trim() || 'Factory Workshop / Direct Stock',
+          totalBalance: qty * rate
+        });
+      }
+      const totalPairs = selected.reduce((sum, i) => sum + Number(i.qty), 0);
+      showToast(`Stock IN recorded: ${totalPairs.toLocaleString()} pairs added across ${selected.length} items.`);
+      setIsAddItemModalOpen(false);
+    } catch (err) {
+      console.error('Error adding stock items:', err);
+      showToast(err instanceof Error ? err.message : 'Could not add stock items.', 'error');
+    } finally {
+      setIsSavingAddItem(false);
+    }
+  };
+
+  // Handle Transfer to Order Modal
+  const handleOpenTransferModal = (row: any) => {
+    setTransferTargetRow(row);
+    setTransferOrderId(orders.length > 0 ? orders[0].id : '');
+    setTransferQty(String(row.qtyIn || ''));
+    setTransferDate(new Date().toISOString().split('T')[0]);
+    setTransferNote(`Transferred to Order (Original Received: ${formatDate(row.date)})`);
+  };
+
+  const handleSaveTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!transferTargetRow || !selectedArticleName) return;
+    const qty = Number(transferQty);
+    if (!transferOrderId) {
+      showToast('Please select a customer order to transfer to.', 'error');
+      return;
+    }
+    if (!Number.isFinite(qty) || qty <= 0) {
+      showToast('Enter a valid positive transfer quantity.', 'error');
+      return;
+    }
+    const chosenOrder = orders.find(o => o.id === transferOrderId);
+    if (!chosenOrder) {
+      showToast('Selected customer order not found.', 'error');
+      return;
+    }
+    setIsSavingTransfer(true);
+    try {
+      const now = new Date().toISOString();
+      if (db) {
+        // 1. If row has raw entry id, update it in cuttingEntries
+        if (transferTargetRow.id) {
+          const cuttingRef = doc(db, 'cuttingEntries', transferTargetRow.id);
+          await updateDoc(cuttingRef, {
+            orderId: chosenOrder.id,
+            orderNo: chosenOrder.orderNo,
+            customerOrder: `${chosenOrder.customerName || ''} (${chosenOrder.orderNo})`.trim(),
+            transferDate: transferDate,
+            updatedAt: now
+          }).catch(() => {
+            // Document might be in another collection or local
+          });
+        }
+
+        // 2. Add to Order Cutting History (sub-collection customer_orders/{id}/order_history)
+        const subHistoryRef = doc(collection(db, 'customer_orders', chosenOrder.id, 'order_history'));
+        await setDoc(subHistoryRef, {
+          date: transferDate,
+          actionType: 'stock_received',
+          quantity: qty,
+          personName: transferTargetRow.source || 'Stock Transfer',
+          article: selectedArticleName,
+          notes: transferNote || `Transferred from Stock (Received: ${formatDate(transferTargetRow.date)})`,
+          createdAt: now
+        });
+
+        // 3. Add to order_dispatch_history
+        const topHistoryRef = doc(collection(db, 'order_dispatch_history'));
+        await setDoc(topHistoryRef, {
+          orderId: chosenOrder.id,
+          orderNo: chosenOrder.orderNo,
+          date: transferDate,
+          actionType: 'stock_received',
+          quantity: qty,
+          personName: transferTargetRow.source || 'Stock Transfer',
+          article: selectedArticleName,
+          notes: transferNote || `Transferred from Stock (Received: ${formatDate(transferTargetRow.date)})`,
+          createdAt: now
+        });
+      }
+
+      showToast(`Transferred ${qty.toLocaleString()} pairs of ${selectedArticleName} to Order #${chosenOrder.orderNo} (${chosenOrder.customerName}).`);
+      setTransferTargetRow(null);
+    } catch (err) {
+      console.error('Error transferring stock to order:', err);
+      showToast(err instanceof Error ? err.message : 'Could not transfer stock to order.', 'error');
+    } finally {
+      setIsSavingTransfer(false);
+    }
+  };
+
+  // Toggle delivery expansion in Stock OUT report
+  const toggleDeliveryExpand = (id: string) => {
+    setExpandedDeliveries(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Grouped deliveries for Stock OUT Report tab
+  const groupedDeliveries = useMemo(() => {
+    const groupMap = new Map<string, {
+      id: string;
+      date: string;
+      customerName: string;
+      referenceNo: string;
+      totalPairs: number;
+      items: Array<{
+        id: string;
+        article: string;
+        size: string;
+        quantity: number;
+        orderNo?: string;
+      }>;
+    }>();
+
+    (deliveryHistory || []).forEach(d => {
+      const date = d.date || (d as any).deliveryDate || '';
+      const customer = d.customerName || (d as any).partyName || 'Customer';
+      const ref = (d as any).referenceNo || (d as any).biltyNo || d.orderNo || '';
+      const groupId = (d as any).deliveryGroupId || `${customer}__${date}__${ref || d.id}`;
+
+      if (!groupMap.has(groupId)) {
+        groupMap.set(groupId, {
+          id: groupId,
+          date,
+          customerName: customer,
+          referenceNo: ref || (d.orderNo ? `Order #${d.orderNo}` : '—'),
+          totalPairs: 0,
+          items: []
+        });
+      }
+
+      const g = groupMap.get(groupId)!;
+      g.totalPairs += Number(d.quantity) || 0;
+      g.items.push({
+        id: d.id,
+        article: d.article || 'Article',
+        size: d.size || 'Standard',
+        quantity: Number(d.quantity) || 0,
+        orderNo: d.orderNo
+      });
+    });
+
+    const list = Array.from(groupMap.values());
+    return list.sort((a, b) => safeStringCompare(b.date, a.date));
+  }, [deliveryHistory]);
+
+  const filteredGroupedDeliveries = useMemo(() => {
+    if (!searchQuery.trim()) return groupedDeliveries;
+    const q = searchQuery.toLowerCase().trim();
+    return groupedDeliveries.filter(g => 
+      g.customerName.toLowerCase().includes(q) ||
+      g.referenceNo.toLowerCase().includes(q) ||
+      g.items.some(i => i.article.toLowerCase().includes(q))
+    );
+  }, [groupedDeliveries, searchQuery]);
+
   // =========================================================================
   // FULL PAGE VIEW (When Article is Clicked - Like NAEM Ledger / Wasooli Page)
   // =========================================================================
@@ -776,19 +1406,18 @@ export const StockManagement: React.FC = () => {
               <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-600">
                 <tr>
                   <th className="px-4 py-3.5">DATE</th>
-                  <th className="px-4 py-3.5">SOURCE / Cutting Master (Manik)</th>
+                  <th className="px-4 py-3.5">TRANSFER DATE</th>
+                  <th className="px-4 py-3.5">SOURCE / CUTTING MASTER</th>
                   <th className="px-4 py-3.5">ORDER LINK</th>
-                  <th className="px-4 py-3.5 text-right">QTY IN</th>
-                  <th className="px-4 py-3.5 text-right">QTY OUT</th>
-                  <th className="px-4 py-3.5 text-center">TYPE</th>
+                  <th className="px-4 py-3.5 text-right">QTY</th>
                   <th className="px-4 py-3.5">BILL NO</th>
-                  <th className="px-4 py-3.5 text-center">ACTION</th>
+                  <th className="px-4 py-3.5 text-center">ACT</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
                 {filteredCombinedHistory.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-slate-400">
+                    <td colSpan={7} className="py-12 text-center text-slate-400">
                       <Boxes className="mx-auto mb-2 h-8 w-8 opacity-40" />
                       <p className="font-semibold text-slate-600">No movement records found</p>
                       <p className="mt-1 text-xs text-slate-400">Click [IN / BUY] or receive cutting lots to log stock movements.</p>
@@ -798,50 +1427,66 @@ export const StockManagement: React.FC = () => {
                   filteredCombinedHistory.map(row => (
                     <tr key={row.id} className="hover:bg-slate-50 transition">
                       <td className="px-4 py-3.5 font-mono text-slate-900 font-semibold whitespace-nowrap">
-                        {row.formattedDateTime}
+                        <div className="flex flex-col">
+                          <span>{row.formattedDateTime}</span>
+                          {row.transferDate ? (
+                            <span className="text-[10px] text-slate-400 font-normal">
+                              Received: {formatDate(row.date)}
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        {row.transferDate ? (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[11px] font-mono font-bold text-blue-700 border border-blue-200">
+                            <Calendar className="h-3 w-3" />
+                            {formatDate(row.transferDate)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300 font-mono">—</span>
+                        )}
                       </td>
                       <td className="px-4 py-3.5 text-slate-800 font-semibold">
                         {row.source}
                       </td>
                       <td className="px-4 py-3.5 text-slate-600">
-                        <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-mono text-slate-700">
+                        <span className={`rounded-md px-2 py-0.5 text-[11px] font-mono font-semibold ${
+                          row.orderLink.toLowerCase().includes('against order') || row.orderLink.toLowerCase().includes('to order')
+                            ? 'bg-blue-50 text-blue-800 border border-blue-200'
+                            : 'bg-slate-100 text-slate-700'
+                        }`}>
                           {row.orderLink}
                         </span>
                       </td>
-                      <td className="px-4 py-3.5 text-right font-mono font-bold">
+                      <td className="px-4 py-3.5 text-right font-mono font-bold whitespace-nowrap">
                         {row.qtyIn !== undefined ? (
-                          <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                            +{row.qtyIn.toLocaleString()} IN
+                          <span className="text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md border border-emerald-200 text-xs font-mono font-bold">
+                            +{row.qtyIn.toLocaleString()}
+                          </span>
+                        ) : row.qtyOut !== undefined ? (
+                          <span className="text-rose-700 bg-rose-50 px-2.5 py-1 rounded-md border border-rose-200 text-xs font-mono font-bold">
+                            -{row.qtyOut.toLocaleString()}
                           </span>
                         ) : (
                           <span className="text-slate-300">—</span>
                         )}
-                      </td>
-                      <td className="px-4 py-3.5 text-right font-mono font-bold">
-                        {row.qtyOut !== undefined ? (
-                          <span className="text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
-                            -{row.qtyOut.toLocaleString()} OUT
-                          </span>
-                        ) : (
-                          <span className="text-slate-300">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3.5 text-center">
-                        <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
-                          row.type === 'IN' 
-                            ? 'bg-emerald-100 text-emerald-800' 
-                            : row.type === 'RETURN' 
-                              ? 'bg-amber-100 text-amber-800' 
-                              : 'bg-purple-100 text-purple-800'
-                        }`}>
-                          {row.type}
-                        </span>
                       </td>
                       <td className="px-4 py-3.5 font-mono text-slate-500">
                         {row.billNo || '—'}
                       </td>
                       <td className="px-4 py-3.5 text-center">
-                        <div className="flex items-center justify-center gap-1.5">
+                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                          {row.canTransfer && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenTransferModal(row)}
+                              className="inline-flex items-center gap-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1 text-[11px] font-bold shadow-2xs transition active:scale-95 cursor-pointer whitespace-nowrap"
+                              title="Transfer this stock entry to a customer order"
+                            >
+                              <Plus className="h-3 w-3" />
+                              <span>Add to Order</span>
+                            </button>
+                          )}
                           {row.type === 'RETURN' ? (
                             <button
                               type="button"
@@ -882,7 +1527,7 @@ export const StockManagement: React.FC = () => {
                                 setEditingOutItem(row.raw);
                                 setEditOutQty(String(row.qtyOut || ''));
                                 setEditOutDate(row.date);
-                                setEditOutCustomer(row.raw.customerName || '');
+                                setEditOutCustomer(row.raw?.customerName || '');
                               }}
                               className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition"
                               title="Edit Stock Out"
@@ -914,11 +1559,25 @@ export const StockManagement: React.FC = () => {
 
         {/* Modal: IN / BUY */}
         {isInModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsInModalOpen(false);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <h3 className="text-lg font-black text-emerald-800">Add Stock IN / Buy</h3>
-                <button type="button" onClick={() => setIsInModalOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsInModalOpen(false)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
+                >
                   <X className="h-5 w-5" />
                 </button>
               </div>
@@ -952,8 +1611,15 @@ export const StockManagement: React.FC = () => {
                   </div>
                 </div>
                 <div className="mt-5 flex justify-end gap-2.5 pt-3 border-t border-slate-100">
-                  <button type="button" onClick={() => setIsInModalOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-                  <button type="submit" disabled={isSavingIn} className="rounded-xl bg-emerald-600 px-5 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50">
+                  <button
+                    type="button"
+                    onClick={() => setIsInModalOpen(false)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
+                  </button>
+                  <button type="submit" disabled={isSavingIn} className="rounded-xl bg-emerald-600 px-5 py-2 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-50 transition cursor-pointer">
                     {isSavingIn ? 'Saving...' : 'Add Stock IN'}
                   </button>
                 </div>
@@ -964,11 +1630,25 @@ export const StockManagement: React.FC = () => {
 
         {/* Modal: OUT / SELL */}
         {isOutModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsOutModalOpen(false);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <h3 className="text-lg font-black text-purple-800">Dispatch Stock OUT / Sell</h3>
-                <button type="button" onClick={() => setIsOutModalOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsOutModalOpen(false)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
+                >
                   <X className="h-5 w-5" />
                 </button>
               </div>
@@ -1001,8 +1681,15 @@ export const StockManagement: React.FC = () => {
                   </select>
                 </div>
                 <div className="mt-5 flex justify-end gap-2.5 pt-3 border-t border-slate-100">
-                  <button type="button" onClick={() => setIsOutModalOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-                  <button type="submit" disabled={isSavingOut} className="rounded-xl bg-purple-600 px-5 py-2 text-xs font-bold text-white hover:bg-purple-700 disabled:opacity-50">
+                  <button
+                    type="button"
+                    onClick={() => setIsOutModalOpen(false)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
+                  </button>
+                  <button type="submit" disabled={isSavingOut} className="rounded-xl bg-purple-600 px-5 py-2 text-xs font-bold text-white hover:bg-purple-700 disabled:opacity-50 transition cursor-pointer">
                     {isSavingOut ? 'Saving...' : 'Dispatch OUT'}
                   </button>
                 </div>
@@ -1013,11 +1700,25 @@ export const StockManagement: React.FC = () => {
 
         {/* Modal: ALLOCATE TO ORDER */}
         {isAllocateModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsAllocateModalOpen(false);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <h3 className="text-lg font-black text-blue-800">Allocate Stock to Order</h3>
-                <button type="button" onClick={() => setIsAllocateModalOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsAllocateModalOpen(false)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
+                >
                   <X className="h-5 w-5" />
                 </button>
               </div>
@@ -1045,8 +1746,15 @@ export const StockManagement: React.FC = () => {
                   Available in physical stock: <span className="font-bold">{selectedArticleSummary.availableStock} pairs</span>
                 </div>
                 <div className="mt-5 flex justify-end gap-2.5 pt-3 border-t border-slate-100">
-                  <button type="button" onClick={() => setIsAllocateModalOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-                  <button type="submit" disabled={isSavingAllocate} className="rounded-xl bg-blue-600 px-5 py-2 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50">
+                  <button
+                    type="button"
+                    onClick={() => setIsAllocateModalOpen(false)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
+                  </button>
+                  <button type="submit" disabled={isSavingAllocate} className="rounded-xl bg-blue-600 px-5 py-2 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50 transition cursor-pointer">
                     {isSavingAllocate ? 'Allocating...' : 'Confirm Allocation'}
                   </button>
                 </div>
@@ -1057,11 +1765,25 @@ export const StockManagement: React.FC = () => {
 
         {/* Modal: RETURN / WAPSI ADD */}
         {isWapsiModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsWapsiModalOpen(false);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <h3 className="text-lg font-black text-rose-800">Add Stock Return / Wapsi</h3>
-                <button type="button" onClick={() => setIsWapsiModalOpen(false)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsWapsiModalOpen(false)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
+                >
                   <X className="h-5 w-5" />
                 </button>
               </div>
@@ -1094,8 +1816,15 @@ export const StockManagement: React.FC = () => {
                   <input type="text" placeholder="Optional notes" value={wapsiNotes} onChange={e => setWapsiNotes(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs" />
                 </div>
                 <div className="mt-5 flex justify-end gap-2.5 pt-3 border-t border-slate-100">
-                  <button type="button" onClick={() => setIsWapsiModalOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100">Cancel</button>
-                  <button type="submit" disabled={isSavingWapsi} className="rounded-xl bg-gradient-to-r from-orange-600 to-rose-600 px-5 py-2 text-xs font-bold text-white hover:from-orange-700 hover:to-rose-700 disabled:opacity-50">
+                  <button
+                    type="button"
+                    onClick={() => setIsWapsiModalOpen(false)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
+                  </button>
+                  <button type="submit" disabled={isSavingWapsi} className="rounded-xl bg-gradient-to-r from-orange-600 to-rose-600 px-5 py-2 text-xs font-bold text-white hover:from-orange-700 hover:to-rose-700 disabled:opacity-50 transition cursor-pointer">
                     {isSavingWapsi ? 'Saving...' : 'Add Wapsi'}
                   </button>
                 </div>
@@ -1106,10 +1835,31 @@ export const StockManagement: React.FC = () => {
 
         {/* Edit Stock IN Entry Modal */}
         {editingInItem && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
-              <h3 className="text-base font-bold text-slate-900">Edit Stock In Receipt</h3>
-              <p className="mt-1 text-xs text-slate-500">{editingInItem.source}</p>
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setEditingInItem(null);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Edit Stock In Receipt</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">{editingInItem.source}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingInItem(null)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
               <form onSubmit={handleSaveInEdit} className="mt-4 space-y-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700">Date</label>
@@ -1136,14 +1886,15 @@ export const StockManagement: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setEditingInItem(null)}
-                    className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
                   >
-                    Cancel
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
                   </button>
                   <button
                     type="submit"
                     disabled={isSavingInEdit}
-                    className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+                    className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50 transition cursor-pointer"
                   >
                     {isSavingInEdit ? 'Saving...' : 'Save Changes'}
                   </button>
@@ -1155,10 +1906,31 @@ export const StockManagement: React.FC = () => {
 
         {/* Edit Stock OUT Delivery Modal */}
         {editingOutItem && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
-              <h3 className="text-base font-bold text-slate-900">Edit Stock Delivery</h3>
-              <p className="mt-1 text-xs text-slate-500">{editingOutItem.orderName}</p>
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setEditingOutItem(null);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Edit Stock Delivery</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">{editingOutItem.orderName}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingOutItem(null)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
               <form onSubmit={handleSaveOutEdit} className="mt-4 space-y-3">
                 <div>
                   <label className="text-xs font-bold text-slate-700">Date</label>
@@ -1195,14 +1967,15 @@ export const StockManagement: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setEditingOutItem(null)}
-                    className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
                   >
-                    Cancel
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
                   </button>
                   <button
                     type="submit"
                     disabled={isSavingOutEdit}
-                    className="rounded-xl bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-700 disabled:opacity-50"
+                    className="rounded-xl bg-purple-600 px-4 py-2 text-xs font-bold text-white hover:bg-purple-700 disabled:opacity-50 transition cursor-pointer"
                   >
                     {isSavingOutEdit ? 'Saving...' : 'Save Changes'}
                   </button>
@@ -1214,14 +1987,24 @@ export const StockManagement: React.FC = () => {
 
         {/* Edit Return / Wapsi Modal */}
         {editingReturnItem && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setEditingReturnItem(null);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <h3 className="text-base font-bold text-slate-900">Edit Return / Wapsi Entry</h3>
                 <button
                   type="button"
                   onClick={() => setEditingReturnItem(null)}
-                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
                 >
                   <X className="h-5 w-5" />
                 </button>
@@ -1255,20 +2038,22 @@ export const StockManagement: React.FC = () => {
                     value={editReturnRemarks}
                     onChange={e => setEditReturnRemarks(e.target.value)}
                     className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:border-amber-500 focus:outline-none"
+                    required
                   />
                 </div>
                 <div className="mt-5 flex justify-end gap-2 pt-2 border-t border-slate-100">
                   <button
                     type="button"
                     onClick={() => setEditingReturnItem(null)}
-                    className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
                   >
-                    Cancel
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Cancel / Back</span>
                   </button>
                   <button
                     type="submit"
                     disabled={isSavingReturnEdit}
-                    className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-50 cursor-pointer shadow-xs"
+                    className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-50 cursor-pointer shadow-xs transition"
                   >
                     {isSavingReturnEdit ? 'Saving...' : 'Save Return'}
                   </button>
@@ -1278,29 +2063,49 @@ export const StockManagement: React.FC = () => {
           </div>
         )}
         {deletingItem && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-            <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
-              <div className="flex items-center gap-2 text-rose-600">
-                <AlertCircle className="h-5 w-5" />
-                <h3 className="text-base font-bold">Delete History Record?</h3>
-              </div>
-              <p className="mt-2 text-xs text-slate-600">
-                Are you sure you want to remove <span className="font-semibold text-slate-800">{deletingItem.label}</span>?
-                This will automatically update the calculated available balance.
-              </p>
-              <div className="mt-5 flex justify-end gap-2">
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setDeletingItem(null);
+            }}
+          >
+            <div
+              className="w-full max-w-sm rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-2 text-rose-600">
+                  <AlertCircle className="h-5 w-5" />
+                  <h3 className="text-base font-bold">Delete History Record?</h3>
+                </div>
                 <button
                   type="button"
                   onClick={() => setDeletingItem(null)}
-                  className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  aria-label="Close / Back"
+                  title="Close / Back (Esc)"
                 >
-                  Cancel
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-slate-600">
+                Are you sure you want to remove <span className="font-semibold text-slate-800">{deletingItem.label}</span>?
+                This will automatically update the calculated available balance.
+              </p>
+              <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setDeletingItem(null)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer flex items-center gap-1.5"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Cancel / Back</span>
                 </button>
                 <button
                   type="button"
                   disabled={isDeleting}
                   onClick={handleConfirmDelete}
-                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-50"
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-50 transition cursor-pointer"
                 >
                   {isDeleting ? 'Deleting...' : 'Delete'}
                 </button>
@@ -1333,6 +2138,15 @@ export const StockManagement: React.FC = () => {
               Automated glove stock tracking, receive cutting synchronization, and delivery management.
             </p>
           </div>
+          <button
+            type="button"
+            onClick={handleOpenBulkDelivery}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-600/20 transition active:scale-95 cursor-pointer whitespace-nowrap self-start sm:self-center"
+            title="Create Delivery / Deliver Stock to Customer"
+          >
+            <Truck className="h-4 w-4" />
+            <span>+ Deliver Stock / New Delivery</span>
+          </button>
         </div>
 
         {/* Total Stock Report Card 3-Metric Grid */}
@@ -1371,13 +2185,13 @@ export const StockManagement: React.FC = () => {
           </div>
         </div>
 
-        {/* 2 Tabs/Buttons side by side */}
-        <div className="mt-6 flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-100">
-          <div className="flex w-full sm:w-auto items-center gap-2 p-1 bg-slate-100 rounded-xl">
+        {/* Tabs and Action Buttons Header Bar - clean row with zero overlap */}
+        <div className="mt-6 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-4 border-t border-slate-100">
+          <div className="flex items-center gap-2 p-1 bg-slate-100 rounded-xl shrink-0">
             <button
               type="button"
               onClick={() => setActiveTab('IN')}
-              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg text-xs font-bold transition-all ${
+              className={`flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'IN'
                   ? 'bg-blue-600 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
@@ -1389,7 +2203,7 @@ export const StockManagement: React.FC = () => {
             <button
               type="button"
               onClick={() => setActiveTab('OUT')}
-              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg text-xs font-bold transition-all ${
+              className={`flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg text-xs font-bold transition-all ${
                 activeTab === 'OUT'
                   ? 'bg-purple-600 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
@@ -1400,48 +2214,49 @@ export const StockManagement: React.FC = () => {
             </button>
           </div>
 
-          {/* Search bar to search article by name (MG, drivers, etc.) */}
-          <div className="relative w-full sm:w-80">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          {/* Search Bar - small (w-52), clean right aligned */}
+          <div className="relative w-full sm:w-52 shrink-0">
+            <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
               type="search"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search article (e.g. MG, drivers)..."
+              placeholder={activeTab === 'IN' ? "Search article..." : "Search delivery..."}
               className="w-full rounded-xl border border-slate-300 py-2 pl-9 pr-3 text-xs bg-white text-slate-800 focus:border-blue-500 focus:outline-none"
             />
           </div>
         </div>
       </div>
 
-      {/* DISTINCT Articles List (Shows each article ONCE - Click navigates to Full Page) */}
-      <div className="rounded-2xl border border-slate-200 bg-white shadow-xs overflow-hidden">
-        <div className="border-b border-slate-200 bg-slate-50/70 p-4 sm:px-6 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full ${activeTab === 'IN' ? 'bg-blue-600' : 'bg-purple-600'}`} />
-            <h2 className="text-sm font-black text-slate-800 uppercase tracking-wider">
-              {activeTab === 'IN' ? 'Stock IN Articles Directory' : 'Stock OUT Articles Directory'}
-            </h2>
-          </div>
-          <span className="rounded-full bg-white border border-slate-200 px-3 py-1 font-mono text-xs font-bold text-slate-600">
-            {filteredArticles.length} Distinct Articles
-          </span>
-        </div>
-
-        <div className="divide-y divide-slate-100">
-          {filteredArticles.length === 0 ? (
-            <div className="p-12 text-center text-slate-400">
-              <Boxes className="mx-auto mb-2 h-10 w-10 opacity-30" />
-              <p className="text-sm font-semibold text-slate-600">No articles found</p>
-              <p className="mt-1 text-xs text-slate-400">
-                {searchQuery
-                  ? `No matching article for "${searchQuery}".`
-                  : 'Receive cutting lots or add products to start tracking stock.'}
-              </p>
+      {/* Directory / Reports Section */}
+      {activeTab === 'IN' ? (
+        /* ================= STOCK IN ARTICLES DIRECTORY ================= */
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-xs overflow-hidden">
+          <div className="border-b border-slate-200 bg-slate-50/70 p-4 sm:px-6 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-blue-600" />
+              <h2 className="text-sm font-black text-slate-800 uppercase tracking-wider">
+                Stock IN Articles Directory
+              </h2>
             </div>
-          ) : (
-            filteredArticles.map((article, index) => {
-              return (
+            <span className="rounded-full bg-white border border-slate-200 px-3 py-1 font-mono text-xs font-bold text-slate-600">
+              {filteredArticles.length} Distinct Articles
+            </span>
+          </div>
+
+          <div className="divide-y divide-slate-100">
+            {filteredArticles.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Boxes className="mx-auto mb-2 h-10 w-10 opacity-30" />
+                <p className="text-sm font-semibold text-slate-600">No articles found</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {searchQuery
+                    ? `No matching article for "${searchQuery}".`
+                    : 'Click [+ Add Item / + New Stock Entry] or receive cutting lots to log stock.'}
+                </p>
+              </div>
+            ) : (
+              filteredArticles.map((article, index) => (
                 <div
                   key={article.articleName}
                   onClick={() => handleSelectArticle(article.articleName)}
@@ -1462,51 +2277,185 @@ export const StockManagement: React.FC = () => {
                             Sizes: {article.sizes.join(', ')}
                           </span>
                         )}
-                        {activeTab === 'IN' ? (
-                          <span>Total Received: {article.totalIn.toLocaleString()} Pairs</span>
-                        ) : (
-                          <span>Total Delivered: {article.totalOut.toLocaleString()} Pairs</span>
-                        )}
+                        <span>Total Received: {article.totalIn.toLocaleString()} Pairs</span>
+                        <span className="text-slate-300">·</span>
+                        <span className="text-purple-600">Delivered: {article.totalOut.toLocaleString()} Pairs</span>
                       </div>
                     </div>
                   </div>
 
-                  {/* Right Side: Stock Count & Deliver Button */}
-                  <div className="flex items-center gap-3 sm:gap-4 shrink-0">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenDeliverModal(article);
-                      }}
-                      disabled={article.availableStock <= 0}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-3 py-1.5 text-xs font-bold text-white shadow-xs hover:shadow transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                      title={`Deliver ${article.articleName} to Customer Order`}
-                    >
-                      <Truck className="h-3.5 w-3.5" />
-                      <span>Deliver</span>
-                    </button>
-
-                    <div className="text-right">
-                      <div className="font-mono text-base sm:text-lg font-black text-slate-900 group-hover:text-blue-700 transition">
-                        {article.availableStock.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
-                      </div>
-                      <div className="text-[10px] font-semibold text-slate-400">
-                        Click to Open Full Ledger &rarr;
-                      </div>
+                  {/* Right Side: Stock Count (Per-article Deliver button removed) */}
+                  <div className="text-right shrink-0">
+                    <div className="font-mono text-base sm:text-lg font-black text-slate-900 group-hover:text-blue-700 transition">
+                      {article.availableStock.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                    </div>
+                    <div className="text-[10px] font-semibold text-slate-400">
+                      Click to Open Full Ledger &rarr;
                     </div>
                   </div>
                 </div>
-              );
-            })
-          )}
+              ))
+            )}
+          </div>
         </div>
-      </div>
+      ) : (
+        /* ================= STOCK OUT DELIVERIES REPORT ================= */
+        <div className="rounded-2xl border border-slate-200 bg-white shadow-xs overflow-hidden">
+          <div className="border-b border-slate-200 bg-purple-50/70 p-4 sm:px-6 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-purple-600" />
+              <div>
+                <h2 className="text-sm font-black text-slate-800 uppercase tracking-wider">
+                  Stock OUT Deliveries & Dispatches
+                </h2>
+                <p className="text-[11px] text-slate-500">
+                  Each delivery shown per customer shipment with expandable articles breakdown
+                </p>
+              </div>
+            </div>
+            <span className="rounded-full bg-white border border-purple-200 px-3 py-1 font-mono text-xs font-bold text-purple-700">
+              {filteredGroupedDeliveries.length} Shipments Recorded
+            </span>
+          </div>
+
+          <div className="divide-y divide-slate-100">
+            {filteredGroupedDeliveries.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Truck className="mx-auto mb-2 h-10 w-10 opacity-30 text-purple-600" />
+                <p className="text-sm font-semibold text-slate-600">No stock deliveries recorded</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {searchQuery
+                    ? `No deliveries matching "${searchQuery}".`
+                    : 'Click [+ New Delivery / Deliver Stock] on top to dispatch stock to customers.'}
+                </p>
+              </div>
+            ) : (
+              filteredGroupedDeliveries.map((delivery) => {
+                const isExpanded = expandedDeliveries.has(delivery.id);
+                return (
+                  <div key={delivery.id} className="transition-colors hover:bg-slate-50/60">
+                    {/* Header Row for Delivery */}
+                    <div
+                      onClick={() => toggleDeliveryExpand(delivery.id)}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between p-4 sm:px-6 gap-3 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <button
+                          type="button"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-200 transition"
+                          title={isExpanded ? 'Collapse articles' : 'Expand articles'}
+                        >
+                          {isExpanded ? (
+                            <ChevronUp className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
+                          )}
+                        </button>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-slate-900 text-sm sm:text-base">
+                              {delivery.customerName}
+                            </span>
+                            {delivery.referenceNo && delivery.referenceNo !== '—' && (
+                              <span className="rounded-md bg-purple-50 px-2 py-0.5 font-mono text-[11px] font-bold text-purple-700 border border-purple-200">
+                                Ref: {delivery.referenceNo}
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2.5 text-xs text-slate-500">
+                            <span className="inline-flex items-center gap-1 font-mono">
+                              <Calendar className="h-3 w-3 text-slate-400" />
+                              {formatDate(delivery.date)}
+                            </span>
+                            <span className="text-slate-300">·</span>
+                            <span className="font-semibold text-slate-700">
+                              {delivery.items.length} Article{delivery.items.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between sm:justify-end gap-4 shrink-0 pl-11 sm:pl-0">
+                        <div className="text-left sm:text-right">
+                          <span className="text-[10px] uppercase tracking-wider font-bold text-purple-700 block">
+                            Delivered Quantity
+                          </span>
+                          <span className="font-mono text-base sm:text-lg font-black text-purple-900">
+                            {delivery.totalPairs.toLocaleString()} <span className="text-xs font-normal text-purple-700">Pairs</span>
+                          </span>
+                        </div>
+                        <span className="text-xs font-bold text-blue-600 hover:text-blue-800">
+                          {isExpanded ? 'Hide Items ↑' : 'View Items ↓'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Expandable Articles Table */}
+                    {isExpanded && (
+                      <div className="bg-slate-50/80 px-4 sm:px-12 py-3 border-t border-slate-100">
+                        <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+                          <table className="w-full text-left text-xs">
+                            <thead className="border-b border-slate-200 bg-slate-100/70 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                              <tr>
+                                <th className="px-4 py-2.5">#</th>
+                                <th className="px-4 py-2.5">ARTICLE NAME</th>
+                                <th className="px-4 py-2.5">SIZE</th>
+                                <th className="px-4 py-2.5 text-right">DISPATCHED QTY</th>
+                                <th className="px-4 py-2.5">ORDER REFERENCE</th>
+                                <th className="px-4 py-2.5 text-center">ACTION</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                              {delivery.items.map((item, i) => (
+                                <tr key={item.id || `${item.article}-${i}`} className="hover:bg-slate-50/60">
+                                  <td className="px-4 py-2.5 font-mono text-slate-400">{i + 1}</td>
+                                  <td className="px-4 py-2.5 font-bold text-slate-900">{item.article}</td>
+                                  <td className="px-4 py-2.5 text-slate-600 font-mono text-[11px]">{item.size || 'Standard'}</td>
+                                  <td className="px-4 py-2.5 text-right font-mono font-bold text-purple-700">
+                                    {item.quantity.toLocaleString()} Pairs
+                                  </td>
+                                  <td className="px-4 py-2.5 text-slate-500 font-mono text-[11px]">
+                                    {item.orderNo ? `Order #${item.orderNo}` : (delivery.referenceNo || 'Direct Dispatch')}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleSelectArticle(item.article);
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded-md bg-blue-50 hover:bg-blue-100 px-2.5 py-1 text-[11px] font-bold text-blue-700 transition cursor-pointer"
+                                    >
+                                      <span>Ledger &rarr;</span>
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Deliver Modal (Opened from Deliver button in front of each Article in list) */}
       {deliverTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDeliverTarget(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] overflow-y-auto"
+          >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-lg font-black text-blue-900 flex items-center gap-2">
@@ -1521,7 +2470,8 @@ export const StockManagement: React.FC = () => {
                 type="button"
                 onClick={() => setDeliverTarget(null)}
                 className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 cursor-pointer"
-                aria-label="Close delivery modal"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -1594,9 +2544,10 @@ export const StockManagement: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setDeliverTarget(null)}
-                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                  className="flex items-center gap-1 rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  Cancel / Back
                 </button>
                 <button
                   type="submit"
@@ -1604,6 +2555,966 @@ export const StockManagement: React.FC = () => {
                   className="rounded-xl bg-blue-600 hover:bg-blue-700 px-5 py-2 text-xs font-bold text-white shadow-md shadow-blue-600/25 transition active:scale-95 disabled:opacity-50 cursor-pointer"
                 >
                   {isSavingDeliver ? 'Delivering...' : 'Confirm Delivery'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 1: DELIVER STOCK (Deliver Stock / Bulk Delivery with Add Items Flow)  */}
+      {/* ========================================================================= */}
+      {isBulkDeliveryOpen && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsBulkDeliveryOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-4xl rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] flex flex-col"
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl bg-blue-100 p-2 text-blue-700">
+                  <Truck className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900">
+                    Deliver Stock
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Dispatch finished goods inventory to customer orders or generate delivery challan
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsBulkDeliveryOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer transition"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Modal Form */}
+            <form onSubmit={handleSaveBulkDelivery} className="mt-4 flex-1 flex flex-col min-h-0 space-y-4">
+              {/* Customer & Shipment Details Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3.5 shrink-0 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                {/* 1. Bill Number (Auto) */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Bill Number
+                  </label>
+                  <input
+                    type="text"
+                    value={bulkBillNo}
+                    onChange={e => setBulkBillNo(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs font-mono font-bold text-blue-900 focus:border-blue-500 focus:outline-none"
+                    placeholder="e.g. Bill No. 19"
+                  />
+                </div>
+
+                {/* 2. Delivery Date */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={bulkDeliveryDate}
+                    onChange={e => setBulkDeliveryDate(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* 3. Customer / Company Selection */}
+                <div className="sm:col-span-1">
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Party / Customer *
+                  </label>
+                  <div className="flex items-center gap-2 mb-1.5 text-[11px] font-semibold text-slate-600">
+                    <label className="inline-flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="customerType"
+                        checked={bulkCustomerType === 'existing'}
+                        onChange={() => setBulkCustomerType('existing')}
+                        className="text-blue-600"
+                      />
+                      <span>From Order</span>
+                    </label>
+                    <label className="inline-flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="customerType"
+                        checked={bulkCustomerType === 'new'}
+                        onChange={() => setBulkCustomerType('new')}
+                        className="text-blue-600"
+                      />
+                      <span>Direct Company</span>
+                    </label>
+                  </div>
+                  {bulkCustomerType === 'existing' ? (
+                    <select
+                      value={bulkSelectedOrderId}
+                      onChange={e => {
+                        setBulkSelectedOrderId(e.target.value);
+                        const ord = orders.find(o => o.id === e.target.value);
+                        if (ord) setBulkCustomerName(ord.customerName || '');
+                      }}
+                      className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs font-medium focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="">-- Select Customer Order --</option>
+                      {orders.map(o => (
+                        <option key={o.id} value={o.id}>
+                          Order #{o.orderNo} - {o.customerName}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. BESTWAY, Abdullah Sports, BARLAS"
+                      value={bulkCustomerName}
+                      onChange={e => setBulkCustomerName(e.target.value)}
+                      className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs focus:border-blue-500 focus:outline-none"
+                    />
+                  )}
+                </div>
+
+                {/* 4. Reference / Bilty No */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Reference / Bilty No
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. BL-1092, Challan 42"
+                    value={bulkReferenceNo}
+                    onChange={e => setBulkReferenceNo(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs focus:border-blue-500 focus:outline-none font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Items Section: [+ Add Item] and Selected Items Table */}
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                    Articles to Deliver
+                  </span>
+                  {deliveredItems.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleOpenDeliverItemPicker}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800 transition cursor-pointer"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      <span>+ Add More Items</span>
+                    </button>
+                  )}
+                </div>
+
+                {deliveredItems.length === 0 ? (
+                  <div className="flex-1 flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/60 p-8 text-center min-h-[180px]">
+                    <div className="rounded-full bg-blue-50 p-3 text-blue-600 mb-2">
+                      <Boxes className="h-8 w-8" />
+                    </div>
+                    <p className="text-sm font-bold text-slate-700">
+                      No articles selected for delivery yet
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1 mb-4 max-w-sm">
+                      Click "+ Add Item" below to browse available articles from stock, select quantities, and optional rates.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleOpenDeliverItemPicker}
+                      className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2.5 text-xs font-bold text-white shadow-md shadow-emerald-600/20 transition active:scale-95 cursor-pointer"
+                    >
+                      <Plus className="h-4 w-4" />
+                      <span>+ Add Item</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col min-h-0 overflow-hidden rounded-xl border border-slate-200">
+                    <div className="flex-1 overflow-y-auto">
+                      <table className="w-full text-left text-xs min-w-[600px]">
+                        <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                          <tr>
+                            <th className="px-3.5 py-2.5">ITEM / ARTICLE</th>
+                            <th className="px-3 py-2.5 text-right font-mono">QTY</th>
+                            <th className="px-3 py-2.5 text-right font-mono">RATE</th>
+                            <th className="px-3 py-2.5 text-right font-mono">AMOUNT</th>
+                            <th className="px-3 py-2.5 text-center w-16">ACTION</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                          {deliveredItems.map((item) => (
+                            <tr key={item.articleName} className="hover:bg-slate-50/80 transition">
+                              <td className="px-3.5 py-3">
+                                <div className="font-bold text-slate-900">{item.articleName}</div>
+                                <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                                  Size: {item.size} &bull; Available: {item.availableStock.toLocaleString()} Pairs
+                                  {item.detail && <span className="ml-2 font-normal text-slate-600 italic">({item.detail})</span>}
+                                </div>
+                              </td>
+                              <td className="px-3 py-3 text-right font-mono font-bold text-slate-900">
+                                {item.qty.toLocaleString()} <span className="text-[10px] text-slate-500 font-normal">Pairs</span>
+                              </td>
+                              <td className="px-3 py-3 text-right font-mono text-slate-600">
+                                {item.rate > 0 ? `Rs. ${item.rate.toLocaleString()}` : '—'}
+                              </td>
+                              <td className="px-3 py-3 text-right font-mono font-bold text-blue-900">
+                                {item.amount > 0 ? `Rs. ${item.amount.toLocaleString()}` : '—'}
+                              </td>
+                              <td className="px-3 py-3 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveDeliveredItem(item.articleName)}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                  title="Remove Article"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Summary Bar and Actions */}
+              <div className="shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t border-slate-200 bg-slate-50 p-4 rounded-xl">
+                <div className="flex flex-wrap items-center gap-4 text-xs font-semibold text-slate-700">
+                  <span>
+                    Total Items: <strong className="text-slate-900 font-mono">{deliveredItems.length}</strong>
+                  </span>
+                  <span className="text-slate-300">|</span>
+                  <span>
+                    Total Qty: <strong className="text-blue-700 font-mono text-sm">
+                      {deliveredItems.reduce((sum, item) => sum + item.qty, 0).toLocaleString()}
+                    </strong> Pairs
+                  </span>
+                  <span className="text-slate-300">|</span>
+                  <span>
+                    Total Amount: <strong className="text-emerald-700 font-mono text-sm">
+                      Rs. {deliveredItems.reduce((sum, item) => sum + item.amount, 0).toLocaleString()}
+                    </strong>
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsBulkDeliveryOpen(false)}
+                    className="flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    Cancel / Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingBulkDelivery || deliveredItems.length === 0}
+                    className="inline-flex items-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 px-5 py-2 text-xs font-bold text-white shadow-md shadow-blue-600/25 transition active:scale-95 disabled:opacity-40 cursor-pointer"
+                  >
+                    {isSavingBulkDelivery ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Processing Delivery...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Truck className="h-4 w-4" />
+                        <span>Deliver / Confirm Delivery</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* SUB-MODAL: "ADD ITEMS" FROM STOCK POPUP (Exact flow as requested)          */}
+      {/* ========================================================================= */}
+      {isDeliverItemPickerOpen && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsDeliverItemPickerOpen(false);
+          }}
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl rounded-2xl bg-white p-5 sm:p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[90vh] flex flex-col"
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
+              <div>
+                <h3 className="text-lg font-black text-slate-900">
+                  Add Items from Stock
+                </h3>
+                <p className="text-xs text-slate-500 font-medium">
+                  Tick articles to deliver, enter quantity and optional rate or detail notes
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDeliverItemPickerOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer transition"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Search Bar + Add New Item Button */}
+            <div className="mt-3 shrink-0 flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="search"
+                  value={pickerSearch}
+                  onChange={e => setPickerSearch(e.target.value)}
+                  placeholder="Search article e.g. MG, CE, Driver..."
+                  className="w-full rounded-xl border border-slate-300 py-2 pl-9 pr-3 text-xs bg-white text-slate-800 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setPickerNewItemOpen(prev => !prev)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-blue-300 bg-blue-50 hover:bg-blue-100 px-3 py-2 text-xs font-bold text-blue-700 transition cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>+ ADD NEW ITEM</span>
+              </button>
+            </div>
+
+            {/* Inline Add New Custom Item Form */}
+            {pickerNewItemOpen && (
+              <div className="mt-2.5 p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl shrink-0 flex flex-wrap items-end gap-2.5">
+                <div className="flex-1 min-w-[140px]">
+                  <label className="text-[11px] font-bold text-blue-900 block mb-1">Article Name *</label>
+                  <input
+                    type="text"
+                    value={pickerNewItemName}
+                    onChange={e => setPickerNewItemName(e.target.value)}
+                    placeholder="e.g. Driver Gloves tig short"
+                    className="w-full rounded-lg border border-blue-300 bg-white p-1.5 text-xs focus:outline-none"
+                  />
+                </div>
+                <div className="w-24">
+                  <label className="text-[11px] font-bold text-blue-900 block mb-1">Size</label>
+                  <input
+                    type="text"
+                    value={pickerNewItemSize}
+                    onChange={e => setPickerNewItemSize(e.target.value)}
+                    placeholder="e.g. 10"
+                    className="w-full rounded-lg border border-blue-300 bg-white p-1.5 text-xs focus:outline-none"
+                  />
+                </div>
+                <div className="w-28">
+                  <label className="text-[11px] font-bold text-blue-900 block mb-1">Stock Pairs</label>
+                  <input
+                    type="number"
+                    value={pickerNewItemStock}
+                    onChange={e => setPickerNewItemStock(e.target.value)}
+                    placeholder="Pairs"
+                    className="w-full rounded-lg border border-blue-300 bg-white p-1.5 text-xs focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddPickerCustomItem}
+                  className="rounded-lg bg-blue-600 hover:bg-blue-700 px-3.5 py-1.5 text-xs font-bold text-white transition cursor-pointer"
+                >
+                  Add to List
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPickerNewItemOpen(false)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {/* Full List of Articles in Stock */}
+            <div className="mt-3 flex-1 min-h-0 overflow-y-auto rounded-xl border border-slate-200 divide-y divide-slate-100">
+              {pickerArticleRows
+                .filter(row => {
+                  if (!pickerSearch.trim()) return true;
+                  const q = pickerSearch.toLowerCase();
+                  return row.articleName.toLowerCase().includes(q) || row.size.toLowerCase().includes(q);
+                })
+                .map(row => {
+                  const qVal = Number(row.qty) || 0;
+                  const rVal = Number(row.rate) || 0;
+                  const rowAmount = qVal * rVal;
+                  const isOver = qVal > row.availableStock;
+
+                  return (
+                    <div
+                      key={row.articleName}
+                      className={`p-3.5 transition ${row.selected ? 'bg-blue-50/40' : 'hover:bg-slate-50'}`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <label className="flex items-center gap-3 cursor-pointer flex-1">
+                          <input
+                            type="checkbox"
+                            checked={row.selected}
+                            onChange={() => handleTogglePickerRow(row.articleName)}
+                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                          />
+                          <div>
+                            <span className="font-bold text-xs text-slate-900 block">
+                              {row.articleName}
+                            </span>
+                            <span className="text-[11px] text-slate-500 font-mono">
+                              Size: {row.size}
+                            </span>
+                          </div>
+                        </label>
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold font-mono bg-emerald-100 text-emerald-800">
+                          Stock: {row.availableStock.toLocaleString()} Pairs
+                        </span>
+                      </div>
+
+                      {/* Expand row when ticked with 3 fields: Qty (required), Rate (optional), Detail (optional) */}
+                      {row.selected && (
+                        <div className="mt-3 pl-7 pt-2.5 border-t border-blue-100 grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-end">
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                              Qty * <span className="text-slate-400 font-normal">(Max {row.availableStock})</span>
+                            </label>
+                            <input
+                              type="number"
+                              min="1"
+                              max={row.availableStock}
+                              value={row.qty}
+                              onChange={e => handlePickerFieldChange(row.articleName, 'qty', e.target.value)}
+                              placeholder="Required"
+                              className={`w-full rounded-lg border p-1.5 text-xs font-mono font-bold focus:outline-none ${
+                                isOver
+                                  ? 'border-rose-500 bg-rose-50 text-rose-700'
+                                  : 'border-blue-400 bg-white text-blue-900'
+                              }`}
+                            />
+                            {isOver && (
+                              <span className="text-[10px] text-rose-600 font-semibold block mt-0.5">
+                                Exceeds stock!
+                              </span>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                              Rate <span className="text-slate-400 font-normal">(Optional)</span>
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={row.rate}
+                              onChange={e => handlePickerFieldChange(row.articleName, 'rate', e.target.value)}
+                              placeholder="e.g. 235"
+                              className="w-full rounded-lg border border-slate-300 bg-white p-1.5 text-xs font-mono focus:border-blue-500 focus:outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                              Detail <span className="text-slate-400 font-normal">(Optional)</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={row.detail}
+                              onChange={e => handlePickerFieldChange(row.articleName, 'detail', e.target.value)}
+                              placeholder="e.g. colour, size note"
+                              className="w-full rounded-lg border border-slate-300 bg-white p-1.5 text-xs focus:border-blue-500 focus:outline-none"
+                            />
+                          </div>
+
+                          <div>
+                            <span className="text-[10px] font-bold text-slate-500 block mb-1">
+                              Amount = Qty &times; Rate
+                            </span>
+                            <div className="rounded-lg bg-slate-100 p-1.5 text-xs font-mono font-bold text-slate-800 text-right">
+                              {rowAmount > 0 ? `Rs. ${rowAmount.toLocaleString()}` : 'Rs. 0'}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+
+            {/* Bottom Total Bar & Done Button */}
+            <div className="mt-3 pt-3 border-t border-slate-200 shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50 p-3.5 rounded-xl">
+              <div className="flex items-center gap-4 text-xs font-semibold text-slate-700">
+                <span>
+                  Ticked: <strong className="text-slate-900 font-mono">{pickerArticleRows.filter(r => r.selected).length}</strong> Articles
+                </span>
+                <span className="text-slate-300">|</span>
+                <span>
+                  Total Qty: <strong className="text-blue-700 font-mono text-sm">
+                    {pickerArticleRows
+                      .filter(r => r.selected)
+                      .reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
+                      .toLocaleString()}
+                  </strong> Pairs
+                </span>
+                <span className="text-slate-300">|</span>
+                <span>
+                  Total Amount: <strong className="text-emerald-700 font-mono text-sm">
+                    Rs. {pickerArticleRows
+                      .filter(r => r.selected)
+                      .reduce((sum, r) => sum + ((Number(r.qty) || 0) * (Number(r.rate) || 0)), 0)
+                      .toLocaleString()}
+                  </strong>
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDeliverItemPickerOpen(false)}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                >
+                  Cancel / Back
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDonePicker}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2 text-xs font-bold text-white shadow-md shadow-emerald-600/25 transition active:scale-95 cursor-pointer"
+                >
+                  <Check className="h-4 w-4" />
+                  <span>Done / Add Selected</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 2: ADD ITEM / NEW STOCK ENTRY (+ Add Item / + New Stock Entry)       */}
+      {/* ========================================================================= */}
+      {isAddItemModalOpen && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAddItemModalOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-4xl rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] flex flex-col"
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl bg-emerald-100 p-2 text-emerald-700">
+                  <Plus className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900">
+                    Add Items / New Stock Entry (Stock IN)
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Add physical stock pairs directly into finished goods inventory with rate and sizes
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddItemModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer transition"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Modal Form */}
+            <form onSubmit={handleSaveAddItem} className="mt-4 flex-1 flex flex-col min-h-0 space-y-4">
+              {/* Receipt Metadata Bar */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 shrink-0 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">Stock IN Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={addItemDate}
+                    onChange={e => setAddItemDate(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">Source / Cutting Master</label>
+                  <input
+                    type="text"
+                    value={addItemSource}
+                    onChange={e => setAddItemSource(e.target.value)}
+                    placeholder="e.g. Factory Workshop, Cutter NAEM"
+                    className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">Bill / Lot Reference</label>
+                  <input
+                    type="text"
+                    value={addItemBillNo}
+                    onChange={e => setAddItemBillNo(e.target.value)}
+                    placeholder="e.g. LOT-42, Rec-10"
+                    className="w-full rounded-xl border border-slate-300 bg-white p-2 text-xs font-mono focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Search & Add New Article Bar */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 shrink-0">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="search"
+                    value={addItemSearch}
+                    onChange={e => setAddItemSearch(e.target.value)}
+                    placeholder="Filter articles list..."
+                    className="w-full rounded-xl border border-slate-300 py-1.5 pl-9 pr-3 text-xs bg-white text-slate-800 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+
+                {!isAddingNewCustomArticle ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsAddingNewCustomArticle(true)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-3 py-1.5 text-xs font-bold transition cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>+ Add New Article / Item</span>
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="New article name..."
+                      value={newCustomArticleInput}
+                      onChange={e => setNewCustomArticleInput(e.target.value)}
+                      className="rounded-xl border border-emerald-400 px-3 py-1.5 text-xs font-bold focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddCustomArticleEntry}
+                      className="rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 text-xs font-bold transition cursor-pointer"
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsAddingNewCustomArticle(false)}
+                      className="rounded-xl border border-slate-300 px-2 py-1.5 text-xs font-bold text-slate-500 hover:bg-slate-100 cursor-pointer"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Items Table with Checkboxes */}
+              <div className="flex-1 overflow-y-auto rounded-xl border border-slate-200">
+                <table className="w-full text-left text-xs min-w-[650px]">
+                  <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                    <tr>
+                      <th className="px-3 py-2.5 text-center w-12">SELECT</th>
+                      <th className="px-3 py-2.5">ARTICLE NAME</th>
+                      <th className="px-3 py-2.5 w-32">SIZE</th>
+                      <th className="px-3 py-2.5 text-right w-32">QTY TO ADD *</th>
+                      <th className="px-3 py-2.5 text-right w-28">RATE (RS.)</th>
+                      <th className="px-3 py-2.5 text-right font-mono">TOTAL (RS.)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                    {addItemEntries
+                      .filter(e => !addItemSearch || e.articleName.toLowerCase().includes(addItemSearch.toLowerCase()))
+                      .map(item => {
+                        const total = (Number(item.qty) || 0) * (Number(item.rate) || 0);
+                        return (
+                          <tr key={item.articleName} className={item.selected ? "bg-emerald-50/50" : "hover:bg-slate-50"}>
+                            <td className="px-3 py-2.5 text-center">
+                              <input
+                                type="checkbox"
+                                checked={item.selected}
+                                onChange={() => handleToggleAddItem(item.articleName)}
+                                className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 font-bold text-slate-900">
+                              {item.articleName}
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <input
+                                type="text"
+                                placeholder="Size (e.g. 8, L)"
+                                disabled={!item.selected}
+                                value={item.size}
+                                onChange={e => handleAddItemFieldChange(item.articleName, 'size', e.target.value)}
+                                className="w-full rounded-lg border border-slate-300 px-2 py-1 text-xs focus:outline-none focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <input
+                                type="number"
+                                min="1"
+                                placeholder="Pairs"
+                                disabled={!item.selected}
+                                value={item.qty}
+                                onChange={e => handleAddItemFieldChange(item.articleName, 'qty', e.target.value)}
+                                className="w-24 rounded-lg border border-slate-300 px-2 py-1 text-right text-xs font-mono font-bold focus:outline-none focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder="Rate"
+                                disabled={!item.selected}
+                                value={item.rate}
+                                onChange={e => handleAddItemFieldChange(item.articleName, 'rate', e.target.value)}
+                                className="w-20 rounded-lg border border-slate-300 px-2 py-1 text-right text-xs font-mono focus:outline-none focus:border-emerald-500 disabled:bg-slate-100 disabled:text-slate-400"
+                              />
+                            </td>
+                            <td className="px-3 py-2.5 text-right font-mono font-bold text-emerald-800">
+                              Rs. {total.toLocaleString()}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Bottom Summary Bar and Actions */}
+              <div className="shrink-0 flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t border-slate-200 bg-slate-50 p-4 rounded-xl">
+                <div className="flex items-center gap-4 text-xs font-semibold text-slate-700">
+                  <span>
+                    Selected: <strong className="text-slate-900 font-mono">{addItemEntries.filter(i => i.selected).length}</strong> Items
+                  </span>
+                  <span className="text-slate-300">|</span>
+                  <span>
+                    Total Pairs: <strong className="text-emerald-700 font-mono text-sm">
+                      {addItemEntries.filter(i => i.selected).reduce((sum, i) => sum + (Number(i.qty) || 0), 0).toLocaleString()}
+                    </strong> Pairs
+                  </span>
+                  <span className="text-slate-300">|</span>
+                  <span>
+                    Total Value: <strong className="text-emerald-800 font-mono">
+                      Rs. {addItemEntries.filter(i => i.selected).reduce((sum, i) => sum + ((Number(i.qty) || 0) * (Number(i.rate) || 0)), 0).toLocaleString()}
+                    </strong>
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsAddItemModalOpen(false)}
+                    className="flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    Cancel / Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingAddItem || addItemEntries.filter(i => i.selected && Number(i.qty) > 0).length === 0}
+                    className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2 text-xs font-bold text-white shadow-md shadow-emerald-600/25 transition active:scale-95 disabled:opacity-40 cursor-pointer"
+                  >
+                    {isSavingAddItem ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Saving Stock Entries...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="h-4 w-4" />
+                        <span>Save Stock IN Entries</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 3: TRANSFER TO ORDER MODAL (From Transaction History)               */}
+      {/* ========================================================================= */}
+      {transferTargetRow && selectedArticleName && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setTransferTargetRow(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] overflow-y-auto"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-lg font-black text-slate-900 flex items-center gap-2">
+                  <Plus className="h-5 w-5 text-blue-600" />
+                  <span>Transfer Stock to Customer Order</span>
+                </h3>
+                <p className="text-xs text-slate-500 font-medium mt-0.5">
+                  Link this unallocated stock entry directly to a customer purchase order
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransferTargetRow(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer transition"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveTransfer} className="mt-4 space-y-4">
+              {/* Locked Article Info */}
+              <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 block">Selected Article</span>
+                  <span className="text-base font-black text-blue-950">{selectedArticleName}</span>
+                  <span className="text-xs text-slate-500 block mt-0.5">
+                    Original Received: {formatDate(transferTargetRow.date)}
+                  </span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 block">Available Stock</span>
+                  <span className="text-sm font-mono font-bold text-blue-900 bg-white px-2.5 py-1 rounded-md border border-blue-200 inline-block mt-0.5">
+                    {selectedArticleSummary?.availableStock.toLocaleString()} Pairs
+                  </span>
+                </div>
+              </div>
+
+              {/* Order Selection */}
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1">
+                  Select Customer Order *
+                </label>
+                <select
+                  required
+                  value={transferOrderId}
+                  onChange={e => setTransferOrderId(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 bg-white p-2.5 text-xs font-medium focus:border-blue-500 focus:outline-none"
+                >
+                  <option value="" disabled>-- Select Customer Order (PO) --</option>
+                  {orders.map(o => (
+                    <option key={o.id} value={o.id}>
+                      Order #{o.orderNo} - {o.customerName} (Total: {Number(o.totalPairs || 0).toLocaleString()} pairs)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Quantity and Transfer Date Grid */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Qty to Transfer *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    max={selectedArticleSummary?.availableStock || transferTargetRow.qtyIn}
+                    value={transferQty}
+                    onChange={e => setTransferQty(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-mono font-bold focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Transfer Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={transferDate}
+                    onChange={e => setTransferDate(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Transfer Note */}
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1">
+                  Reference Note
+                </label>
+                <input
+                  type="text"
+                  value={transferNote}
+                  onChange={e => setTransferNote(e.target.value)}
+                  placeholder="e.g. Transferred from direct cutting stock"
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              {/* Date Comparison Banner */}
+              <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs text-slate-600 flex items-center justify-between">
+                <span>Received Date: <strong className="font-mono text-slate-800">{formatDate(transferTargetRow.date)}</strong></span>
+                <span className="text-slate-400">&rarr;</span>
+                <span>Transfer Date: <strong className="font-mono text-blue-700">{formatDate(transferDate)}</strong></span>
+              </div>
+
+              {/* Modal Actions */}
+              <div className="mt-5 flex justify-end gap-2.5 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setTransferTargetRow(null)}
+                  className="flex items-center gap-1 rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  Cancel / Back
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingTransfer}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-5 py-2 text-xs font-bold text-white shadow-md shadow-blue-600/25 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+                >
+                  {isSavingTransfer ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Transferring...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      <span>Confirm Transfer to Order</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>

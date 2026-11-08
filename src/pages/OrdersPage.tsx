@@ -18,6 +18,7 @@ import {
 import { useFactory } from '../context/FactoryContext';
 import { formatDate, getOrderStatusBadge } from '../utils/factoryFormatters';
 import { CustomerOrder } from '../types/factory';
+import { useDragToScroll } from '../hooks/useDragToScroll';
 
 interface OrdersPageProps {
   onOpenCreateOrder: () => void;
@@ -37,6 +38,7 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
   const [orderToDelete, setOrderToDelete] = useState<CustomerOrder | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
+  const ordersTableRef = useDragToScroll<HTMLDivElement>();
 
   const filteredOrders = orders.filter(ord => {
     if (statusFilter !== 'all' && ord.status !== statusFilter) return false;
@@ -182,7 +184,7 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
         )}
 
         {/* Orders Table */}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" ref={ordersTableRef}>
           {filteredOrders.length === 0 ? (
             <div className="py-16 text-center text-slate-400 text-sm">
               <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
@@ -230,7 +232,21 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                         aria-expanded={isExpanded}
                       >
                         <td className="overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 font-mono font-bold text-blue-700">#{ord.orderNo}</td>
-                        <td className="overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 font-bold text-slate-900" title={ord.customerName}>{ord.customerName}</td>
+                        <td className="px-4 py-3">
+                          <div className="font-bold text-slate-900 truncate" title={ord.customerName}>{ord.customerName}</div>
+                          {ord.items && ord.items.length > 0 && (
+                            <div className="text-[11px] text-slate-500 truncate max-w-[260px]">
+                              {ord.items.map(item => {
+                                const sizeText = item.customSizes && item.customSizes.length > 0
+                                  ? item.customSizes.filter(cs => Number(cs.quantity) > 0 || cs.size).map(cs => `${cs.size} (${Number(cs.quantity || 0).toLocaleString()})`).join(', ')
+                                  : item.size
+                                    ? `${item.size} (${Number(item.totalPairs || item.qty || 0).toLocaleString()})`
+                                    : Object.entries(item.sizes || {}).filter(([, q]) => Number(q) > 0).map(([s, q]) => `${s} (${Number(q || 0).toLocaleString()})`).join(', ');
+                                return `${item.title || item.article || 'Glove'}${sizeText ? `: ${sizeText}` : ''}`;
+                              }).join(' | ')}
+                            </div>
+                          )}
+                        </td>
                         <td className="overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 text-xs text-slate-600" title={`Order: ${formatDate(ord.orderDate)} | Due: ${formatDate(ord.deliveryDate)}`}>
                           {formatDate(ord.orderDate)} <span className="text-slate-400">→</span> {formatDate(ord.deliveryDate)}
                         </td>
@@ -322,14 +338,24 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
                                       {ord.items?.length ? ord.items.flatMap((item, itemIndex) => {
-                                        const sizeRows = Object.entries(item.sizes || {}).filter(([, quantity]) => Number(quantity) > 0);
-                                        const rows = sizeRows.length
-                                          ? sizeRows.map(([size, quantity]) => [size.toUpperCase(), Number(quantity)] as [string, number])
-                                          : [['—', Number(item.totalPairs) || 0] as [string, number]];
+                                        let rows: [string, number][] = [];
+                                        if (item.customSizes && item.customSizes.length > 0) {
+                                          rows = item.customSizes
+                                            .filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0))
+                                            .map(cs => [cs.size || 'Standard', Number(cs.quantity) || 0]);
+                                        }
+                                        if (rows.length === 0 && item.size) {
+                                          rows = [[item.size, Number(item.totalPairs || item.qty) || 0]];
+                                        } else if (rows.length === 0) {
+                                          const sizeRows = Object.entries(item.sizes || {}).filter(([, quantity]) => Number(quantity) > 0);
+                                          rows = sizeRows.length
+                                            ? sizeRows.map(([size, quantity]) => [size, Number(quantity)] as [string, number])
+                                            : [['—', Number(item.totalPairs) || 0] as [string, number]];
+                                        }
                                         return rows.map(([size, quantity], rowIndex) => (
                                           <tr key={`${itemIndex}-${rowIndex}`}>
                                             <td className="px-3 py-2 font-semibold text-slate-800">{rowIndex === 0 ? (item.title || item.gloveType || 'Glove') : ''}</td>
-                                            <td className="px-3 py-2">{size}</td>
+                                            <td className="px-3 py-2 font-medium text-slate-700">{size}</td>
                                             <td className="px-3 py-2 text-right font-mono">{quantity.toLocaleString()}</td>
                                           </tr>
                                         ));

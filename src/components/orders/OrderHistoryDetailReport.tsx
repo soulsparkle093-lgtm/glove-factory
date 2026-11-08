@@ -19,16 +19,7 @@ interface OrderHistoryDetailReportProps {
 const normalize = (value: string): string => value.trim().toLocaleLowerCase();
 
 const formatSize = (value: string): string => {
-  const normalized = normalize(value);
-  const labels: Record<string, string> = {
-    small: 'S',
-    medium: 'M',
-    large: 'L',
-    xl: 'XL',
-    xxl: '2XL',
-    '2xl': '2XL'
-  };
-  return labels[normalized] || value.trim() || '-';
+  return value.trim() || '-';
 };
 
 export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> = ({
@@ -54,15 +45,21 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
 
     (order?.items || []).forEach(item => {
       const article = item.article || item.title || item.gloveType || articleName;
-      const sizes = Object.entries(item.sizes || {})
-        .filter(([, quantity]) => Number(quantity) > 0);
-      if (sizes.length) {
-        sizes.forEach(([size, quantity]) => {
-          getGroup(article, size).totalOrder += Number(quantity) || 0;
+      if (item.customSizes && item.customSizes.length > 0) {
+        item.customSizes.filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0)).forEach(cs => {
+          getGroup(article, cs.size || '-').totalOrder += Number(cs.quantity) || 0;
         });
       } else {
-        const quantity = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
-        getGroup(article, item.size || '-').totalOrder += quantity;
+        const sizes = Object.entries(item.sizes || {})
+          .filter(([, quantity]) => Number(quantity) > 0);
+        if (sizes.length) {
+          sizes.forEach(([size, quantity]) => {
+            getGroup(article, size).totalOrder += Number(quantity) || 0;
+          });
+        } else {
+          const quantity = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
+          getGroup(article, item.size || '-').totalOrder += quantity;
+        }
       }
     });
 

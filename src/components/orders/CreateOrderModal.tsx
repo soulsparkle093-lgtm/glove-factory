@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Plus, Trash2, FileText, CheckCircle2, User, Calendar } from 'lucide-react';
+import { X, Plus, Trash2, FileText, CheckCircle2, User, Calendar, ArrowLeft } from 'lucide-react';
 import { useFactory } from '../../context/FactoryContext';
 import { CustomerOrder, SizeMatrix } from '../../types/factory';
 
@@ -54,6 +54,18 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
   // Dynamic glove item rows with dynamic Size + Quantity pairs
   const [rows, setRows] = useState<GloveFormRow[]>([createEmptyRow()]);
 
+  // Close on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   // Sync state when opening or when orderToEdit changes
   useEffect(() => {
     if (isOpen) {
@@ -74,13 +86,20 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                 size: cs.size || '',
                 quantity: cs.quantity === 0 ? '' : cs.quantity
               }));
+            } else if (item.size && item.size.trim().length > 0) {
+              // Direct saved raw size string (e.g. "10", "8", "Ladies Large")
+              sizesList = [{
+                id: 'sz-' + Math.random().toString(36).slice(2, 6),
+                size: item.size,
+                quantity: item.totalPairs || item.qty || ''
+              }];
             } else if (item.sizes) {
-              // Legacy size matrix: extract non-zero sizes (e.g. Large = 3000 for ORD-002)
+              // Legacy size matrix: only extract sizes with actual values > 0
               const list: SizeQtyRow[] = [];
               const entries = [
                 { key: 'Small', val: item.sizes.small },
                 { key: 'Medium', val: item.sizes.medium },
-                { key: 'Large', val: item.sizes.large !== undefined && item.sizes.large !== null && item.sizes.large > 0 ? item.sizes.large : (item.qty && !item.sizes.small && !item.sizes.medium && !item.sizes.xl && !item.sizes.xxl ? item.qty : 0) },
+                { key: 'Large', val: item.sizes.large },
                 { key: 'XL', val: item.sizes.xl },
                 { key: '2XL', val: item.sizes.xxl }
               ];
@@ -211,32 +230,34 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
     try {
       const itemsPayload = validRows.map(r => {
         const customSizesList = r.sizesList
-          .filter(s => s.size.trim().length > 0 || Number(s.quantity) > 0)
+          .filter(s => (s.size && s.size.length > 0) || Number(s.quantity) > 0)
           .map(s => ({
             id: s.id,
-            size: s.size.trim() || 'Standard',
+            size: s.size || 'Standard',
             quantity: s.quantity === '' ? 0 : Math.max(0, parseInt(String(s.quantity), 10) || 0)
           }));
 
         const total = customSizesList.reduce((sum, s) => sum + s.quantity, 0);
 
-        // Backward compatibility for legacy modules
+        // Backward compatibility for legacy modules only when explicitly matching
         const legacySizes: SizeMatrix = { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
         customSizesList.forEach(cs => {
-          const norm = cs.size.trim().toLowerCase();
+          const norm = (cs.size || '').trim().toLowerCase();
           if (norm === 'small' || norm === 's') legacySizes.small += cs.quantity;
           else if (norm === 'medium' || norm === 'm') legacySizes.medium += cs.quantity;
           else if (norm === 'large' || norm === 'l') legacySizes.large += cs.quantity;
           else if (norm === 'xl' || norm === 'extra large') legacySizes.xl += cs.quantity;
           else if (norm === '2xl' || norm === 'xxl') legacySizes.xxl += cs.quantity;
-          else legacySizes.large += cs.quantity;
         });
 
         return {
           id: r.id,
           title: r.title.trim(),
+          gloveType: r.title.trim(),
+          article: r.title.trim(),
           color: r.color.trim(),
           sizes: legacySizes,
+          size: customSizesList[0]?.size || '',
           customSizes: customSizesList,
           totalPairs: total
         };
@@ -279,10 +300,18 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95vh] animate-in fade-in zoom-in-95 duration-150">
+    <div 
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+    >
+      <div 
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[95vh] my-auto animate-in fade-in zoom-in-95 duration-150"
+      >
         {/* Header */}
-        <div className="px-5 sm:px-6 py-4 bg-blue-600 text-white flex items-center justify-between">
+        <div className="px-5 sm:px-6 py-4 bg-blue-600 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center">
               <FileText className="w-5 h-5 text-white" />
@@ -299,6 +328,8 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
           <button
             onClick={onClose}
             className="p-1.5 rounded-lg hover:bg-white/20 text-white transition cursor-pointer"
+            title="Close / Back (Esc)"
+            aria-label="Close / Back"
           >
             <X className="w-5 h-5" />
           </button>
@@ -501,7 +532,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
                             </label>
                             <input
                               type="text"
-                              placeholder="e.g. Large, Medium, Small, 9, 10, Ladies Large, Gents XL"
+                              placeholder="e.g. Large, Medium, Small, 8, 10, Ladies Large, Gents XL"
                               value={sRow.size}
                               onChange={e => handleUpdateSizeRow(idx, sIdx, 'size', e.target.value)}
                               className="w-full px-3 py-2 text-xs sm:text-sm font-semibold rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600 bg-white"
@@ -585,9 +616,10 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
               type="button"
               onClick={onClose}
               disabled={isSubmitting}
-              className="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
             >
-              Cancel
+              <ArrowLeft className="w-4 h-4" />
+              <span>Cancel / Back</span>
             </button>
             <button
               type="submit"

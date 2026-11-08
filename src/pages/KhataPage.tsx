@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   BookOpen, 
   Search, 
@@ -11,7 +11,8 @@ import {
   X, 
   MessageCircle, 
   Calendar,
-  AlertCircle 
+  AlertCircle,
+  ArrowLeft 
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate } from '../utils/factoryFormatters';
@@ -32,6 +33,19 @@ export const KhataPage: React.FC = () => {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingParty, setEditingParty] = useState<Party | null>(null);
   const [selectedPartyForLedger, setSelectedPartyForLedger] = useState<Party | null>(null);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isAddOpen && !selectedPartyForLedger) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsAddOpen(false);
+        setSelectedPartyForLedger(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isAddOpen, selectedPartyForLedger]);
 
   // Form states
   const [name, setName] = useState('');
@@ -312,16 +326,29 @@ export const KhataPage: React.FC = () => {
 
       {/* Add / Edit Party Modal */}
       {isAddOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="px-6 py-4 bg-blue-600 text-white flex items-center justify-between">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAddOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] flex flex-col"
+          >
+            <div className="px-6 py-4 bg-blue-600 text-white flex items-center justify-between shrink-0">
               <h3 className="font-bold text-lg">{editingParty ? 'Edit Party' : 'Add New Party'}</h3>
-              <button onClick={() => setIsAddOpen(false)} className="p-1 text-white hover:bg-white/20 rounded-lg">
+              <button 
+                onClick={() => setIsAddOpen(false)} 
+                className="p-1 text-white hover:bg-white/20 rounded-lg cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Party / Business Name *</label>
                 <input
@@ -389,13 +416,14 @@ export const KhataPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddOpen(false)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100"
+                  className="flex items-center gap-1 px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  <ArrowLeft className="w-4 h-4" />
+                  Cancel / Back
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                  className="px-5 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm cursor-pointer"
                 >
                   {editingParty ? 'Save Changes' : 'Save Party'}
                 </button>
@@ -407,19 +435,32 @@ export const KhataPage: React.FC = () => {
 
       {/* Party Ledger Details Modal */}
       {selectedPartyForLedger && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSelectedPartyForLedger(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh] my-auto animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
               <div>
                 <h3 className="font-bold text-lg">{selectedPartyForLedger.name} - Statement</h3>
                 <p className="text-xs text-slate-400">{selectedPartyForLedger.phone} &bull; Type: {selectedPartyForLedger.type}</p>
               </div>
-              <button onClick={() => setSelectedPartyForLedger(null)} className="p-1 text-white hover:bg-white/20 rounded-lg">
+              <button 
+                onClick={() => setSelectedPartyForLedger(null)} 
+                className="p-1 text-white hover:bg-white/20 rounded-lg cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between shrink-0">
               <span className="text-xs font-bold text-slate-700 uppercase">Current Account Balance:</span>
               <span className={`text-xl font-black ${
                 selectedPartyForLedger.currentBalance > 0 ? 'text-emerald-600' : selectedPartyForLedger.currentBalance < 0 ? 'text-rose-600' : 'text-slate-600'
@@ -457,6 +498,17 @@ export const KhataPage: React.FC = () => {
                   </tbody>
                 </table>
               )}
+            </div>
+
+            <div className="p-3 border-t border-slate-200 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setSelectedPartyForLedger(null)}
+                className="flex items-center gap-1 px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Close / Back
+              </button>
             </div>
           </div>
         </div>

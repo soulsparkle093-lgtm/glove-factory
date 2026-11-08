@@ -261,11 +261,13 @@ interface FactoryContextType {
     items: Array<{
       id?: string;
       productId?: string;
+      article?: string;
       title: string;
       gloveType?: string;
       color?: string;
       leatherType?: string;
       sizes: { small: number; medium: number; large: number; xl: number; xxl: number };
+      customSizes?: Array<{ size: string; quantity: number }>;
       totalPairs: number;
       qty?: number;
       rate?: number;
@@ -284,8 +286,11 @@ interface FactoryContextType {
         id?: string;
         title: string;
         color?: string;
-        sizes: { small: number; medium: number; large: number; xl: number; xxl: number };
+        size?: string;
+        sizes?: { small: number; medium: number; large: number; xl: number; xxl: number };
+        customSizes?: Array<{ id?: string; size: string; quantity: number }>;
         totalPairs: number;
+        rate?: number;
       }>;
       notes?: string;
       status?: CustomerOrder['status'];
@@ -919,11 +924,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     items: Array<{
       id?: string;
       productId?: string;
+      article?: string;
       title: string;
       gloveType?: string;
       color?: string;
       leatherType?: string;
       sizes: { small: number; medium: number; large: number; xl: number; xxl: number };
+      customSizes?: Array<{ size: string; quantity: number }>;
       totalPairs: number;
       qty?: number;
       rate?: number;
@@ -937,7 +944,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const orderNo = `${settings.orderPrefix || 'ORD-'}${nextOrderNum}`;
 
     const orderItems: OrderItem[] = orderData.items.map((item, idx) => {
-      const title = (item.title || item.gloveType || '').trim() || 'Custom Glove';
+      const title = (item.title || item.gloveType || item.article || '').trim() || 'Custom Glove';
       const sizes = {
         small: Number(item.sizes?.small) || 0,
         medium: Number(item.sizes?.medium) || 0,
@@ -946,16 +953,21 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         xxl: Number(item.sizes?.xxl) || 0
       };
       const pairsSum = sizes.small + sizes.medium + sizes.large + sizes.xl + sizes.xxl;
-      const totalPairs = pairsSum > 0 ? pairsSum : (Number(item.totalPairs) || Number(item.qty) || 0);
+      const customPairsSum = Array.isArray(item.customSizes) 
+        ? item.customSizes.reduce((s, c) => s + (Number(c.quantity) || 0), 0)
+        : 0;
+      const totalPairs = pairsSum > 0 ? pairsSum : (customPairsSum > 0 ? customPairsSum : (Number(item.totalPairs) || Number(item.qty) || 0));
 
       return {
         id: item.id || `item-${idx + 1}-${Date.now()}`,
         productId: item.productId || `prod-${Date.now()}-${idx}`,
+        article: item.article || title,
         title,
         gloveType: title,
         color: (item.color || '').trim(),
         leatherType: item.leatherType || '',
         sizes,
+        customSizes: item.customSizes,
         totalPairs,
         originalQty: totalPairs, // IMMUTABLE: Never subtracted
         qty: totalPairs,
@@ -1019,8 +1031,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         id?: string;
         title: string;
         color?: string;
-        sizes: { small: number; medium: number; large: number; xl: number; xxl: number };
+        size?: string;
+        sizes?: { small: number; medium: number; large: number; xl: number; xxl: number };
+        customSizes?: Array<{ id?: string; size: string; quantity: number }>;
         totalPairs: number;
+        rate?: number;
       }>;
       notes?: string;
       status?: CustomerOrder['status'];
@@ -1039,24 +1054,46 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         xxl: Number(item.sizes?.xxl) || 0
       };
       const pairsSum = sizes.small + sizes.medium + sizes.large + sizes.xl + sizes.xxl;
-      const totalPairs = pairsSum > 0 ? pairsSum : (Number(item.totalPairs) || 0);
 
       const oldItem = existing?.items.find(i => i.id === item.id || i.title === title);
+
+      // Preserve custom sizes if provided or fall back to existing
+      const customSizes = item.customSizes && item.customSizes.length > 0
+        ? item.customSizes.map(cs => ({
+            id: cs.id,
+            size: cs.size || 'Standard',
+            quantity: Number(cs.quantity) || 0
+          }))
+        : (oldItem?.customSizes && oldItem.customSizes.length > 0 ? oldItem.customSizes : undefined);
+
+      const customPairsSum = customSizes ? customSizes.reduce((sum, cs) => sum + cs.quantity, 0) : 0;
+      const totalPairs = customPairsSum > 0 ? customPairsSum : (pairsSum > 0 ? pairsSum : (Number(item.totalPairs) || 0));
+
       const originalQty = oldItem?.originalQty ?? totalPairs;
       const cuttingGiven = oldItem?.cuttingGivenQty || 0;
       const stockReceived = oldItem?.stockReceivedQty || 0;
       const billed = oldItem?.billedQty || 0;
+
+      const primarySize = (customSizes && customSizes[0]?.size)
+        || item.size
+        || oldItem?.size
+        || '';
 
       return {
         id: item.id || oldItem?.id || `item-${idx + 1}-${Date.now()}`,
         productId: oldItem?.productId || `prod-${Date.now()}-${idx}`,
         title,
         gloveType: title,
+        article: title,
         color: (item.color || '').trim(),
         sizes,
+        size: primarySize,
+        customSizes,
         totalPairs,
         originalQty, // IMMUTABLE
         qty: totalPairs,
+        rate: item.rate ?? oldItem?.rate ?? 0,
+        amount: ((item.rate ?? oldItem?.rate ?? 0) * totalPairs),
         cuttingGivenQty: cuttingGiven,
         stockReceivedQty: stockReceived,
         billedQty: billed,
@@ -1095,7 +1132,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setOrders(nextOrders);
     saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
 
-    showToast('Order Updated Successfully');
+    const sizeLabels = updatedItems.flatMap(i => (i.customSizes || []).map(cs => cs.size).filter(Boolean));
+    const sizeText = sizeLabels.length > 0 ? sizeLabels.join(', ') : (updatedItems[0]?.size || '');
+    showToast(sizeText ? `Order Updated - Size ${sizeText} Saved` : 'Order Updated Successfully');
   };
 
   const updateOrderStatus = (orderId: string, status: CustomerOrder['status']) => {

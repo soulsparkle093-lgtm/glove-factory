@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Users, Search, Plus, DollarSign, Calendar, CheckCircle2, Trash2, Edit, X, Wallet } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Users, Search, Plus, DollarSign, Calendar, CheckCircle2, Trash2, Edit, X, Wallet, ArrowLeft } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate } from '../utils/factoryFormatters';
 import { Staff } from '../types/factory';
@@ -21,6 +21,20 @@ export const StaffPage: React.FC = () => {
   const [isAddStaffOpen, setIsAddStaffOpen] = useState(false);
   const [isPayWageOpen, setIsPayWageOpen] = useState(false);
   const [selectedStaffForPay, setSelectedStaffForPay] = useState<Staff | null>(null);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!isAddStaffOpen && !isPayWageOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsAddStaffOpen(false);
+        setIsPayWageOpen(false);
+        setSelectedStaffForPay(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isAddStaffOpen, isPayWageOpen]);
 
   // Form states for staff
   const [name, setName] = useState('');
@@ -242,16 +256,29 @@ export const StaffPage: React.FC = () => {
 
       {/* Register Staff Modal */}
       {isAddStaffOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="px-6 py-4 bg-blue-600 text-white flex items-center justify-between">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAddStaffOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] flex flex-col"
+          >
+            <div className="px-6 py-4 bg-blue-600 text-white flex items-center justify-between shrink-0">
               <h3 className="font-bold text-lg">Register Factory Staff</h3>
-              <button onClick={() => setIsAddStaffOpen(false)} className="p-1 text-white hover:bg-white/20 rounded-lg">
+              <button 
+                onClick={() => setIsAddStaffOpen(false)} 
+                className="p-1 text-white hover:bg-white/20 rounded-lg cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveStaff} className="p-6 space-y-4">
+            <form onSubmit={handleSaveStaff} className="p-6 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Staff / Worker Name *</label>
                 <input
@@ -306,13 +333,14 @@ export const StaffPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddStaffOpen(false)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100"
+                  className="flex items-center gap-1 px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  <ArrowLeft className="w-4 h-4" />
+                  Cancel / Back
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                  className="px-5 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm cursor-pointer"
                 >
                   Save Worker
                 </button>
@@ -324,19 +352,38 @@ export const StaffPage: React.FC = () => {
 
       {/* Pay Wage Modal */}
       {isPayWageOpen && selectedStaffForPay && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            <div className="px-6 py-4 bg-emerald-600 text-white flex items-center justify-between">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setIsPayWageOpen(false);
+              setSelectedStaffForPay(null);
+            }
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-150 my-auto max-h-[92vh] flex flex-col"
+          >
+            <div className="px-6 py-4 bg-emerald-600 text-white flex items-center justify-between shrink-0">
               <div>
                 <h3 className="font-bold text-lg">Pay Cutting Wages</h3>
                 <p className="text-xs text-emerald-100">{selectedStaffForPay.name} ({selectedStaffForPay.role})</p>
               </div>
-              <button onClick={() => setIsPayWageOpen(false)} className="p-1 text-white hover:bg-white/20 rounded-lg">
+              <button 
+                onClick={() => {
+                  setIsPayWageOpen(false);
+                  setSelectedStaffForPay(null);
+                }} 
+                className="p-1 text-white hover:bg-white/20 rounded-lg cursor-pointer"
+                title="Close / Back (Esc)"
+                aria-label="Close / Back"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleConfirmPay} className="p-6 space-y-4">
+            <form onSubmit={handleConfirmPay} className="p-6 space-y-4 overflow-y-auto flex-1">
               <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between text-xs">
                 <span className="font-bold text-emerald-900">Total Unpaid Accumulated:</span>
                 <span className="text-base font-black text-emerald-700">
@@ -384,14 +431,18 @@ export const StaffPage: React.FC = () => {
               <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setIsPayWageOpen(false)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100"
+                  onClick={() => {
+                    setIsPayWageOpen(false);
+                    setSelectedStaffForPay(null);
+                  }}
+                  className="flex items-center gap-1 px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  <ArrowLeft className="w-4 h-4" />
+                  Cancel / Back
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                  className="px-5 py-2 rounded-xl text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm cursor-pointer"
                 >
                   Confirm & Deduct Cashbook
                 </button>
