@@ -14,6 +14,12 @@ import {
   RawMaterialStock 
 } from '../types/factory';
 
+export interface ModuleVisibilitySettings {
+  stitching?: boolean;
+  finishedGoods?: boolean;
+  cutting?: boolean;
+}
+
 export interface FactorySettings {
   factoryName: string;
   tagline: string;
@@ -26,6 +32,7 @@ export interface FactorySettings {
   orderPrefix: string;
   invoicePrefix: string;
   cuttingPrefix: string;
+  moduleVisibility?: ModuleVisibilitySettings;
 }
 
 export const defaultFactorySettings: FactorySettings = {
@@ -39,7 +46,12 @@ export const defaultFactorySettings: FactorySettings = {
   currency: "Rs.",
   orderPrefix: "ORD-",
   invoicePrefix: "INV-",
-  cuttingPrefix: "CUT-"
+  cuttingPrefix: "CUT-",
+  moduleVisibility: {
+    stitching: true,
+    finishedGoods: true,
+    cutting: true
+  }
 };
 
 // Initial customer and cutter data

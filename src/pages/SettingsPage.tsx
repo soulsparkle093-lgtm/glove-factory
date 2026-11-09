@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Building2, Save, CheckCircle2, RotateCcw, ShieldCheck } from 'lucide-react';
+import { Building2, Save, CheckCircle2, RotateCcw, ShieldCheck, Sliders, Eye, EyeOff } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 
 export const SettingsPage: React.FC = () => {
@@ -16,6 +16,12 @@ export const SettingsPage: React.FC = () => {
   const [orderPrefix, setOrderPrefix] = useState(settings.orderPrefix);
   const [invoicePrefix, setInvoicePrefix] = useState(settings.invoicePrefix);
 
+  const [moduleVisibility, setModuleVisibility] = useState({
+    stitching: settings.moduleVisibility?.stitching !== false,
+    finishedGoods: settings.moduleVisibility?.finishedGoods !== false,
+    cutting: settings.moduleVisibility?.cutting !== false
+  });
+
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const handleSave = (e: React.FormEvent) => {
@@ -30,9 +36,10 @@ export const SettingsPage: React.FC = () => {
       city,
       currency,
       orderPrefix,
-      invoicePrefix
+      invoicePrefix,
+      moduleVisibility
     });
-    showToast('Factory profile saved successfully');
+    showToast('Factory profile & module settings saved successfully');
   };
 
   return (
@@ -186,12 +193,108 @@ export const SettingsPage: React.FC = () => {
             <div className="pt-2 flex justify-end">
               <button
                 type="submit"
-                className="px-6 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+                className="px-6 py-2 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm cursor-pointer"
               >
                 Save Factory Profile
               </button>
             </div>
           </form>
+
+          {/* Module Workflow Visibility Card */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm uppercase tracking-wider text-blue-700 flex items-center gap-2">
+                  <Sliders className="w-4 h-4" /> Module Workflow Visibility
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Turn modules ON or OFF based on your factory's current workflow requirements.
+                </p>
+              </div>
+            </div>
+
+            <div className="divide-y divide-slate-100">
+              {/* Stitching Module Toggle */}
+              <div className="py-3 flex items-center justify-between gap-4">
+                <div>
+                  <span className="text-sm font-bold text-slate-900 block">Stitching Management</span>
+                  <span className="text-xs text-slate-500">
+                    Stitching orders, worker wages, and stitcher khata ledger.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setModuleVisibility(prev => ({ ...prev, stitching: !prev.stitching }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                    moduleVisibility.stitching ? 'bg-blue-600' : 'bg-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                      moduleVisibility.stitching ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Finished Goods / Ready Stock Toggle */}
+              <div className="py-3 flex items-center justify-between gap-4">
+                <div>
+                  <span className="text-sm font-bold text-slate-900 block">Finished Goods Stock (Ready Stock)</span>
+                  <span className="text-xs text-slate-500">
+                    Auto finished goods models and audit stock movements.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setModuleVisibility(prev => ({ ...prev, finishedGoods: !prev.finishedGoods }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                    moduleVisibility.finishedGoods ? 'bg-blue-600' : 'bg-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                      moduleVisibility.finishedGoods ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Cutting Management Toggle */}
+              <div className="py-3 flex items-center justify-between gap-4">
+                <div>
+                  <span className="text-sm font-bold text-slate-900 block">Cutting Management</span>
+                  <span className="text-xs text-slate-500">
+                    Cutting batches, worker logs, and notebook ledger.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setModuleVisibility(prev => ({ ...prev, cutting: !prev.cutting }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                    moduleVisibility.cutting ? 'bg-blue-600' : 'bg-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                      moduleVisibility.cutting ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={handleSave}
+                className="px-5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-xs transition active:scale-95 cursor-pointer flex items-center gap-1.5"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save Visibility Settings</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Right Column: Database & Clear Data */}

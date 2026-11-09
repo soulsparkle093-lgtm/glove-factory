@@ -325,46 +325,63 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                                 </div>
                               </div>
 
-                              <section>
-                                <h5 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-600">Glove Items & Sizes</h5>
-                                <div className="overflow-x-auto rounded-lg border border-slate-200">
-                                  <table className="w-full min-w-[420px] text-left text-xs">
-                                    <thead className="bg-slate-50 text-slate-600">
-                                      <tr>
-                                        <th className="px-3 py-2">Article</th>
-                                        <th className="px-3 py-2">Size</th>
-                                        <th className="px-3 py-2 text-right">Pairs</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-100">
-                                      {ord.items?.length ? ord.items.flatMap((item, itemIndex) => {
-                                        let rows: [string, number][] = [];
-                                        if (item.customSizes && item.customSizes.length > 0) {
-                                          rows = item.customSizes
-                                            .filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0))
-                                            .map(cs => [cs.size || 'Standard', Number(cs.quantity) || 0]);
-                                        }
-                                        if (rows.length === 0 && item.size) {
-                                          rows = [[item.size, Number(item.totalPairs || item.qty) || 0]];
-                                        } else if (rows.length === 0) {
-                                          const sizeRows = Object.entries(item.sizes || {}).filter(([, quantity]) => Number(quantity) > 0);
-                                          rows = sizeRows.length
-                                            ? sizeRows.map(([size, quantity]) => [size, Number(quantity)] as [string, number])
-                                            : [['—', Number(item.totalPairs) || 0] as [string, number]];
-                                        }
-                                        return rows.map(([size, quantity], rowIndex) => (
-                                          <tr key={`${itemIndex}-${rowIndex}`}>
-                                            <td className="px-3 py-2 font-semibold text-slate-800">{rowIndex === 0 ? (item.title || item.gloveType || 'Glove') : ''}</td>
-                                            <td className="px-3 py-2 font-medium text-slate-700">{size}</td>
-                                            <td className="px-3 py-2 text-right font-mono">{quantity.toLocaleString()}</td>
-                                          </tr>
-                                        ));
-                                      }) : (
-                                        <tr><td colSpan={3} className="px-3 py-4 text-center text-slate-400">No glove details found.</td></tr>
-                                      )}
-                                    </tbody>
-                                  </table>
-                                </div>
+                              <section className="space-y-3">
+                                <h5 className="text-xs font-bold uppercase tracking-wide text-slate-600">Glove Items & Sizes</h5>
+                                {ord.items?.length ? (
+                                  <div className="space-y-3">
+                                    {ord.items.map((item, itemIdx) => {
+                                      let sizeRows: [string, number][] = [];
+                                      if (item.customSizes && item.customSizes.length > 0) {
+                                        sizeRows = item.customSizes
+                                          .filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0))
+                                          .map(cs => [cs.size || 'Standard', Number(cs.quantity) || 0]);
+                                      }
+                                      if (sizeRows.length === 0 && item.size) {
+                                        sizeRows = [[item.size, Number(item.totalPairs || item.qty) || 0]];
+                                      } else if (sizeRows.length === 0) {
+                                        const sz = Object.entries(item.sizes || {}).filter(([, q]) => Number(q) > 0);
+                                        sizeRows = sz.length
+                                          ? sz.map(([s, q]) => [s, Number(q)] as [string, number])
+                                          : [['Standard', Number(item.totalPairs || item.qty) || 0] as [string, number]];
+                                      }
+                                      const itemTotal = sizeRows.reduce((sum, [, q]) => sum + q, 0) || Number(item.totalPairs || item.qty) || 0;
+                                      return (
+                                        <div key={item.id || itemIdx} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                                          <div className="flex items-center justify-between bg-slate-50 px-3.5 py-2.5 border-b border-slate-200">
+                                            <span className="font-bold text-slate-900 text-xs sm:text-sm">
+                                              Article: {item.title || item.gloveType || item.article || 'Glove Article'}
+                                            </span>
+                                            <div className="flex items-center gap-2">
+                                              <span className="rounded-md bg-blue-50 border border-blue-200 px-2 py-0.5 font-mono text-xs font-bold text-blue-700">
+                                                Total: {itemTotal.toLocaleString()} Pairs
+                                              </span>
+                                            </div>
+                                          </div>
+                                          <table className="w-full text-left text-xs">
+                                            <thead className="bg-slate-50/50 text-[10px] uppercase font-bold text-slate-500 border-b border-slate-100">
+                                              <tr>
+                                                <th className="px-3.5 py-1.5">Size</th>
+                                                <th className="px-3.5 py-1.5 text-right">Pairs</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                              {sizeRows.map(([sz, qty], rIdx) => (
+                                                <tr key={rIdx} className="hover:bg-slate-50/60">
+                                                  <td className="px-3.5 py-2 font-medium text-slate-700">{sz}</td>
+                                                  <td className="px-3.5 py-2 text-right font-mono font-bold text-slate-900">{qty.toLocaleString()}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <div className="p-4 text-center text-xs text-slate-400 border border-slate-200 rounded-xl">
+                                    No glove details found.
+                                  </div>
+                                )}
                               </section>
 
                               <section className="mt-5">

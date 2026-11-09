@@ -1,0 +1,350 @@
+Fix Full Ledger PDF Missing Cash Entries - PDF Must Show Full Table Exactly Like Screen - Cutting Management - Glove Factory ERP
+
+PAGE: Cutting Management > Full Ledger PDF - Cutting Ledger - All
+
+CURRENT PROBLEM - VIDEO PROOF:
+User says in Urdu: "Ye dekhen idhar jitni bhi entries hain na. Ye dekhen mujhe na jo main full ledger PDF nikalon na, ye dekhen mujhe har idhar article aur ye cheezein achi ho rahi hain na. Idhar mujhe ye dekhen cash wala bhi ye bhi show ho. Ke payment 8 tareekh ko itni payment hui hai, ye tamam cheezein show hon. Idhar customer ka naam hai show, baaki ye bhi cheezein show hon ke payment aur ye ye waghera. Ye bhi lines, do lines hain na show hon. Yahan tak saara table jo exist hai, ye saara table bana hua hai na, ye saara mujhe khud is ka bhi show ho, bas customer name na show ho."
+
+Example in video - Cutting Management Screen - 4 ENTRIES:
+1. 08 Nov 2026 - Bestway - pride - Size 10 - -30 Pairs - Rate Rs. 7 - Amount Rs. -210 - Balance Rs. -210
+2. 08 Nov 2026 - Bestway - pride - Size 10 - 100 Pairs - Rate Rs. 7 - Amount Rs. 700 - Balance Rs. 490
+3. 08 Nov 2026 - Cash Paid Out - Paid to all (Bill Payment book) - Amount -Rs. 1,000 - Balance Rs. -510
+4. 08 Nov 2026 - Cash In - Cash In from all - Amount +Rs. 300 - Balance Rs. -210
+TOTAL on screen: Paid: Rs. 700 | Cash In: Rs. 300 | 70 Pairs | Pending: Rs. -210
+
+But Full Ledger PDF - Cutting Ledger - All - shows ONLY 2 ENTRIES - WRONG:
+1. 08 Nov 2026 - pride - Size 10 - 100 - Rs. 7 - Rs. 210
+2. 08 Nov 2026 - pride - Size 10 - -30 - Rs. 7 - Rs. 700
+TOTAL in PDF: Paid: Rs. 700 | 70 Pairs
+- Cash Paid Out -Rs. 1,000 MISSING
+- Cash In +Rs. 300 MISSING
+- Balance column MISSING
+- Payment Date / Payment details MISSING
+
+REQUIRED FIX:
+
+1. PDF MUST SHOW FULL TABLE - EXACTLY LIKE SCREEN - MOST IMPORTANT:
+      - PDF must NOT filter to only Cutting / Article entries.
+      - PDF must include ALL entries from Cutting Management table, in SAME order, SAME date order:
+     a) Cutting entries - Article, Size, Pairs, Rate, Amount
+     b) Cash Paid Out entries - "Cash Paid Out - Paid to all (Bill Payment book)" - Amount -Rs. 1,000
+     c) Cash In entries - "Cash In - Cash In from all" - Amount +Rs. 300
+     d) Return Cutting entries - "Return Cutting - pride - 30 pairs" - Amount -Rs. 210
+      - If screen shows 4 lines, PDF must show 4 lines. If screen shows 20 lines, PDF must show 20 lines. No entry must be dropped.
+      - Fix backend PDF query: Currently it is doing WHERE type = 'cutting' OR WHERE article IS NOT NULL. Change to: SELECT * FROM cutting_ledger WHERE ... (NO type filter). Include type IN ('cutting', 'cash_in', 'cash_out', 'return', 'payment').
+
+2. SHOW CASH / PAYMENT DETAILS IN PDF:
+      - For Cash rows, in PDF show:
+     Date: 08 Nov 2026
+     Article / Description: "Cash Paid Out - Paid to all (Bill Payment book)" / "Cash In - Cash In from all"
+     Size: "-"
+     Pairs: "-"
+     Average: "-"
+     Rate: "-"
+     Amount: -Rs. 1,000 / +Rs. 300 (with + / - sign, red for Out, green for In)
+     Balance: Running Balance after this row - e.g. Rs. -510, Rs. -210
+      - User says: "Ke payment 8 tareekh ko itni payment hui hai, ye tamam cheezein show hon" - So Date + Payment Amount + Payment Type must be clearly visible in PDF.
+
+3. KEEP SAME COLUMNS AS SCREEN + BALANCE:
+      - PDF Columns must be:
+          1. DATE
+          2. ARTICLE / DESCRIPTION - e.g. pride, Cash Paid Out, Cash In
+          3. SIZE
+          4. PAIRS
+          5. AVERAGE
+          6. RATE
+          7. AMOUNT
+          8. BALANCE - Running Balance - MUST ADD, currently missing in PDF
+      - At bottom of PDF, show SAME TOTAL row as screen:
+     TOTAL | Paid: Rs. 700 | Cash In: Rs. 300 | 70 Pairs | Pending / Balance: Rs. -210
+      - Do NOT show different totals in PDF vs Screen.
+
+4. BAS CUSTOMER NAME NA SHOW HO - AS USER SAID:
+      - User says: "Bas customer name na show ho."
+      - In PDF, do NOT show Customer Name column (2. CUSTOMER - Bestway).
+      - PDF is for worker / contractor, so hide Customer Name for privacy.
+      - Keep Customer Name ONLY on screen, NOT in PDF.
+      - All other columns must show in PDF.
+
+5. APPLY SAME FIX TO ALL LEDGER PDFs:
+      - Apply same Full Table rule to:
+          1. Cutting Management > Full Ledger PDF - TOP PRIORITY
+          2. Cutting Management > Single Worker / Contractor Ledger PDF
+          3. Customer Orders > Full Ledger PDF (if same bug)
+      - All PDFs must include Cash In / Cash Out rows.
+
+6. TEST - EXACT VIDEO STEPS:
+      - Open Cutting Management, check screen shows 4 entries: pride -30, pride 100, Cash Paid Out 1,000, Cash In 300.
+      - Click Full Ledger PDF / Print.
+      - Check PDF shows 4 lines, NOT 2. Check Cash Paid Out -Rs. 1,000 line is there, Cash In +Rs. 300 line is there.
+      - Check Date 08 Nov 2026 shows on Cash lines too.
+      - Check Balance column shows running balance after each line, final Balance = Rs. -210, same as screen.
+      - Check Customer Name column is NOT in PDF.
+      - Check TOTAL row in PDF = Paid Rs. 700, Cash In Rs. 300, 70 Pairs, same as screen.
+      - Add new Cash Out Rs. 500, regenerate PDF, check new line appears in PDF immediately.
+
+Do NOT change theme, calculations, or delete any data. Only fix PDF query to include Cash entries, add Balance column, hide Customer Name in PDF, and make PDF totals match screen totals.CRITICAL BUG - Delivery Of 100 Pairs Corrupts Whole Order - Duplicate Entry + Sizes Mixed + Qty Moved To Wrong Article - Fix Delivery - Glove Factory ERP
+
+PAGE: Customer Orders > Order Detail - #ORD-003 - Bestway - 20,000 Pairs
+
+CURRENT PROBLEM - VIDEO PROOF - 3 BUGS IN 1 DELIVERY:
+User says in Urdu: "Is me ye dekho abhi ye purani video me main dekh raha tha ke idhar ye sahi detail aa rahi thi. Yahan pe saare size aur article show ho rahe the. Theek hai. Lekin ab ye maine yahan pe maine kya kiya, sirf delivery ki hai. Ye dekho yahan pe maine delivery ki hai. Delivery maine ki hai takreeban keh lo 100 pairs ki ki hai. Theek hai. Ye 100 pairs ki delivery ki hai 10 size ki. Theek hai. Ek to yahan pe bhi delivery add ho gayi hai. Aur neeche bhi aa gayi hai. Is pe bhi 100 pairs ki do entries hui hain. Is ke saath saath ye hua hai ke ye order ke size mix ho gaye hain. Yani ke size phir khatam kar gaya hai. Yahan pe 10,000 likh diya hai. Theek hai. Ye 10,000 aur yahan pe bhi 10,000 10,000. 100 jora maine ye bheja hai, maine article ka, dusre article me chala gaya hai. 100 jo maine jo hai na yahan pe 100 chala gaya, 9,900 reh gaye, theek hai. Lekin is ne kya kiya hai, ye dekho size, size aur size 10, ye max kar diye hain. Ye mera khayal hai koi error aa raha hai."
+
+BEFORE DELIVERY - CORRECT (from old video):
+- Order #ORD-003 - Bestway - 20,000 Pairs - 2 Articles:
+    1. Pride - 10,000 Pairs - Size: 10
+    2. Ce - 10,000 Pairs - Size: 10
+- CUTTING DETAIL showed correctly: Article Pride + Size 10, Article Ce + Size 10, separate, no mix.
+
+AFTER 1 DELIVERY - WRONG:
+- Delivery done: ONLY 1 Delivery - Pride, Size 10, 100 Pairs, Bill GP-007 / B111 No. 25
+- But Delivery History shows 100 Pairs TWICE - Once at top, once at bottom - 2 entries for same 100.
+- CUTTING DETAIL / DELIVERY REPORT shows WRONG:
+  ARTICLE CE - Total 10,000 - Balance 10,000
+  ARTICLE PRIDE - Total 10,000 - Balance 9,900
+  But Size column shows 10,000 / 10,000 / 10,000 everywhere - Size value overwritten by Qty.
+  Size 10 is gone, replaced by 10,000.
+- And 100 Pairs deducted from WRONG article - User says: "100 jora maine bheja hai, maine article ka, dusre article me chala gaya hai." - Delivery for Pride went into Ce, or vice versa.
+- Total Delivered shows 4,110 but should be 4,010 + 100 = 4,110? Check: Duplicate makes it 4,210 in one place, 4,110 in another - figures NOT matching.
+
+REQUIRED FIX:
+
+1. FIX DUPLICATE DELIVERY - 1 DELIVERY = 1 ENTRY - MOST IMPORTANT:
+      - Delivery of 100 Pairs must create EXACTLY 1 row in Delivery History, NOT 2.
+      - Root cause is same as before: Frontend double-submit OR Backend creates 1 Delivery row + 1 Stock OUT row and History page UNIONs both and shows both as 2 rows.
+      - Fix: On [Confirm Delivered] disable button + show "Saving...", add Idempotency Key (Bill No. + Article + Size + Qty + Date), backend must reject duplicate if same Bill + Article + Size + Qty already exists in last 10 sec.
+      - Delivery History list must SELECT ONLY from deliveries table, do NOT UNION stock_history. Stock OUT is separate, do NOT show it in Delivery History.
+      - Cleanup: In ORD-003, find duplicate 100 Pairs rows for Pride Size 10 Bill GP-007, delete the duplicate (keep earliest 1). Recalculate Total Delivered: Must be Old Total + 100 ONLY, NOT + 200.
+
+2. FIX DELIVERY MUST DEDUCT FROM CORRECT ARTICLE + CORRECT SIZE ONLY:
+      - Delivery payload must include BOTH: article_id AND size. NOT just article name string.
+      - Example: Delivery = order_id ORD-003, article_id = Pride_id, size = "10", qty = 100
+      - Backend UPDATE must be: UPDATE order_items SET delivered = delivered + 100, balance = balance - 100 WHERE order_id = ORD-003 AND article_id = Pride_id AND size = "10"
+      - Do NOT do: UPDATE ... WHERE article_name LIKE '%pride%' OR WHERE order_id = ORD-003 (without article filter) - That is why 100 went to dusre article.
+      - Do NOT update Ce when delivery is for Pride. Ce Balance must stay 10,000, Pride Balance must become 9,900.
+      - Test: Deliver Pride 100, check Pride 10,000 -> 9,900, Ce stays 10,000 -> 10,000. Deliver Ce 100, check Ce 10,000 -> 9,900, Pride stays 9,900.
+
+3. FIX SIZE MIX / SIZE OVERWRITTEN BY QTY - CRITICAL DATA CORRUPTION:
+      - Currently after Delivery, Size column shows 10,000 instead of 10. Means code is doing: size = total_qty OR size = qty OR size field is being overwritten by Total Order Qty.
+      - Fix: Size is a TEXT / LABEL field, NEVER update it on Delivery / Cutting / Stock. Size must be IMMUTABLE after Order Creation.
+      - In Delivery / Cutting code, REMOVE any line like: order_item.size = qty, order_item.size = total, item.size = delivered_qty.
+      - Size must stay "10" forever. Qty, Delivered, Balance are NUMBERS, Size is LABEL - do NOT mix them.
+      - In CUTTING DETAIL and DELIVERY REPORT, Size column must show "10", NOT "10,000".
+      - Cleanup: For ORD-003, restore Size = "10" for both Pride and Ce rows. Find all order_items where size = "10000" OR size = "1000" OR size is numeric > 100, restore size from original Order Created history (Order Created - Pride Size 10, Ce Size 10). Do NOT delete Qty, only fix Size field.
+
+4. FIX ORDER MUST NOT CHANGE ON DELIVERY - ONLY DELIVERED / BALANCE CHANGE:
+      - Delivery must ONLY change 2 fields for that ONE Article+Size row:
+     Delivered: Old + 100
+     Balance / Remaining: Old - 100
+      - Delivery must NOT change: Total Order Qty (10,000 stays 10,000), Size (10 stays 10), Other Article Qty, Other Article Size, Other Article Balance.
+      - After Delivery of Pride 100, correct state must be:
+     Pride - Total 10,000 - Size 10 - Delivered 100 - Balance 9,900
+     Ce - Total 10,000 - Size 10 - Delivered 0 - Balance 10,000
+     GRAND TOTAL - Total 20,000 - Delivered 100 - Balance 19,900
+
+5. TEST - EXACT VIDEO STEPS:
+      - Open ORD-003 Bestway, note BEFORE: Pride 10,000 Size 10 Balance 10,000, Ce 10,000 Size 10 Balance 10,000.
+      - Do Delivery: Article = Pride, Size = 10, Qty = 100, Bill = GP-007. Click Confirm ONCE.
+      - Check: Delivery History shows ONLY 1 new row, NOT 2. Total Delivered increases by 100 ONLY.
+      - Check CUTTING DETAIL: Pride Size still shows "10", NOT "10,000". Ce Size still "10".
+      - Check Balances: Pride Balance = 9,900, Ce Balance = 10,000 (unchanged).
+      - Check DELIVERY REPORT: Pride Delivered = 100, Remaining = 9,900. Ce Delivered = 0, Remaining = 10,000.
+      - Refresh page, check Size does NOT become 10,000 again, duplicate does NOT come back.
+
+Do NOT change theme, totals, or delete original Order. Only fix duplicate, fix deduct from correct Article+Size, fix Size overwrite, and restore Size = 10 for ORD-003.Fix Delivery History Showing Other Order's Deliveries - ORD-003 Bestway Showing Oshawa Traders Deliveries - Filter By Order ID Only - Glove Factory ERP
+
+PAGE: Customer Orders > Order Detail - #ORD-003 - Bestway - 20,000 Pairs
+
+CURRENT PROBLEM - VIDEO PROOF - CRITICAL CROSS-ORDER LEAK:
+User says in Urdu: "Ye dekhna order number three Bestway ka, theek hai ye ye option bhi sahi hai, theek hai aur is me ye option jo hai na ye wali option hai, is ke upar bas code lag jaye, waise ye bhi sahi lag rahi hai. Ye wali order one point list yani ke number ek wali, sirf itne hisse pe code lag jaye. Agar nahi lagta to ye yahan pe khatam kar dein, theek hai. Aur is ke baad ye mera khayal hai ye is ne show kiye hain article me kaun kaun sa article hai aur kaun kaun sa size hai aur abhi is ki cutting zero zero hai, theek hai ye bhi theek hai. Is ke ilawa ye jo hai na ye delivery jo hui hai. Ye delivery hui maine ki hai, wo wali dusre order ki. Yani ke is ke peeche jaun ga na yahan pe, is order ki ye deliveries maine ki hain, theek hai ye wali. Lekin ye delivery is order ki show hi na ho. Is order ki kyun show ho rahi hai? Ye dekho is order ki show ho rahi hai. Ye delivery is order ki show hi na ho, show hi isi order ki ho."
+
+Example in video - ORD-003 - Bestway:
+- Section A Original Order - CORRECT, do NOT change:
+  Pride - 10,000 Pairs
+  Ce - 10,000 Pairs
+  Total = 20,000 Pairs
+- CUTTING DETAIL - CORRECT, Cutting 0 / 0 - User says: "Cutting zero zero hai, ye bhi theek hai."
+- But DELIVERY HISTORY - WRONG - Shows deliveries of OTHER order:
+  tig shorts - 2,000 Pairs - B111 No. 25 - oshawa traders
+  tig shorts - 700 Pairs - B111 No. 105 - oshawa traders
+  tig long - 1,000 Pairs - B111 No. 21 - oshawa traders
+  tig shorts - 100 Pairs - B111 No. 11 - oshawa traders
+  Total Delivered in ORD-003 shows 3,910 - WRONG, because it is summing other order's deliveries.
+- These tig shorts / tig long deliveries belong to OTHER order: #ORD-??? - oshawa traders - 21,000 Pairs - tig shorts + tig long.
+- They must NOT show in Bestway ORD-003 at all.
+
+ROOT CAUSE:
+- Delivery History query is NOT filtering by order_id.
+- It is filtering by Customer Name OR by Article Name OR by no filter at all - e.g. SELECT * FROM deliveries WHERE customer = 'Bestway' OR WHERE article IN ('Pride','Ce') OR SELECT * FROM deliveries (all).
+- Or Delivery Save is NOT saving order_id at all, so on display system cannot know which order it belongs to, so it shows all deliveries in every order.
+- Or Delivery Save is saving WRONG order_id - e.g. always saving last opened order, or saving order_id = null.
+
+REQUIRED FIX:
+
+1. FIX DELIVERY HISTORY FILTER - ONLY THIS ORDER'S DELIVERIES - MOST IMPORTANT:
+   - In Order Detail page, Delivery History query MUST be:
+     SELECT * FROM deliveries WHERE order_id = :current_order_id ORDER BY date DESC
+   - Example: For ORD-003, show ONLY deliveries WHERE order_id = 'ORD-003'.
+   - Do NOT use: WHERE customer = 'Bestway', WHERE article = 'Pride', WHERE delivery_date = today, or NO WHERE clause.
+   - Same fix for:
+     1. Section C: Delivery History - ALL DISPATCHES & GATE PASSES - TOP PRIORITY
+     2. Section B: Live Order Progress - BILLED / DISPATCHED count must be SUM(deliveries WHERE order_id = ORD-003) ONLY.
+     3. Section A: CUTTING DETAIL > DELIVERY REPORT - Delivered column must be SUM(deliveries WHERE order_id = ORD-003 AND article = that article) ONLY.
+   - After fix, ORD-003 Delivery History must show ONLY Pride / Ce deliveries, if any. If Bestway has 0 deliveries yet, show EMPTY: "No deliveries yet for this order" - Do NOT show tig shorts / tig long.
+
+2. FIX DELIVERY SAVE - MUST SAVE CORRECT ORDER_ID:
+   - When user clicks [Deliver / Create Bill / Gate Pass] from inside ORD-003, frontend must send order_id = 'ORD-003' in payload.
+   - Backend MUST save: delivery.order_id = payload.order_id, delivery.article_id, delivery.size, delivery.qty.
+   - Do NOT save order_id from localStorage / last opened order / global variable. Use the order_id from the page user is currently on.
+   - Add NOT NULL constraint: order_id cannot be null. If order_id is missing, reject save with error: "Order ID missing, please refresh and try again" - Do NOT save orphan delivery.
+   - Cleanup: Find all deliveries where order_id is NULL OR order_id is wrong (e.g. tig shorts delivery saved under ORD-003 Bestway). Re-assign them to correct order by matching Bill No. + Article + Customer:
+     - tig shorts / tig long deliveries with Customer = oshawa traders must be moved to oshawa traders order, NOT Bestway.
+     - Pride / Ce deliveries with Customer = Bestway must stay in ORD-003.
+   - After cleanup, recalculate: ORD-003 Total Delivered must be SUM of ONLY its own deliveries. Oshawa Order Total Delivered must be SUM of ONLY its own deliveries.
+
+3. FIX ORDER 1 POINT LIST - CODE LAG JAYE - SIRF ITNE HISSE PE:
+   - User says: "Ye wali order one point list yani ke number ek wali, sirf itne hisse pe code lag jaye. Agar nahi lagta to ye yahan pe khatam kar dein."
+   - Meaning: The top Section - "1. ORDER CREATED - ORIGINAL CONTRACT SPECIFICATION" - Number 1 wali list - is CORRECT as it is, just make its code work / lock it.
+   - Do NOT delete / change Section 1 layout. Only apply fix / code to that small part so it stays immutable / never changes.
+   - If code cannot be applied to that part, then REMOVE / HIDE that duplicate part - "Yahan pe khatam kar dein" - Do NOT keep duplicate.
+   - In simple words: Keep Section 1 as it is, make it read-only / locked, do NOT let Delivery / Cutting change Section 1 values. Section 1 = Original Order, NEVER changes.
+
+4. KEEP CUTTING ZERO ZERO AS IT IS:
+   - User says Cutting 0 / 0 is correct. Do NOT change Cutting History.
+   - Cutting History must also be filtered by order_id = ORD-003, same as Delivery. Do NOT show other order's Cutting in ORD-003.
+
+5. TEST - EXACT VIDEO STEPS:
+   - Open ORD-003 Bestway.
+   - Check Delivery History: Must NOT show tig shorts 2,000, tig shorts 700, tig long 1,000. Those are oshawa traders deliveries.
+   - Check Total Delivered for ORD-003: Must be ONLY Bestway deliveries (Pride + Ce). If 0, show 0.
+   - Go back to Orders Hub, open oshawa traders Order.
+   - Check its Delivery History: Must show tig shorts 2,000, 700, tig long 1,000 - those ARE its own deliveries, must still be there, NOT deleted.
+   - Create new Delivery from ORD-003: Pride, Size 10, 100 Pairs. Check: It appears ONLY in ORD-003, does NOT appear in oshawa traders Order.
+   - Create new Delivery from oshawa Order: tig shorts, 100 Pairs. Check: It appears ONLY in oshawa Order, does NOT appear in ORD-003 Bestway.
+   - Refresh both orders, check leak does NOT come back.
+
+Do NOT change theme, Section 1 layout, Cutting logic, or delete any delivery. Only fix filter to order_id, fix save to save correct order_id, and move wrongly assigned deliveries to their correct order.Fix Delivery History Showing Other Order's Deliveries - ORD-003 Bestway Showing Oshawa Traders Deliveries - Filter By Order ID Only - Glove Factory ERP
+
+PAGE: Customer Orders > Order Detail - #ORD-003 - Bestway - 20,000 Pairs
+
+CURRENT PROBLEM - VIDEO PROOF:
+User says in Urdu: "Show kiye hain article me kaun kaun sa article hai aur kaun kaun sa size hai. Aur abhi is ki cutting zero zero hai. Theek hai stock me nahi aayi. Theek hai ye bhi theek hai. Is ke ilawa ye jo hai na ye delivery jo hui hai. Yaar ye delivery hui maine ki hai. Wo wali dusre order ki. Yani ke is ke peeche jaun ga na yahan pe. Is order ki ye deliveries maine ki hain. Theek hai ye wali. Lekin ye delivery is order ki show hi na ho. Is order ki kyun show ho rahi hai? Ye dekho is order ki show ho rahi hai. Ye delivery is order ki show hi na ho, show hi isi order ki ho."
+
+Example - ORD-003 - Bestway:
+- Original Order CORRECT:
+  Pride - 10,000 Pairs
+  Ce - 10,000 Pairs
+  Total = 20,000 Pairs
+- Cutting CORRECT: Cutting 0 / 0, Stock 0 - User says "Ye bhi theek hai."
+- DELIVERY HISTORY WRONG - Shows OTHER order's deliveries:
+  tig shorts - 2,000 Pairs - B111 No. 25 - oshawa traders
+  tig shorts - 700 Pairs - B111 No. 105 - oshawa traders
+  tig long - 1,000 Pairs - B111 No. 21 - oshawa traders
+  tig shorts - 100 Pairs - B111 No. 11 - oshawa traders
+  Total Delivered shows 3,910 in ORD-003 - WRONG
+- These tig shorts / tig long deliveries belong to OTHER order: oshawa traders - 21,000 Pairs - tig shorts + tig long. They must NOT show in Bestway ORD-003.
+
+ROOT CAUSE:
+Delivery History query is NOT filtering by order_id. It is showing ALL deliveries, or filtering by Customer / Article name, or Delivery Save is NOT saving order_id, so system cannot know which order it belongs to.
+
+REQUIRED FIX:
+
+1. FIX DELIVERY HISTORY FILTER - ONLY THIS ORDER:
+      - Query MUST be: SELECT * FROM deliveries WHERE order_id = :current_order_id ORDER BY date DESC
+      - For ORD-003, show ONLY deliveries WHERE order_id = 'ORD-003'.
+      - Do NOT use: WHERE customer = 'Bestway', WHERE article = 'Pride', or NO WHERE clause.
+      - Apply same filter to:
+     a) Section C: Delivery History - ALL DISPATCHES & GATE PASSES - TOP PRIORITY
+     b) Section B: BILLED / DISPATCHED = SUM(deliveries WHERE order_id = ORD-003) ONLY
+     c) Section A: DELIVERY REPORT - Delivered = SUM(deliveries WHERE order_id = ORD-003 AND article = that article) ONLY
+      - After fix, ORD-003 must show ONLY Pride / Ce deliveries. If Bestway has 0 deliveries yet, show "No deliveries yet for this order" - Do NOT show tig shorts / tig long.
+
+2. FIX DELIVERY SAVE - MUST SAVE CORRECT ORDER_ID:
+      - When user delivers from inside ORD-003, frontend must send order_id = 'ORD-003'.
+      - Backend MUST save: delivery.order_id = payload.order_id, article_id, size, qty.
+      - Do NOT save order_id from localStorage / last opened order. Use order_id from current page.
+      - Add NOT NULL: order_id cannot be null. If missing, reject: "Order ID missing, please refresh".
+      - Cleanup: Re-assign wrong deliveries by matching Bill No. + Article + Customer:
+          - tig shorts / tig long + oshawa traders = move to oshawa traders order, NOT Bestway.
+          - Pride / Ce + Bestway = stay in ORD-003.
+      - After cleanup, recalculate: ORD-003 Total Delivered = SUM of ONLY its own deliveries. Oshawa Order Total = SUM of ONLY its own.
+
+3. KEEP CUTTING ZERO ZERO AS IT IS:
+      - Cutting 0 / 0 is correct. Do NOT change Cutting.
+      - Cutting History also must be filtered by order_id = ORD-003. Do NOT show other order's Cutting here.
+
+4. TEST:
+      - Open ORD-003 Bestway: Must NOT show tig shorts 2,000, 700, tig long 1,000. Total Delivered must be ONLY Bestway deliveries.
+      - Open oshawa traders Order: Must STILL show tig shorts 2,000, 700, tig long 1,000 - those are its own, do NOT delete them.
+      - New Delivery from ORD-003: Pride 100 Pairs -> Must appear ONLY in ORD-003, NOT in oshawa Order.
+      - New Delivery from oshawa Order: tig shorts 100 Pairs -> Must appear ONLY in oshawa Order, NOT in ORD-003.
+      - Refresh both, leak must NOT come back.
+
+Do NOT change theme, Section 1 layout, Cutting logic, or delete any delivery. Only fix filter to order_id, fix save to save correct order_id, and move wrongly assigned deliveries to correct order.Fix Cutting Ledger Sorting - New Entry Must Always Come At Bottom - Cash Lines Must NOT Push Cutting Entry Up - Glove Factory ERP
+
+PAGE: CUTTING > ali Ledger - Notebook Ledger - ali
+
+CURRENT PROBLEM - VIDEO PROOF - SORTING BUG:
+User says in Urdu: "Is me na ye dekhna hai ye maine abhi 800 pair enter kiya hai theek hai lekin 800 pair se pehle maine ye enter kiya tha 1000 rupiya is ko diya hua tha theek hai ye 800 pair jo hai na is ko na 800 pair ko yahan pe aana chahiye neeche phir maine 250 pair enter kiya hai ye cash line se upar aa raha hai ye neeche aana chahiye yani ke 5600 maine is ko diye hain jo entry wali hai na wo aise tarteeb neeche aati jaye cash line wali beshak upar hoti jaye wo neeche aati jaye jaise hi ab main nayi entry karun na is line pe show is se nahi karun neeche wali line pe show is se nahi karun neeche wali line pe show aise show hona chahiye."
+
+Example in video - ali Ledger:
+- Entry 1: 08 Nov 2026 - Bestway - pride - Size 10 - 100 Pairs - Rs. 700
+- Entry 2: 08 Nov 2026 - Bestway - Ce - Size 10 - 800 Pairs - Rs. 5,600 - User just entered this 800
+- Entry 3: 08 Nov 2026 - Bestway - Pride - Size 8 - 250 Pairs - Rs. 1,750 - User entered this after 800
+- Entry 4: 08 Nov 2026 - Cash Paid Out - Paid to all - Rs. -1,000
+- Entry 5: 08 Nov 2026 - Cash Paid Out - Paid to all (Bill Payment book) - Rs. -1,000
+- Entry 6: 08 Nov 2026 - Cash In - Cash In from all - Rs. +300
+
+WRONG NOW:
+- 250 Pairs Cutting Entry is showing ABOVE Cash lines - e.g. Cutting 250 is at row 3, Cash lines are at row 4-5.
+- New Cutting Entry jumps to top / middle instead of going to bottom.
+- User says: "Ye cash line se upar aa raha hai ye neeche aana chahiye" and "Jab main nayi entry karun to neeche wali line pe show hona chahiye."
+
+REQUIRED FIX:
+
+1. SORT BY CREATED TIME - OLDEST TOP, NEWEST BOTTOM - MOST IMPORTANT:
+      - Ledger must be sorted by ONE rule only: created_at ASC, then id ASC.
+      - Query MUST be: SELECT * FROM cutting_ledger WHERE worker = 'ali' ORDER BY created_at ASC, id ASC
+      - Do NOT sort by: type, amount, article, date DESC, or GROUP BY type.
+      - Do NOT do 2 separate lists: Cutting list on top + Cash list on bottom, then merge. That is why Cutting jumps above Cash.
+      - Do NOT sort by Date only - because all entries are same Date 08 Nov 2026, so Date sort is unstable and new entry jumps anywhere. MUST use created_at + id as tie-breaker.
+      - Correct order after fix must be EXACT entry order:
+          1. pride 100 (first entered)
+          2. Cash 1,000 (second entered - if entered second)
+          3. Ce 800 (third entered)
+          4. Pride 250 (fourth entered - MUST be at bottom, NOT above Cash)
+          5. Cash 1,000 / Cash In 300 (if entered after)
+          - In short: Jo entry pehle ki, wo upar. Jo entry baad me ki, wo neeche. Har nayi entry sab se neeche aaye.
+
+2. NEW ENTRY MUST APPEND AT BOTTOM - NEVER INSERT IN MIDDLE / TOP:
+      - On [Save Cutting] / [Save Cash In] / [Save Cash Out], frontend must APPEND new row at bottom of table immediately, do NOT prepend, do NOT re-sort by type.
+      - Backend must NOT return list sorted by type. Return same created_at ASC order.
+      - After Save + Refresh, new entry must STILL be at bottom. Refresh must NOT move it up.
+
+3. CASH LINES MUST ALSO FOLLOW SAME ORDER:
+      - Cash Paid Out / Cash In are ALSO ledger entries, NOT separate section.
+      - Cash line must stay where it was entered. If Cash 1,000 was entered BEFORE 800 Pairs, Cash stays ABOVE 800. If Cash was entered AFTER 250, Cash stays BELOW 250.
+      - User says: "Cash line wali beshak upar hoti jaye" - Means Cash line can go up only if it was entered earlier. It must NOT be forced to bottom or forced to top by type.
+      - Do NOT pin Cash lines to bottom, do NOT pin Cutting lines to top.
+
+4. BALANCE MUST RECALCULATE IN SAME DISPLAY ORDER:
+      - Running Balance must be calculated top-to-bottom in created_at ASC order.
+      - Example: Start 0 -> +700 = 700 -> +5,600 = 6,300 -> +1,750 = 8,050 -> -1,000 = 7,050 -> -1,000 = 6,050 -> +300 = 6,350
+      - If order changes, Balance changes - so Balance MUST follow new sorted order. Do NOT calculate Balance in different order than display.
+      - Totals at bottom must still match: TOTAL: 1,150 Pairs, Paid Rs. 6,300, Cash In Rs. 300.
+
+5. APPLY SAME FIX TO ALL LEDGERS:
+      - Cutting Ledger - ali - TOP PRIORITY
+      - Cutting Management > Full Ledger
+      - Customer Order > Delivery History
+      - Any ledger where Cash + Cutting are mixed.
+
+6. TEST - EXACT VIDEO STEPS:
+      - Open ali Ledger, note current order.
+      - Enter Cutting: Ce, Size 10, 800 Pairs, Rs. 5,600. Check: New row appears at BOTTOM, NOT above Cash lines.
+      - Enter Cash Paid Out: Rs. 1,000. Check: Cash row appears at BOTTOM, below 800 row.
+      - Enter Cutting: Pride, Size 8, 250 Pairs, Rs. 1,750. Check: 250 row appears at BOTTOM, BELOW Cash 1,000 row. NOT above Cash line.
+      - Refresh page, check: Order is STILL same - 100, 800, Cash 1,000, 250 - newest at bottom, no jumping.
+      - Check Balance column: Running Balance increases / decreases in same top-to-bottom order, final Balance matches TOTAL.
+
+Do NOT change theme, amounts, calculations, or delete any entry. Only fix sorting to created_at ASC + id ASC, remove type-grouping, and make new entry always append at bottom.

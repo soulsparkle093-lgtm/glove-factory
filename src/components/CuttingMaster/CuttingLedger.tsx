@@ -133,30 +133,54 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
 
   const handleExportPdf = () => {
     try {
-      const doc = new jsPDF();
-      doc.setFontSize(16);
-      doc.text(`Cutting Ledger - ${cutter.name}`, 14, 18);
-      doc.setFontSize(10);
-      doc.text(`Phone: ${cutter.phone || 'N/A'} | Date: ${new Date().toLocaleDateString()}`, 14, 25);
-      doc.text(`Total Given: ${totalGivenPairs} Pairs | Total Received: ${totalReceivedPairs} Pairs | Pending: ${pendingPairs} Pairs`, 14, 31);
+      const doc = new jsPDF({ orientation: 'landscape' });
+      doc.setFontSize(14);
+      doc.text(`Cutting Ledger - All`, 14, 15);
+      doc.setFontSize(9);
+      doc.text(`Filter: ${dateFilter} | Total Entries: ${visibleEntries.length} | Pending: ${pendingPairs} Pairs`, 14, 22);
 
-      const tableRows = visibleEntries.map(entry => [
-        entry.date || '-',
-        entry.customerName || 'Direct',
-        entry.article || '-',
-        entry.size || '-',
-        String(entry.pairs || 0),
-        String(entry.rate || 0),
-        String(entry.lotTotal || (entry.pairs * entry.rate) || 0),
-        String(entry.runningBalance || 0)
-      ]);
+      let runningBal = 0;
+      let totalPairsCount = 0;
+      let totalAmountCount = 0;
+
+      const tableRows = visibleEntries.map(entry => {
+        const isReturn = entry.type === 'RETURN';
+        const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
+        const rate = Number(entry.rate) || 0;
+        const amount = isReturn ? -Math.abs(pairs * rate) : (Number(entry.lotTotal) || Math.abs(pairs * rate));
+        runningBal += amount;
+        totalPairsCount += isReturn ? -Math.abs(pairs) : Math.abs(pairs);
+        totalAmountCount += amount;
+
+        return [
+          formatDate(entry.date),
+          entry.article || '-',
+          entry.size || '-',
+          isReturn ? `-${Math.abs(pairs)}` : String(pairs),
+          entry.average || '-',
+          rate ? `Rs. ${rate}` : 'Rs. 0',
+          isReturn ? `-Rs. ${Math.abs(amount).toLocaleString()}` : `Rs. ${amount.toLocaleString()}`,
+          `Rs. ${runningBal.toLocaleString()}`
+        ];
+      });
 
       autoTable(doc, {
-        head: [['Date', 'Customer', 'Article', 'Size', 'Pairs', 'Rate', 'Total', 'Balance']],
+        head: [['DATE', 'ARTICLE', 'SIZE', 'PAIRS', 'AVERAGE', 'RATE', 'AMOUNT', 'BALANCE']],
         body: tableRows,
-        startY: 36,
-        theme: 'striped',
-        styles: { fontSize: 8 }
+        foot: [[
+          'TOTAL',
+          '',
+          '',
+          `${totalPairsCount.toLocaleString()} Pairs`,
+          '',
+          '',
+          `Rs. ${totalAmountCount.toLocaleString()}`,
+          `Pending: ${pendingPairs.toLocaleString()} Pairs`
+        ]],
+        startY: 27,
+        styles: { fontSize: 8 },
+        headStyles: { fillColor: [30, 64, 175] },
+        footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold' }
       });
 
       doc.save(`Cutting_Ledger_${cutter.name.replace(/\s+/g, '_')}.pdf`);

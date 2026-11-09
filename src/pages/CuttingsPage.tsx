@@ -267,6 +267,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     billNo: ''
   });
   const [isSavingEditPayment, setIsSavingEditPayment] = useState(false);
+  const [paymentToDelete, setPaymentToDelete] = useState<NasimLedgerPayment | null>(null);
+  const [isDeletingPayment, setIsDeletingPayment] = useState(false);
   const [articleSearch, setArticleSearch] = useState('');
   const [isArticlePickerOpen, setIsArticlePickerOpen] = useState(false);
   const articlePickerRef = useRef<HTMLDivElement>(null);
@@ -293,7 +295,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   useEffect(() => {
     const handleGlobalEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (paymentModalType) setPaymentModalType(null);
+        if (paymentToDelete) setPaymentToDelete(null);
+        else if (paymentModalType) setPaymentModalType(null);
         else if (editingPayment) setEditingPayment(null);
         else if (isReturnCuttingModalOpen) setIsReturnCuttingModalOpen(false);
         else if (returnTarget) setReturnTarget(null);
@@ -309,6 +312,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     window.addEventListener('keydown', handleGlobalEscape);
     return () => window.removeEventListener('keydown', handleGlobalEscape);
   }, [
+    paymentToDelete,
     paymentModalType,
     editingPayment,
     isReturnCuttingModalOpen,
@@ -563,6 +567,78 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       ? dateFilteredEntries.filter(entry => (entry.customerName || '').toLowerCase().includes(query))
       : dateFilteredEntries;
   }, [dateFilteredEntries, ledgerSearch]);
+
+  // Unified ledger rows matching the on-screen table: combines cutting and cashbook rows
+  // Strictly sorted chronologically: date ASC, createdAt ASC, id ASC
+  // Newly added cuttings or payments always append at the bottom
+  const unifiedLedgerRows = useMemo(() => {
+    const cuttingRows = visibleLedgerEntries.map(entry => {
+      const isReturn = entry.type === 'RETURN';
+      const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
+      const rate = Number(entry.rate) || 0;
+      const amount = isReturn ? -Math.abs(pairs * rate) : Math.abs(pairs * rate);
+      return {
+        id: entry.id,
+        kind: 'cutting' as const,
+        date: entry.date,
+        createdAt: entry.createdAt,
+        customer: entry.customerName || 'PRO4',
+        article: entry.articleTitle || entry.article || '-',
+        size: entry.sizeName || entry.size || '-',
+        pairs,
+        average: entry.average || '-',
+        rate: entry.rate,
+        amount,
+        type: entry.type,
+        remarks: entry.remarks,
+        rawEntry: entry
+      };
+    });
+
+    const paymentRows = dateFilteredPayments.map(payment => {
+      const isCashOut = payment.type === 'cash_out';
+      const amount = isCashOut ? -payment.amount : payment.amount;
+      return {
+        id: payment.id,
+        kind: 'payment' as const,
+        date: payment.date,
+        createdAt: payment.createdAt,
+        customer: isCashOut ? 'Cash Paid (Out)' : 'Cash In Adjustment',
+        article: isCashOut
+          ? `Paid to ${activeCutter?.name || 'Contractor'}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}`
+          : `Cash In from ${activeCutter?.name || 'Contractor'}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}`,
+        size: '—',
+        pairs: '—' as string | number,
+        average: '—',
+        rate: '—' as string | number,
+        amount,
+        type: payment.type,
+        paymentType: payment.type,
+        billNo: payment.billNo,
+        method: payment.paymentMethod,
+        rawPayment: payment
+      };
+    });
+
+    // Chronological sorting: date ASC, createdAt ASC, id ASC
+    const combined = [...cuttingRows, ...paymentRows];
+    combined.sort((a, b) => {
+      const cmpDate = safeStringCompare(a.date, b.date);
+      if (cmpDate !== 0) return cmpDate;
+      const cmpCreated = safeStringCompare(a.createdAt, b.createdAt);
+      if (cmpCreated !== 0) return cmpCreated;
+      return safeStringCompare(a.id, b.id);
+    });
+
+    let runningBalance = 0;
+    return combined.map(row => {
+      runningBalance += row.amount;
+      return {
+        ...row,
+        runningBal: runningBalance
+      };
+    });
+  }, [visibleLedgerEntries, dateFilteredPayments, activeCutter?.name]);
 
   // Dynamically filter customer orders that contain the selected Article
   const filteredOrdersForArticle = useMemo(() => {
@@ -851,17 +927,33 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const openEditEntry = (entry: CuttingEntry) => {
     setEditingEntry(entry);
     setEditForm({
-      date: entry.date,
+      date: entry.date || '',
       customerName: entry.customerName || '',
-      article: entry.article || '',
-      size: entry.size || '',
+      article: entry.articleTitle || entry.article || '',
+      size: entry.sizeName || entry.size || '',
       average: entry.average || '',
       remarks: entry.remarks || '',
-      pairs: String(Math.abs(entry.pairs)),
-      rate: String(entry.rate),
+      pairs: String(Math.abs(entry.pairs ?? (entry as any).totalQty ?? 0)),
+      rate: String(entry.rate ?? ''),
       billNo: entry.billNo || ''
     });
   };
+
+  useEffect(() => {
+    if (editingEntry) {
+      setEditForm({
+        date: editingEntry.date || '',
+        customerName: editingEntry.customerName || '',
+        article: editingEntry.articleTitle || editingEntry.article || '',
+        size: editingEntry.sizeName || editingEntry.size || '',
+        average: editingEntry.average || '',
+        remarks: editingEntry.remarks || '',
+        pairs: String(Math.abs(editingEntry.pairs ?? (editingEntry as any).totalQty ?? 0)),
+        rate: String(editingEntry.rate ?? ''),
+        billNo: editingEntry.billNo || ''
+      });
+    }
+  }, [editingEntry]);
 
   const handleUpdateEntry = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -896,7 +988,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         await updateCuttingEntry(editingEntry.id, updates);
       }
       setEditingEntry(null);
-      showToast('Cutting entry updated successfully.');
+      showToast('Cutting Entry Updated Successfully.');
     } catch (err) {
       console.error('Error updating cutting entry:', err);
       showToast('The cutting entry could not be updated. Please try again.', 'error');
@@ -1115,76 +1207,93 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   };
 
   const exportLedgerPdf = (
-    entries: CuttingEntry[],
-    payments: NasimLedgerPayment[],
-    title: string,
+    rows: Array<{
+      id: string;
+      kind: 'cutting' | 'payment';
+      date: string;
+      customer: string;
+      article: string;
+      size: string;
+      pairs: string | number;
+      average: string;
+      rate: string | number;
+      amount: number;
+      runningBal: number;
+      type?: string;
+      paymentType?: string;
+    }>,
     fileName: string,
     rangeLabel: string
   ) => {
-    const chronologicalEntries = [...entries].sort((a, b) =>
-      safeStringCompare(a.date, b.date) ||
-      safeStringCompare(a.createdAt, b.createdAt) ||
-      safeStringCompare(a.id, b.id)
-    );
-    const totalCutting = chronologicalEntries.reduce((sum, entry) => {
-      const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
-      const rate = Number(entry.rate) || 0;
-      return sum + pairs * rate;
-    }, 0);
-    const paid = payments.filter(payment => payment.type === 'cash_in').reduce((sum, payment) => sum + payment.amount, 0);
-    const rows = chronologicalEntries.map(entry => {
-      const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
-      const rate = Number(entry.rate) || 0;
-      const total = pairs * rate;
+    let totalPairsCount = 0;
+
+    const tableRows = rows.map(row => {
+      const isCutting = row.kind === 'cutting';
+      const isReturn = isCutting && row.type === 'RETURN';
+      const isPayment = row.kind === 'payment';
+      const isCashOut = isPayment && row.paymentType === 'cash_out';
+
+      if (isCutting) {
+        const pairs = Number(row.pairs) || 0;
+        totalPairsCount += isReturn ? -Math.abs(pairs) : Math.abs(pairs);
+      }
+
+      let amountStr = '';
+      if (isPayment) {
+        amountStr = isCashOut ? `-Rs. ${Math.abs(row.amount).toLocaleString()}` : `+Rs. ${row.amount.toLocaleString()}`;
+      } else if (isReturn) {
+        amountStr = `-Rs. ${Math.abs(row.amount).toLocaleString()}`;
+      } else {
+        amountStr = `Rs. ${row.amount.toLocaleString()}`;
+      }
+
+      const pairsStr = isCutting
+        ? (isReturn ? `-${Math.abs(Number(row.pairs) || 0)}` : String(row.pairs))
+        : '—';
+
+      const rateStr = row.rate !== '—' && row.rate !== undefined && row.rate !== '' && row.rate !== 0
+        ? `Rs. ${row.rate}`
+        : (isCutting ? 'Rs. 0' : '—');
+
       return [
-        formatConfirmationDate(entry.date),
-        entry.articleTitle || entry.article || '-',
-        entry.sizeName || entry.size || '-',
-        String(pairs),
-        `Rs. ${rate}`,
-        `Rs. ${total}`
+        formatDate(row.date),
+        row.article || '-',
+        row.size || '-',
+        pairsStr,
+        row.average || '-',
+        rateStr,
+        amountStr,
+        `Rs. ${row.runningBal.toLocaleString()}`
       ];
     });
+
     const doc = new jsPDF({ orientation: 'landscape' });
     doc.setFontSize(14);
-    doc.text(title, 14, 15);
+    // Header only: "Cutting Ledger - All" + Date Range (No customer or company name)
+    doc.text('Cutting Ledger - All', 14, 15);
     doc.setFontSize(9);
-    doc.text(`${rangeLabel} | Total Entries: ${chronologicalEntries.length}`, 14, 22);
+    doc.text(`${rangeLabel} | Total Entries: ${rows.length}`, 14, 22);
+
+    // EXACT 8 columns: DATE, ARTICLE, SIZE, PAIRS, AVERAGE, RATE, AMOUNT, BALANCE (Customer column removed)
     autoTable(doc, {
-      head: [['DATE', 'ARTICLE', 'SIZE', 'PAIRS', 'RATE', 'TOTAL AMOUNT']],
-      body: rows,
+      head: [['DATE', 'ARTICLE', 'SIZE', 'PAIRS', 'AVERAGE', 'RATE', 'AMOUNT', 'BALANCE']],
+      body: tableRows,
+      foot: [[
+        'TOTAL',
+        `Paid: Rs. ${totalPaid.toLocaleString()}`,
+        '',
+        `${totalPairsCount.toLocaleString()} Pairs`,
+        '',
+        '',
+        `Rs. ${cuttingEntriesBillsTotal.toLocaleString()}`,
+        `Pending: Rs. ${remainingBalance.toLocaleString()}`
+      ]],
       startY: 27,
       styles: { fontSize: 8 },
       headStyles: { fillColor: [30, 64, 175] },
+      footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold' }
     });
-    const tableEnd = (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || 30;
-    let summaryY = tableEnd + 20;
-    if (summaryY + 36 > doc.internal.pageSize.getHeight() - 12) {
-      doc.addPage();
-      summaryY = 18;
-    }
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    const remaining = totalCutting - paid;
-    const extra = Math.max(0, -remaining);
-    doc.text(`Total Bill: Rs. ${totalCutting.toLocaleString()}`, 14, summaryY);
-    doc.text(`Total Paid: Rs. ${paid.toLocaleString()}`, 14, summaryY + 6);
-    doc.text(`Baqaya / Remaining: Rs. ${remaining.toLocaleString()}`, 14, summaryY + 12);
-    if (extra > 0) doc.text(`Extra Paid: Rs. ${extra.toLocaleString()}`, 14, summaryY + 18);
-    autoTable(doc, {
-      head: [['Date', 'Type', 'Amount', 'Method', 'Bill No']],
-      body: payments.map(payment => [
-        formatConfirmationDate(payment.date),
-        payment.type === 'cash_in' ? 'Cash In' : 'Cash Out',
-        `Rs. ${payment.amount}`,
-        payment.paymentMethod,
-        payment.billNo || '-'
-      ]),
-      startY: summaryY + (extra > 0 ? 27 : 21),
-      styles: { fontSize: 8 },
-      headStyles: { fillColor: [30, 64, 175] },
-      didDrawPage: () => undefined
-    });
+
     doc.save(fileName);
     showToast('PDF downloaded successfully.');
   };
@@ -1200,13 +1309,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       ? `${filterFromDate || 'start'}-to-${filterToDate || 'end'}`
       : ledgerDateFilter.replace(/\s+/g, '_');
     const dateSuffix = new Date().toISOString().slice(0, 10);
-    const customerName = activeCutter?.name || 'Cutting';
-    const safeCustomerName = customerName.replace(/[<>:"/\\|?*]+/g, '_');
+    // Full Ledger PDF must match the screen entries (unifiedLedgerRows) exactly
     exportLedgerPdf(
-      dateFilteredEntries,
-      dateFilteredPayments,
-      `${customerName} Cutting Ledger - ${formatLedgerTitleFilter(ledgerDateFilter, filterFromDate, filterToDate)}`,
-      `${safeCustomerName}_FullLedger_${filterName}_${dateSuffix}.pdf`,
+      unifiedLedgerRows,
+      `Cutting_FullLedger_${filterName}_${dateSuffix}.pdf`,
       formatLedgerRange(ledgerDateFilter, filterFromDate, filterToDate)
     );
   };
@@ -1216,15 +1322,35 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       ? `${filterFromDate || 'start'}-to-${filterToDate || 'end'}`
       : ledgerDateFilter.replace(/\s+/g, '_');
     const dateSuffix = new Date().toISOString().slice(0, 10);
-    const customerName = activeCutter?.name || 'Cutting';
-    const safeCustomerName = customerName.replace(/[<>:"/\\|?*]+/g, '_');
-    exportLedgerPdf(
-      dateFilteredEntries,
-      dateFilteredPayments,
-      `${customerName} Cutting Cashbook - ${formatLedgerTitleFilter(ledgerDateFilter, filterFromDate, filterToDate)}`,
-      `${safeCustomerName}_Cashbook_${filterName}_${dateSuffix}.pdf`,
-      `Cashbook | ${formatLedgerRange(ledgerDateFilter, filterFromDate, filterToDate)}`
-    );
+    const rangeLabel = formatLedgerRange(ledgerDateFilter, filterFromDate, filterToDate);
+    const doc = new jsPDF({ orientation: 'landscape' });
+    doc.setFontSize(14);
+    doc.text(`Cutting Cashbook - All`, 14, 15);
+    doc.setFontSize(9);
+    doc.text(`${rangeLabel} | Total Transactions: ${dateFilteredPayments.length}`, 14, 22);
+    autoTable(doc, {
+      head: [['DATE', 'TYPE', 'AMOUNT', 'PAYMENT METHOD', 'BILL NO']],
+      body: dateFilteredPayments.map(payment => [
+        formatDate(payment.date),
+        payment.type === 'cash_in' ? 'Cash In (Adjustment)' : 'Cash Out (Payment)',
+        `Rs. ${payment.amount.toLocaleString()}`,
+        payment.paymentMethod,
+        payment.billNo || '-'
+      ]),
+      foot: [[
+        'TOTAL',
+        `Net Paid: Rs. ${totalPaid.toLocaleString()}`,
+        `In: Rs. ${totalCashIn.toLocaleString()} | Out: Rs. ${totalCashOut.toLocaleString()}`,
+        '',
+        ''
+      ]],
+      startY: 27,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [30, 64, 175] },
+      footStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold' }
+    });
+    doc.save(`Cutting_Cashbook_${filterName}_${dateSuffix}.pdf`);
+    showToast('Cashbook PDF downloaded successfully.');
   };
 
   const handleFilteredPdfDownload = (event: React.FormEvent) => {
@@ -1235,23 +1361,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     }
     setIsGeneratingPdf(true);
     try {
-      const entries = activeCutterEntries.filter(entry =>
-        entry.date >= pdfFromDate &&
-        entry.date <= pdfToDate
-      );
-      const payments = ledgerPayments.filter(payment => payment.date >= pdfFromDate && payment.date <= pdfToDate);
-      if (entries.length === 0 && payments.length === 0) {
+      const filtered = unifiedLedgerRows.filter(row => row.date >= pdfFromDate && row.date <= pdfToDate);
+      if (filtered.length === 0) {
         showToast('No entries were found in this date range.', 'error');
         return;
       }
       const range = `${formatConfirmationDate(pdfFromDate)} to ${formatConfirmationDate(pdfToDate)}`;
-      const customerName = activeCutter?.name || 'Cutting';
-      const safeCustomerName = customerName.replace(/[<>:"/\\|?*]+/g, '_');
       exportLedgerPdf(
-        entries,
-        payments,
-        `${customerName} Cutting Ledger - ${range}`,
-        `${safeCustomerName}_FullLedger_${pdfFromDate}-to-${pdfToDate}.pdf`,
+        filtered,
+        `Cutting_DateRange_${pdfFromDate}-to-${pdfToDate}.pdf`,
         `Date: ${range}`
       );
       setPdfExportMode(null);
@@ -1491,10 +1609,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     }
   };
 
-  const confirmDeletePayment = (paymentId: string) => {
-    if (window.confirm('Are you sure you want to delete this payment? Balance will recalculate.')) {
-      void handleDeletePayment(paymentId);
-    }
+  const confirmDeletePayment = (payment: NasimLedgerPayment) => {
+    setPaymentToDelete(payment);
   };
 
   // Handle add new cutter
@@ -2048,12 +2164,12 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     </>
                   )}
                 </div>
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{visibleLedgerEntries.length} Entries</span>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{unifiedLedgerRows.length} Entries</span>
               </div>
             </div>
 
             <div className="overflow-x-auto" ref={ledgerTableScrollRef}>
-              {visibleLedgerEntries.length === 0 ? (
+              {unifiedLedgerRows.length === 0 ? (
                 <div className="p-12 text-center text-slate-400">
                   <BookOpen className="w-8 h-8 mx-auto mb-2 opacity-40" />
                   <p className="text-xs">{ledgerSearch ? 'No matching customer entries.' : `No entries in ${activeCutter.name}'s notebook yet.`}</p>
@@ -2084,130 +2200,61 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-medium">
-                    {(() => {
-                      const cuttingRows = visibleLedgerEntries.map(entry => {
-                        const isReturn = entry.type === 'RETURN';
-                        const amount = isReturn ? -Math.abs(entry.pairs * (Number(entry.rate) || 0)) : Math.abs(entry.pairs) * (Number(entry.rate) || 0);
-                        return {
-                          id: entry.id,
-                          kind: 'cutting' as const,
-                          date: entry.date,
-                          customer: entry.customerName || 'PRO4',
-                          article: entry.articleTitle || entry.article || '-',
-                          size: entry.sizeName || entry.size || '-',
-                          pairs: entry.pairs,
-                          average: entry.average || '-',
-                          rate: entry.rate,
-                          amount,
-                          type: entry.type,
-                          remarks: entry.remarks,
-                          rawEntry: entry
-                        };
-                      });
-
-                      const paymentRows = dateFilteredPayments.map(payment => {
-                        const isCashOut = payment.type === 'cash_out';
-                        const amount = isCashOut ? -payment.amount : payment.amount;
-                        return {
-                          id: payment.id,
-                          kind: 'payment' as const,
-                          date: payment.date,
-                          customer: isCashOut ? 'Cash Paid (Out)' : 'Cash In Adjustment',
-                          article: isCashOut ? `Paid to ${activeCutter.name}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}` : `Cash In from ${activeCutter.name}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}`,
-                          size: '—',
-                          pairs: '—',
-                          average: '—',
-                          rate: '—',
-                          amount,
-                          type: payment.type,
-                          paymentType: payment.type,
-                          billNo: payment.billNo,
-                          method: payment.paymentMethod,
-                          rawPayment: payment
-                        };
-                      });
-
-                      // Chronological sorting: earliest date first; for same date, cuttings before payments
-                      const combined = [...cuttingRows, ...paymentRows];
-                      combined.sort((a, b) => {
-                        const cmp = (a.date || '').localeCompare(b.date || '');
-                        if (cmp !== 0) return cmp;
-                        if (a.kind !== b.kind) return a.kind === 'cutting' ? -1 : 1;
-                        return (a.id || '').localeCompare(b.id || '');
-                      });
-
-                      let runningBalance = 0;
-                      const unifiedRows = combined.map(row => {
-                        runningBalance += row.amount;
-                        return {
-                          ...row,
-                          runningBal: runningBalance
-                        };
-                      });
-
-                      if (unifiedRows.length === 0) {
+                    {unifiedLedgerRows.map((row) => {
+                      if (row.kind === 'payment') {
+                        const isCashOut = row.paymentType === 'cash_out';
                         return (
-                          <tr>
-                            <td colSpan={10} className="py-12 text-center text-slate-400">
-                              No entries or transactions found for the selected filter.
+                          <tr key={row.id} className={isCashOut ? 'bg-rose-50/40 hover:bg-rose-50/70 transition' : 'bg-emerald-50/40 hover:bg-emerald-50/70 transition'}>
+                            <td className="py-3 px-3.5 font-mono sticky left-0 bg-white z-10 border-r border-slate-200 font-bold whitespace-nowrap">
+                              {formatDate(row.date)}
+                            </td>
+                            <td className="py-3 px-3 font-bold">
+                              <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-bold ${
+                                isCashOut ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'
+                              }`}>
+                                {isCashOut ? 'Cash Paid Out' : 'Cash In'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 font-semibold text-slate-800">
+                              {row.article}
+                            </td>
+                            <td className="py-3 px-2 text-center text-slate-400">—</td>
+                            <td className="py-3 px-3 text-right text-slate-400">—</td>
+                            <td className="py-3 px-2 text-center text-slate-400">—</td>
+                            <td className="py-3 px-3 text-right text-slate-400">—</td>
+                            <td className={`py-3 px-3 text-right font-mono font-black ${
+                              isCashOut ? 'text-rose-700' : 'text-emerald-700'
+                            }`}>
+                              {isCashOut ? `-Rs. ${Math.abs(row.amount).toLocaleString()}` : `+Rs. ${row.amount.toLocaleString()}`}
+                            </td>
+                            <td className={`py-3 px-3 text-right font-mono font-black border-l border-blue-100 ${
+                              row.runningBal < 0 ? 'text-rose-700 bg-rose-50/50' : 'text-blue-900 bg-blue-50/60'
+                            }`}>
+                              {row.runningBal < 0 ? `-Rs. ${Math.abs(row.runningBal).toLocaleString()}` : `Rs. ${row.runningBal.toLocaleString()}`}
+                            </td>
+                            <td className="py-3 px-3 text-center">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditPayment(row.rawPayment)}
+                                  className="p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
+                                  title="Edit Payment"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => confirmDeletePayment(row.rawPayment)}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                  title="Delete Payment"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
                       }
-
-                      return unifiedRows.map((row) => {
-                        if (row.kind === 'payment') {
-                          const isCashOut = row.paymentType === 'cash_out';
-                          return (
-                            <tr key={row.id} className={isCashOut ? 'bg-rose-50/40 hover:bg-rose-50/70 transition' : 'bg-emerald-50/40 hover:bg-emerald-50/70 transition'}>
-                              <td className="py-3 px-3.5 font-mono sticky left-0 bg-white z-10 border-r border-slate-200 font-bold whitespace-nowrap">
-                                {formatDate(row.date)}
-                              </td>
-                              <td className="py-3 px-3 font-bold">
-                                <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-bold ${
-                                  isCashOut ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'
-                                }`}>
-                                  {isCashOut ? 'Cash Paid Out' : 'Cash In'}
-                                </span>
-                              </td>
-                              <td className="py-3 px-3 font-semibold text-slate-800">
-                                {row.article}
-                              </td>
-                              <td className="py-3 px-2 text-center text-slate-400">—</td>
-                              <td className="py-3 px-3 text-right text-slate-400">—</td>
-                              <td className="py-3 px-2 text-center text-slate-400">—</td>
-                              <td className="py-3 px-3 text-right text-slate-400">—</td>
-                              <td className={`py-3 px-3 text-right font-mono font-black ${
-                                isCashOut ? 'text-rose-700' : 'text-emerald-700'
-                              }`}>
-                                {isCashOut ? `-Rs. ${Math.abs(row.amount).toLocaleString()}` : `+Rs. ${row.amount.toLocaleString()}`}
-                              </td>
-                              <td className="py-3 px-3 text-right font-mono font-black text-blue-900 bg-blue-50/60 border-l border-blue-100">
-                                Rs. {row.runningBal.toLocaleString()}
-                              </td>
-                              <td className="py-3 px-3 text-center">
-                                <div className="flex items-center justify-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenEditPayment(row.rawPayment)}
-                                    className="p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
-                                    title="Edit Payment"
-                                  >
-                                    <Pencil className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => confirmDeletePayment(row.id)}
-                                    className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
-                                    title="Delete Payment"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        }
 
                         const entry = row.rawEntry;
                         const isReturn = entry.type === 'RETURN';
@@ -2302,7 +2349,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                               <div className="flex items-center justify-center gap-1.5">
                                 <button
                                   type="button"
-                                  onClick={() => setEditingEntry(entry)}
+                                  onClick={() => openEditEntry(entry)}
                                   className="p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition cursor-pointer"
                                   title="Edit Cutting Entry"
                                 >
@@ -2320,8 +2367,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                             </td>
                           </tr>
                         );
-                      });
-                    })()}
+                      })}
                   </tbody>
                   <tfoot className="border-t-2 border-slate-300 bg-slate-50 font-black text-xs">
                     <tr>
@@ -3695,7 +3741,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between bg-blue-600 px-5 py-4 text-white">
-              <h3 className="font-bold">Edit Cutting Entry</h3>
+              <div>
+                <h3 className="font-bold text-base">Edit Cutting Entry - #{editingEntry.id ? editingEntry.id.slice(-6) : ''}</h3>
+                <p className="text-xs text-blue-100">Update saved values directly. Totals and pending balance update automatically.</p>
+              </div>
               <button
                 type="button"
                 onClick={() => setEditingEntry(null)}
@@ -3706,34 +3755,129 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <form onSubmit={handleUpdateEntry} className="max-h-[85vh] space-y-3 overflow-y-auto p-5">
-              {([
-                ['date', 'Date', 'date'],
-                ['customerName', 'Customer Name', 'text'],
-                ['article', 'Article', 'text'],
-                ['size', 'Size', 'text'],
-                ['average', 'Average', 'text'],
-                ['remarks', 'Remarks / Lot', 'text'],
-                ['pairs', 'Pairs', 'number'],
-                ['rate', 'Rate (Rs.)', 'number'],
-                ['billNo', 'Bill No', 'text']
-              ] as const).map(([field, label, type]) => (
-                <label key={field} className="block text-xs font-bold text-slate-700">
-                  {label}{field !== 'size' && field !== 'billNo' ? ' *' : ''}
+            <form onSubmit={handleUpdateEntry} className="max-h-[85vh] space-y-3.5 overflow-y-auto p-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block text-xs font-bold text-slate-700">
+                  Date *
                   <input
-                    required={field !== 'size' && field !== 'billNo'}
-                    type={type}
-                    min={field === 'pairs' ? '1' : field === 'rate' ? '0' : undefined}
-                    step={field === 'rate' ? 'any' : undefined}
-                    disabled={editingEntry.type === 'RETURN' && !(['date', 'remarks', 'pairs', 'rate'] as const).includes(field as 'date' | 'remarks' | 'pairs' | 'rate')}
-                    value={editForm[field]}
-                    onChange={e => setEditForm(current => ({ ...current, [field]: e.target.value }))}
+                    required
+                    type="date"
+                    value={editForm.date}
+                    onChange={e => setEditForm(current => ({ ...current, date: e.target.value }))}
                     className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
                   />
                 </label>
-              ))}
-              <div className="rounded-lg bg-slate-50 p-3 text-right text-sm font-bold">
-                Total: Rs. {(Number(editForm.pairs) || 0) * (Number(editForm.rate) || 0)}
+                <label className="block text-xs font-bold text-slate-700">
+                  Customer Name *
+                  <input
+                    required
+                    type="text"
+                    placeholder="e.g. Bestway"
+                    value={editForm.customerName}
+                    onChange={e => setEditForm(current => ({ ...current, customerName: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
+                  />
+                </label>
+              </div>
+
+              {/* SEPARATE Article Box and Size Box */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block text-xs font-bold text-slate-700">
+                  Article * (Separate Box)
+                  <input
+                    required
+                    type="text"
+                    list="cuttings-article-list"
+                    placeholder="e.g. pride, ce, 1202"
+                    value={editForm.article}
+                    onChange={e => setEditForm(current => ({ ...current, article: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900 bg-white"
+                  />
+                  <datalist id="cuttings-article-list">
+                    {allArticleOptions.map(opt => (
+                      <option key={opt.id} value={opt.articleName} />
+                    ))}
+                  </datalist>
+                </label>
+
+                <label className="block text-xs font-bold text-slate-700">
+                  Size (Separate Box)
+                  <input
+                    type="text"
+                    placeholder="e.g. 10, L, M, XL"
+                    value={editForm.size}
+                    onChange={e => setEditForm(current => ({ ...current, size: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900 bg-white"
+                  />
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block text-xs font-bold text-slate-700">
+                  Pairs *
+                  <input
+                    required
+                    type="number"
+                    min="1"
+                    placeholder="Pairs quantity"
+                    value={editForm.pairs}
+                    onChange={e => setEditForm(current => ({ ...current, pairs: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono font-bold text-slate-900"
+                  />
+                </label>
+                <label className="block text-xs font-bold text-slate-700">
+                  Rate (Rs.) *
+                  <input
+                    required
+                    type="number"
+                    min="0"
+                    step="any"
+                    placeholder="Rate per pair"
+                    value={editForm.rate}
+                    onChange={e => setEditForm(current => ({ ...current, rate: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono font-bold text-slate-900"
+                  />
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <label className="block text-xs font-bold text-slate-700">
+                  Average
+                  <input
+                    type="text"
+                    placeholder="e.g. -"
+                    value={editForm.average}
+                    onChange={e => setEditForm(current => ({ ...current, average: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
+                  />
+                </label>
+                <label className="block text-xs font-bold text-slate-700">
+                  Bill No
+                  <input
+                    type="text"
+                    placeholder="e.g. 105"
+                    value={editForm.billNo}
+                    onChange={e => setEditForm(current => ({ ...current, billNo: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
+                  />
+                </label>
+                <label className="block text-xs font-bold text-slate-700">
+                  Remarks / Lot
+                  <input
+                    type="text"
+                    placeholder="Remarks"
+                    value={editForm.remarks}
+                    onChange={e => setEditForm(current => ({ ...current, remarks: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
+                  />
+                </label>
+              </div>
+
+              <div className="rounded-xl bg-blue-50 border border-blue-200 p-3.5 text-right text-sm font-bold text-blue-900 flex items-center justify-between">
+                <span className="text-xs text-blue-700 font-medium">Recalculated Amount:</span>
+                <span className="font-mono text-base font-black">
+                  Rs. {((Number(editForm.pairs) || 0) * (Number(editForm.rate) || 0)).toLocaleString()}
+                </span>
               </div>
               <div className="flex justify-end gap-2 pt-1 border-t border-slate-100">
                 <button
@@ -3802,6 +3946,93 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition cursor-pointer"
               >
                 {isDeletingEntry ? 'Deleting...' : 'Delete Entry'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {paymentToDelete && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isDeletingPayment) setPaymentToDelete(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5 text-rose-600">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-rose-100">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">
+                    Delete Payment Entry?
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {paymentToDelete.type === 'cash_out' ? 'Cash Out (Payment)' : 'Cash In'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPaymentToDelete(null)}
+                disabled={isDeletingPayment}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-4 space-y-2 text-xs text-slate-600">
+              <p>
+                Are you sure you want to delete this payment of{' '}
+                <span className="font-bold text-slate-900 font-mono">Rs. {paymentToDelete.amount.toLocaleString()}</span> dated{' '}
+                <span className="font-bold text-slate-900 font-mono">{formatDate(paymentToDelete.date)}</span>?
+              </p>
+              {paymentToDelete.billNo && (
+                <p className="text-slate-500">
+                  Bill No: <span className="font-mono font-semibold text-slate-700">{paymentToDelete.billNo}</span>
+                </p>
+              )}
+              <p className="text-amber-800 bg-amber-50 rounded-lg p-2.5 border border-amber-200 text-[11px]">
+                The running ledger balance will automatically recalculate.
+              </p>
+            </div>
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setPaymentToDelete(null)}
+                disabled={isDeletingPayment}
+                className="rounded-xl px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Cancel / Back</span>
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingPayment}
+                onClick={async () => {
+                  if (!db || !paymentToDelete) return;
+                  setIsDeletingPayment(true);
+                  try {
+                    await deleteDoc(doc(db, 'nasim_ledger_payments', paymentToDelete.id));
+                    setLedgerPayments(prev => prev.filter(p => p.id !== paymentToDelete.id));
+                    showToast('Payment deleted successfully.');
+                    setPaymentToDelete(null);
+                  } catch (err) {
+                    console.error('Error deleting payment:', err);
+                    showToast('Could not delete payment. Please try again.', 'error');
+                  } finally {
+                    setIsDeletingPayment(false);
+                  }
+                }}
+                className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition cursor-pointer"
+              >
+                {isDeletingPayment ? 'Deleting...' : 'Delete Payment'}
               </button>
             </div>
           </div>

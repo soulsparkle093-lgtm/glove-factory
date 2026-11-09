@@ -156,10 +156,54 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
       getGroup(articleName, '-').totalOrder = totalOrder;
     }
 
-    return [...groups.values()].sort((a, b) =>
+    const allRows = [...groups.values()];
+
+    // Filter out duplicate phantom rows (e.g. 'pride / -' or 'pride / Matrix') when concrete sizes exist
+    const filteredRows = allRows.filter(row => {
+      const cleanSize = row.size.trim().toLowerCase();
+      const isPhantom = cleanSize === '-' || cleanSize === 'matrix' || cleanSize === 'unspecified';
+      if (!isPhantom) return true;
+      const siblingsWithRealSizes = allRows.filter(r => 
+        normalize(r.article) === normalize(row.article) &&
+        r.size.trim().toLowerCase() !== '-' &&
+        r.size.trim().toLowerCase() !== 'matrix' &&
+        r.size.trim().toLowerCase() !== 'unspecified'
+      );
+      if (siblingsWithRealSizes.length > 0) {
+        // If real sizes exist for this article, suppress phantom rows with 0 totalOrder
+        if (row.totalOrder === 0) return false;
+      }
+      return true;
+    });
+
+    return filteredRows.sort((a, b) =>
       a.article.localeCompare(b.article) || a.size.localeCompare(b.size, undefined, { numeric: true })
     );
   }, [articleName, cuttingEntries, cuttingTransactions, cuttings, deliveryHistory, invoices, order, orderDispatchHistory, orderId, totalOrder]);
+
+  // Group by Article with sizes below it
+  const groupedArticles = useMemo(() => {
+    const articleMap = new Map<string, OrderSummaryRow[]>();
+    rows.forEach(r => {
+      const art = r.article || articleName || 'Article';
+      if (!articleMap.has(art)) articleMap.set(art, []);
+      articleMap.get(art)!.push(r);
+    });
+    return Array.from(articleMap.entries()).map(([artName, sizeRows]) => {
+      const artTotalOrder = sizeRows.reduce((sum, r) => sum + r.totalOrder, 0);
+      const artCutting = sizeRows.reduce((sum, r) => sum + r.cutting, 0);
+      const artDelivered = sizeRows.reduce((sum, r) => sum + r.delivered, 0);
+      const artBalance = artTotalOrder - artDelivered;
+      return {
+        article: artName,
+        sizeRows,
+        totalOrder: artTotalOrder,
+        cutting: artCutting,
+        delivered: artDelivered,
+        balance: artBalance
+      };
+    });
+  }, [rows, articleName]);
 
   const totals = rows.reduce((summary, row) => ({
     cutting: summary.cutting + row.cutting,
@@ -173,7 +217,7 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
         <h2 className="font-black text-slate-900">
           Customer Order : {order?.orderNo || orderId} <span className="font-medium text-slate-500">+ Article : {articleName || 'Unspecified Article'}</span>
         </h2>
-        <p className="mt-1 text-xs text-slate-500">Read-only summary, updated automatically from cutting receipts and stock deliveries.</p>
+        <p className="mt-1 text-xs text-slate-500">Read-only summary grouped by article, updated automatically from cutting receipts and stock deliveries.</p>
       </header>
 
       <div className="overflow-x-auto">
@@ -187,40 +231,93 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
             <tr className="bg-slate-50 text-xs font-bold text-slate-700">
               <th className="border border-slate-300 px-3 py-2 text-right">T Cutting</th>
               <th className="border border-slate-300 px-3 py-2 text-right">T.REM</th>
-              <th className="border border-slate-300 px-3 py-2">ART No / Size</th>
+              <th className="border border-slate-300 px-3 py-2">Size</th>
               <th className="border border-slate-300 px-3 py-2 text-right">Total Order</th>
               <th className="border border-slate-300 px-3 py-2 text-right">Delivered</th>
               <th className="border border-slate-300 px-3 py-2 text-right">Remaining</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {rows.map(row => {
-              const cuttingRemaining = row.totalOrder - row.cutting;
-              const orderRemaining = row.totalOrder - row.delivered;
+            {groupedArticles.map((group) => {
+              const groupCuttingRem = group.totalOrder - group.cutting;
+              const groupOrderRem = group.totalOrder - group.delivered;
               return (
-                <tr key={row.key} className="text-slate-700 even:bg-slate-50/60">
-                  <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums">{row.cutting.toLocaleString()}</td>
-                  <td className={`border border-slate-200 px-3 py-2 text-right font-bold font-mono tabular-nums ${cuttingRemaining < 0 ? 'text-red-600' : ''}`}>{cuttingRemaining.toLocaleString()}</td>
-                  <td className="border border-slate-200 px-3 py-2 font-bold">{row.article} / {row.size}</td>
-                  <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums">{row.totalOrder.toLocaleString()}</td>
-                  <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums">{row.delivered.toLocaleString()}</td>
-                  <td className="border border-slate-200 px-3 py-2 text-right font-bold font-mono tabular-nums">{orderRemaining.toLocaleString()}</td>
-                </tr>
+                <React.Fragment key={group.article}>
+                  {/* Article Header Row (Article on top) */}
+                  <tr className="bg-blue-50/80 font-black text-slate-900 border-t-2 border-b border-blue-200">
+                    <td className="border border-blue-200 px-3 py-2.5 text-right font-mono text-xs text-blue-900">
+                      {group.cutting.toLocaleString()}
+                    </td>
+                    <td className={`border border-blue-200 px-3 py-2.5 text-right font-mono text-xs ${groupCuttingRem < 0 ? 'text-red-600' : 'text-blue-900'}`}>
+                      {groupCuttingRem.toLocaleString()}
+                    </td>
+                    <td className="border border-blue-200 px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-black text-sm text-blue-950 uppercase tracking-wide">
+                          Article: {group.article}
+                        </span>
+                        <span className="rounded-md bg-white border border-blue-300 px-2 py-0.5 font-mono text-[11px] font-bold text-blue-700">
+                          Total: {group.totalOrder.toLocaleString()} Pairs
+                        </span>
+                        <span className="rounded-md bg-emerald-100 border border-emerald-300 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-800">
+                          Balance: {groupOrderRem.toLocaleString()} Pairs
+                        </span>
+                      </div>
+                    </td>
+                    <td className="border border-blue-200 px-3 py-2.5 text-right font-mono text-xs text-blue-900">
+                      {group.totalOrder.toLocaleString()}
+                    </td>
+                    <td className="border border-blue-200 px-3 py-2.5 text-right font-mono text-xs text-blue-900">
+                      {group.delivered.toLocaleString()}
+                    </td>
+                    <td className="border border-blue-200 px-3 py-2.5 text-right font-mono text-xs font-black text-blue-900">
+                      {groupOrderRem.toLocaleString()}
+                    </td>
+                  </tr>
+
+                  {/* Sub-rows for each size */}
+                  {group.sizeRows.map((row) => {
+                    const cuttingRemaining = row.totalOrder - row.cutting;
+                    const orderRemaining = row.totalOrder - row.delivered;
+                    return (
+                      <tr key={row.key} className="text-slate-700 hover:bg-slate-50 transition">
+                        <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums text-xs">
+                          {row.cutting.toLocaleString()}
+                        </td>
+                        <td className={`border border-slate-200 px-3 py-2 text-right font-bold font-mono tabular-nums text-xs ${cuttingRemaining < 0 ? 'text-red-600' : ''}`}>
+                          {cuttingRemaining.toLocaleString()}
+                        </td>
+                        <td className="border border-slate-200 px-3 py-2 font-mono font-bold text-xs pl-6 text-slate-800">
+                          Size: {row.size}
+                        </td>
+                        <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums text-xs">
+                          {row.totalOrder.toLocaleString()}
+                        </td>
+                        <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums text-xs">
+                          {row.delivered.toLocaleString()}
+                        </td>
+                        <td className="border border-slate-200 px-3 py-2 text-right font-bold font-mono tabular-nums text-xs">
+                          {orderRemaining.toLocaleString()}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </React.Fragment>
               );
             })}
-            {rows.length === 0 && (
+            {groupedArticles.length === 0 && (
               <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-500">No order summary details are available yet.</td></tr>
             )}
           </tbody>
-          {rows.length > 0 && (
+          {groupedArticles.length > 0 && (
             <tfoot>
-              <tr className="bg-slate-100 font-black text-slate-800">
-                <td className="border border-slate-300 px-3 py-2 text-right font-mono">{totals.cutting.toLocaleString()}</td>
-                <td className={`border border-slate-300 px-3 py-2 text-right font-mono ${totals.totalOrder - totals.cutting < 0 ? 'text-red-600' : ''}`}>{(totals.totalOrder - totals.cutting).toLocaleString()}</td>
-                <td className="border border-slate-300 px-3 py-2">Total</td>
-                <td className="border border-slate-300 px-3 py-2 text-right font-mono">{totals.totalOrder.toLocaleString()}</td>
-                <td className="border border-slate-300 px-3 py-2 text-right font-mono">{totals.delivered.toLocaleString()}</td>
-                <td className="border border-slate-300 px-3 py-2 text-right font-mono">{(totals.totalOrder - totals.delivered).toLocaleString()}</td>
+              <tr className="bg-slate-100 font-black text-slate-800 border-t-2 border-slate-300">
+                <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{totals.cutting.toLocaleString()}</td>
+                <td className={`border border-slate-300 px-3 py-2.5 text-right font-mono ${totals.totalOrder - totals.cutting < 0 ? 'text-red-600' : ''}`}>{(totals.totalOrder - totals.cutting).toLocaleString()}</td>
+                <td className="border border-slate-300 px-3 py-2.5 font-bold uppercase tracking-wide">Grand Total</td>
+                <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{totals.totalOrder.toLocaleString()}</td>
+                <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{totals.delivered.toLocaleString()}</td>
+                <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{(totals.totalOrder - totals.delivered).toLocaleString()}</td>
               </tr>
             </tfoot>
           )}

@@ -50,12 +50,28 @@ export const StockManagement: React.FC = () => {
     deliverFromStock,
     updateCuttingEntry,
     deleteCuttingEntry,
+    deleteStockInEntry,
+    updateArticleName,
+    deleteWholeArticle,
+    restoreArticle,
+    deletedProductsList = [],
     updateCuttingReturn,
     deleteCuttingReturn,
     updateStockDelivery,
     deleteStockDelivery,
     showToast 
   } = useFactory();
+
+  // State for renaming article across stock and cutting entries
+  const [editingArticleName, setEditingArticleName] = useState<string | null>(null);
+  const [editArticleNewName, setEditArticleNewName] = useState('');
+  const [isSavingArticleRename, setIsSavingArticleRename] = useState(false);
+
+  // State for deleting entire article
+  const [deletingArticleName, setDeletingArticleName] = useState<string | null>(null);
+  const [isDeletingArticle, setIsDeletingArticle] = useState(false);
+  const [showDeletedArticles, setShowDeletedArticles] = useState(false);
+  const [restoringArticleName, setRestoringArticleName] = useState<string | null>(null);
 
   // Active Tab in Directory: Stock IN Report vs Stock OUT Report
   const [activeTab, setActiveTab] = useState<'IN' | 'OUT'>('IN');
@@ -313,7 +329,7 @@ export const StockManagement: React.FC = () => {
     );
     const totalIn = selectedArticleInHistory.reduce((sum, item) => sum + item.quantity, 0);
     const totalOut = selectedArticleOutHistory.reduce((sum, item) => sum + item.quantity, 0);
-    const available = Math.max(0, totalIn - totalOut);
+    const available = totalIn - totalOut;
     return {
       articleName: found?.articleName || selectedArticleName,
       totalIn,
@@ -446,10 +462,6 @@ export const StockManagement: React.FC = () => {
       showToast('Enter customer name, valid date, and quantity.', 'error');
       return;
     }
-    if (selectedArticleSummary && qty > selectedArticleSummary.availableStock) {
-      showToast(`Quantity exceeds available stock (${selectedArticleSummary.availableStock} pairs).`, 'error');
-      return;
-    }
     setIsSavingOut(true);
     try {
       const matched = stockManagement.find(s => 
@@ -497,10 +509,6 @@ export const StockManagement: React.FC = () => {
     }
     if (!Number.isFinite(qty) || qty <= 0) {
       showToast('Enter a valid positive pair quantity.', 'error');
-      return;
-    }
-    if (selectedArticleSummary && qty > selectedArticleSummary.availableStock) {
-      showToast(`Cannot allocate more than available stock (${selectedArticleSummary.availableStock} pairs).`, 'error');
       return;
     }
     const order = orders.find(o => o.id === allocateOrderId);
@@ -657,10 +665,6 @@ export const StockManagement: React.FC = () => {
       showToast('Enter a valid positive pair quantity.', 'error');
       return;
     }
-    if (qty > deliverTarget.availableStock) {
-      showToast(`Cannot deliver more than available stock (${deliverTarget.availableStock.toLocaleString()} pairs).`, 'error');
-      return;
-    }
     const order = orders.find(o => o.id === deliverOrderId);
     if (!order) {
       showToast('Selected customer order not found.', 'error');
@@ -695,7 +699,7 @@ export const StockManagement: React.FC = () => {
         });
       }
       const beforeStock = deliverTarget.availableStock;
-      const afterStock = Math.max(0, beforeStock - qty);
+      const afterStock = beforeStock - qty;
       showToast(`${deliverTarget.articleName} Total was ${beforeStock.toLocaleString()} - Delivered ${qty.toLocaleString()} = Remaining ${afterStock.toLocaleString()} pairs to Order #${order.orderNo}.`);
       setDeliverTarget(null);
       setDeliverQty('');
@@ -704,6 +708,61 @@ export const StockManagement: React.FC = () => {
       showToast(err instanceof Error ? err.message : 'Could not confirm delivery.', 'error');
     } finally {
       setIsSavingDeliver(false);
+    }
+  };
+
+  // Article Edit & Delete Handlers
+  const handleOpenEditArticle = (articleName: string) => {
+    setEditingArticleName(articleName);
+    setEditArticleNewName(articleName);
+  };
+
+  const handleSaveArticleRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingArticleName || !editArticleNewName.trim()) return;
+    if (editingArticleName.trim().toLowerCase() === editArticleNewName.trim().toLowerCase()) {
+      setEditingArticleName(null);
+      return;
+    }
+    setIsSavingArticleRename(true);
+    try {
+      if (updateArticleName) {
+        await updateArticleName(editingArticleName, editArticleNewName.trim());
+      }
+      if (selectedArticleName && selectedArticleName.trim().toLowerCase() === editingArticleName.trim().toLowerCase()) {
+        setSelectedArticleName(editArticleNewName.trim());
+      }
+      showToast('Article Renamed Successfully.');
+      setEditingArticleName(null);
+    } catch (err) {
+      console.error('Error renaming article:', err);
+      showToast(err instanceof Error ? err.message : 'Could not rename article.', 'error');
+    } finally {
+      setIsSavingArticleRename(false);
+    }
+  };
+
+  const handleOpenDeleteArticle = (articleName: string) => {
+    setDeletingArticleName(articleName);
+  };
+
+  const handleConfirmDeleteArticle = async () => {
+    if (!deletingArticleName) return;
+    setIsDeletingArticle(true);
+    try {
+      if (deleteWholeArticle) {
+        await deleteWholeArticle(deletingArticleName);
+      }
+      if (selectedArticleName && selectedArticleName.trim().toLowerCase() === deletingArticleName.trim().toLowerCase()) {
+        setSelectedArticleName(null);
+      }
+      showToast('Article Deleted Successfully.');
+      setDeletingArticleName(null);
+    } catch (err) {
+      console.error('Error deleting article:', err);
+      showToast(err instanceof Error ? err.message : 'Could not delete article.', 'error');
+    } finally {
+      setIsDeletingArticle(false);
     }
   };
 
@@ -747,7 +806,11 @@ export const StockManagement: React.FC = () => {
           showToast('Return record deleted and stock restored.');
         }
       } else if (deletingItem.type === 'IN') {
-        if (deleteCuttingEntry) await deleteCuttingEntry(deletingItem.id);
+        if (deleteStockInEntry) {
+          await deleteStockInEntry(deletingItem.id);
+        } else if (deleteCuttingEntry) {
+          await deleteCuttingEntry(deletingItem.id);
+        }
         showToast('Stock In receipt deleted.');
       } else {
         if (deleteStockDelivery) await deleteStockDelivery(deletingItem.id);
@@ -782,7 +845,7 @@ export const StockManagement: React.FC = () => {
     setPickerNewItemOpen(false);
     setPickerNewItemName('');
     const existingMap = new Map(deliveredItems.map(item => [item.articleName, item]));
-    const available = distinctArticles.filter(a => a.availableStock > 0);
+    const available = distinctArticles;
     setPickerArticleRows(
       available.map(a => {
         const existing = existingMap.get(a.articleName);
@@ -851,13 +914,6 @@ export const StockManagement: React.FC = () => {
       showToast('Select at least one article and enter quantity.', 'error');
       return;
     }
-    for (const r of selected) {
-      const q = Number(r.qty);
-      if (q > r.availableStock) {
-        showToast(`Quantity for ${r.articleName} (${q}) exceeds available stock (${r.availableStock}).`, 'error');
-        return;
-      }
-    }
     const newDelivered = selected.map(r => {
       const q = Number(r.qty);
       const rateVal = Number(r.rate) || 0;
@@ -891,12 +947,6 @@ export const StockManagement: React.FC = () => {
     if (!bulkDeliveryDate) {
       showToast('Please select a delivery date.', 'error');
       return;
-    }
-    for (const item of deliveredItems) {
-      if (item.qty > item.availableStock) {
-        showToast(`Quantity for ${item.articleName} exceeds available stock (${item.availableStock}).`, 'error');
-        return;
-      }
     }
 
     setIsSavingBulkDelivery(true);
@@ -961,7 +1011,7 @@ export const StockManagement: React.FC = () => {
               orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Bilty: ${bulkReferenceNo}` : bulkBillNo),
               customerName: customer,
               pairs: qty,
-              remainingAfter: Math.max(0, item.availableStock - qty),
+              remainingAfter: item.availableStock - qty,
               deliveryId: deliveryRef.id,
               billNo: bulkBillNo,
               rate: item.rate || 0,
@@ -971,14 +1021,14 @@ export const StockManagement: React.FC = () => {
           }).catch(async () => {
             await setDoc(articleRef, {
               articleName: item.articleName,
-              totalAvailable: Math.max(0, item.availableStock - qty),
+              totalAvailable: item.availableStock - qty,
               totalDelivered: qty,
               deliveryHistory: [{
                 date: bulkDeliveryDate,
                 orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Bilty: ${bulkReferenceNo}` : bulkBillNo),
                 customerName: customer,
                 pairs: qty,
-                remainingAfter: Math.max(0, item.availableStock - qty),
+                remainingAfter: item.availableStock - qty,
                 deliveryId: deliveryRef.id,
                 billNo: bulkBillNo,
                 rate: item.rate || 0,
@@ -1281,7 +1331,7 @@ export const StockManagement: React.FC = () => {
             <span>&larr; Back to Stock Management</span>
           </button>
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <span className="rounded-lg bg-blue-100 px-3 py-1 font-mono text-xs font-bold text-blue-800 uppercase tracking-wider">
               Article Ledger
             </span>
@@ -1289,6 +1339,26 @@ export const StockManagement: React.FC = () => {
             <h1 className="text-xl sm:text-2xl font-black text-slate-900">
               Article: {selectedArticleSummary.articleName}
             </h1>
+            <div className="flex items-center gap-1.5 ml-2">
+              <button
+                type="button"
+                onClick={() => handleOpenEditArticle(selectedArticleSummary.articleName)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50 shadow-2xs transition cursor-pointer"
+                title="Edit Article Name"
+              >
+                <Pencil className="h-3.5 w-3.5 text-blue-600" />
+                <span>Edit Article</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleOpenDeleteArticle(selectedArticleSummary.articleName)}
+                className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700 hover:bg-rose-100 shadow-2xs transition cursor-pointer"
+                title="Delete Entire Article"
+              >
+                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                <span>Delete Article</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1316,16 +1386,38 @@ export const StockManagement: React.FC = () => {
             <p className="mt-1 text-[11px] text-purple-700/80">Delivered to customers & order dispatches</p>
           </div>
 
-          {/* Card 3: AVAILABLE STOCK: 128 Pairs (Green) */}
-          <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-5 shadow-xs">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 block">
-              AVAILABLE STOCK
-            </span>
-            <div className="mt-2 font-mono text-2xl sm:text-3xl font-black text-emerald-700">
-              {selectedArticleSummary.availableStock.toLocaleString()} <span className="text-sm font-semibold text-emerald-600">Pairs</span>
+          {/* Card 3: AVAILABLE STOCK (Green if positive, Red if negative) */}
+          <div className={`rounded-2xl border p-5 shadow-xs ${
+            selectedArticleSummary.availableStock < 0
+              ? 'border-rose-300 bg-rose-50 text-rose-700'
+              : 'border-emerald-300 bg-emerald-50 text-emerald-800'
+          }`}>
+            <div className="flex items-center justify-between">
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${
+                selectedArticleSummary.availableStock < 0 ? 'text-rose-800' : 'text-emerald-800'
+              }`}>
+                AVAILABLE STOCK
+              </span>
+              {selectedArticleSummary.availableStock < 0 && (
+                <span className="rounded-full bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white tracking-wide">
+                  MINUS STOCK
+                </span>
+              )}
             </div>
-            <p className="mt-1 text-[11px] text-emerald-800 font-semibold">
+            <div className={`mt-2 font-mono text-2xl sm:text-3xl font-black ${
+              selectedArticleSummary.availableStock < 0 ? 'text-rose-700' : 'text-emerald-700'
+            }`}>
+              {selectedArticleSummary.availableStock.toLocaleString()} <span className={`text-sm font-semibold ${
+                selectedArticleSummary.availableStock < 0 ? 'text-rose-600' : 'text-emerald-600'
+              }`}>Pairs</span>
+            </div>
+            <p className={`mt-1 text-[11px] font-semibold ${
+              selectedArticleSummary.availableStock < 0 ? 'text-rose-700' : 'text-emerald-800'
+            }`}>
               {selectedArticleSummary.totalIn} - {selectedArticleSummary.totalOut} = {selectedArticleSummary.availableStock} in hand
+              {selectedArticleSummary.availableStock < 0 && (
+                <span className="block text-rose-600 font-normal">Stock is in MINUS - You sold before receiving</span>
+              )}
             </p>
           </div>
 
@@ -1356,8 +1448,7 @@ export const StockManagement: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsOutModalOpen(true)}
-              disabled={selectedArticleSummary.availableStock <= 0}
-              className="inline-flex items-center gap-2 rounded-xl bg-purple-600 hover:bg-purple-700 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-md shadow-purple-600/25 transition active:scale-95 cursor-pointer disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-xl bg-purple-600 hover:bg-purple-700 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-md shadow-purple-600/25 transition active:scale-95 cursor-pointer"
             >
               <ArrowUpRight className="h-4 w-4" />
               <span>OUT / SELL</span>
@@ -1676,7 +1767,7 @@ export const StockManagement: React.FC = () => {
                   </div>
                   <div>
                     <label className="text-xs font-bold text-slate-700">Quantity (Pairs) *</label>
-                    <input type="number" required min="1" max={selectedArticleSummary.availableStock} placeholder="e.g. 200" value={outFormQty} onChange={e => setOutFormQty(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs font-mono font-bold" />
+                    <input type="number" required min="1" placeholder="e.g. 200" value={outFormQty} onChange={e => setOutFormQty(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs font-mono font-bold" />
                   </div>
                 </div>
                 <div>
@@ -1751,7 +1842,7 @@ export const StockManagement: React.FC = () => {
                   </div>
                   <div>
                     <label className="text-xs font-bold text-slate-700">Pairs to Allocate *</label>
-                    <input type="number" required min="1" max={selectedArticleSummary.availableStock} placeholder="e.g. 100" value={allocateQty} onChange={e => setAllocateQty(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs font-mono font-bold" />
+                    <input type="number" required min="1" placeholder="e.g. 100" value={allocateQty} onChange={e => setAllocateQty(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs font-mono font-bold" />
                   </div>
                 </div>
                 <div className="rounded-xl bg-blue-50 border border-blue-200 p-3 text-xs text-blue-800">
@@ -2125,6 +2216,147 @@ export const StockManagement: React.FC = () => {
             </div>
           </div>
         )}
+
+        {/* Modal: Edit Article Name */}
+        {editingArticleName && (
+          <div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setEditingArticleName(null);
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Pencil className="h-4 w-4 text-blue-600" />
+                  <h3 className="text-base font-black text-slate-900">Edit Article Name</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingArticleName(null)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  title="Close (Esc)"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveArticleRename} className="mt-4 space-y-4">
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-slate-600 block mb-1">
+                    Current Article Name
+                  </label>
+                  <input
+                    readOnly
+                    value={editingArticleName}
+                    className="w-full rounded-xl border border-slate-200 bg-slate-100 p-2.5 text-xs font-mono font-bold text-slate-700"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-slate-700 block mb-1">
+                    New Article Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editArticleNewName}
+                    onChange={(e) => setEditArticleNewName(e.target.value)}
+                    placeholder="Enter updated article name"
+                    className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-bold text-slate-900 focus:border-blue-500 focus:outline-none"
+                    autoFocus
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Renaming updates all stock records, cutting entries, and delivery history for this article.
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setEditingArticleName(null)}
+                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                  >
+                    Cancel / Back
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingArticleRename || !editArticleNewName.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2 text-xs font-bold text-white shadow-md shadow-blue-600/20 disabled:opacity-50 transition cursor-pointer"
+                  >
+                    {isSavingArticleRename ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Modal: Delete Whole Article */}
+        {deletingArticleName && (
+          <div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setDeletingArticleName(null);
+            }}
+          >
+            <div
+              className="w-full max-w-sm rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-2 text-rose-600">
+                  <AlertCircle className="h-5 w-5" />
+                  <h3 className="text-base font-bold">Delete Entire Article?</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeletingArticleName(null)}
+                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                  title="Close (Esc)"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {(() => {
+                const deletingItem = distinctArticles.find(a => a.articleName.trim().toLowerCase() === (deletingArticleName || '').trim().toLowerCase());
+                const deletingPairs = deletingItem ? deletingItem.availableStock : 0;
+                return (
+                  <div className="mt-3 space-y-2 text-xs text-slate-600">
+                    <p className="text-slate-700 font-medium leading-relaxed">
+                      Delete Article <strong className="text-slate-900 font-bold">{deletingArticleName}</strong>? Total <strong className="text-rose-600 font-bold">{deletingPairs.toLocaleString()} Pairs</strong> will be removed permanently. This cannot be undone.
+                    </p>
+                    <p className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-rose-800">
+                      ⚠️ This will permanently remove all associated stock inventory, cutting records, and delivery history for this article from the system.
+                    </p>
+                  </div>
+                );
+              })()}
+
+              <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setDeletingArticleName(null)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  Cancel / Back
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingArticle}
+                  onClick={handleConfirmDeleteArticle}
+                  className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50 transition cursor-pointer"
+                >
+                  {isDeletingArticle ? 'Deleting...' : 'Delete Article'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -2296,19 +2528,105 @@ export const StockManagement: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Right Side: Stock Count (Per-article Deliver button removed) */}
-                  <div className="text-right shrink-0">
-                    <div className="font-mono text-base sm:text-lg font-black text-slate-900 group-hover:text-blue-700 transition">
-                      {article.availableStock.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                  {/* Right Side: Stock Count & Direct Action Buttons */}
+                  <div className="flex items-center gap-3 sm:gap-4 shrink-0">
+                    <div className="text-right">
+                      <div className={`font-mono text-base sm:text-lg font-black transition ${
+                        article.availableStock < 0 ? 'text-rose-600' : 'text-slate-900 group-hover:text-blue-700'
+                      }`}>
+                        {article.availableStock.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
+                      </div>
+                      {article.availableStock < 0 ? (
+                        <span className="inline-block rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">
+                          MINUS
+                        </span>
+                      ) : (
+                        <div className="text-[10px] font-semibold text-slate-400">
+                          Click for Ledger &rarr;
+                        </div>
+                      )}
                     </div>
-                    <div className="text-[10px] font-semibold text-slate-400">
-                      Click to Open Full Ledger &rarr;
+
+                    <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        title="Edit Article Name"
+                        onClick={() => handleOpenEditArticle(article.articleName)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700 shadow-2xs transition cursor-pointer"
+                      >
+                        <Pencil className="h-3.5 w-3.5 text-blue-600" />
+                        <span>Edit</span>
+                      </button>
+                      <button
+                        type="button"
+                        title="Delete Entire Article"
+                        onClick={() => handleOpenDeleteArticle(article.articleName)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:border-rose-400 hover:bg-rose-50 hover:text-rose-700 shadow-2xs transition cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                        <span>Delete</span>
+                      </button>
                     </div>
                   </div>
                 </div>
               ))
             )}
           </div>
+
+          {/* Collapsible Deleted Articles Archive & Restore */}
+          {deletedProductsList && deletedProductsList.length > 0 && (
+            <div className="border-t border-slate-200 bg-slate-50/70 p-4 sm:p-5">
+              <button
+                type="button"
+                onClick={() => setShowDeletedArticles(!showDeletedArticles)}
+                className="flex w-full items-center justify-between text-left text-xs font-bold text-slate-700 hover:text-slate-900 transition cursor-pointer"
+              >
+                <div className="flex items-center gap-2">
+                  <Trash2 className="h-4 w-4 text-slate-400" />
+                  <span>Deleted Articles Archive ({deletedProductsList.length}) - View & Restore</span>
+                </div>
+                {showDeletedArticles ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </button>
+
+              {showDeletedArticles && (
+                <div className="mt-3 space-y-2">
+                  <p className="text-[11px] text-slate-500">
+                    Permanently deleted articles are blocked from auto-recreating on page refresh. Click "Restore" to unblock and re-add an article to your active directory.
+                  </p>
+                  <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white shadow-2xs overflow-hidden">
+                    {deletedProductsList.map((item) => (
+                      <div key={item.id} className="flex items-center justify-between p-3 text-xs">
+                        <div>
+                          <span className="font-bold text-slate-800">{item.displayName || item.name}</span>
+                          <span className="ml-2 text-[10px] text-slate-400">
+                            Deleted on {new Date(item.deletedAt).toLocaleDateString()}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={restoringArticleName === item.name}
+                          onClick={async () => {
+                            try {
+                              setRestoringArticleName(item.name);
+                              await restoreArticle(item.displayName || item.name);
+                            } catch (err) {
+                              console.error('Error restoring article:', err);
+                            } finally {
+                              setRestoringArticleName(null);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100 transition cursor-pointer disabled:opacity-50"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5 text-blue-600" />
+                          <span>{restoringArticleName === item.name ? 'Restoring...' : 'Restore'}</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         /* ================= STOCK OUT DELIVERIES REPORT ================= */
@@ -3530,6 +3848,141 @@ export const StockManagement: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Edit Article Name */}
+      {editingArticleName && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingArticleName(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <Pencil className="h-4 w-4 text-blue-600" />
+                <h3 className="text-base font-black text-slate-900">Edit Article Name</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingArticleName(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveArticleRename} className="mt-4 space-y-4">
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-600 block mb-1">
+                  Current Article Name
+                </label>
+                <input
+                  readOnly
+                  value={editingArticleName}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-100 p-2.5 text-xs font-mono font-bold text-slate-700"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-700 block mb-1">
+                  New Article Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editArticleNewName}
+                  onChange={(e) => setEditArticleNewName(e.target.value)}
+                  placeholder="Enter updated article name"
+                  className="w-full rounded-xl border border-slate-300 p-2.5 text-xs font-bold text-slate-900 focus:border-blue-500 focus:outline-none"
+                  autoFocus
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Renaming updates all stock records, cutting entries, and delivery history for this article.
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingArticleName(null)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  Cancel / Back
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingArticleRename || !editArticleNewName.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2 text-xs font-bold text-white shadow-md shadow-blue-600/20 disabled:opacity-50 transition cursor-pointer"
+                >
+                  {isSavingArticleRename ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Delete Whole Article */}
+      {deletingArticleName && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDeletingArticleName(null);
+          }}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2 text-rose-600">
+                <AlertCircle className="h-5 w-5" />
+                <h3 className="text-base font-bold">Delete Entire Article?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingArticleName(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mt-3 space-y-2 text-xs text-slate-600">
+              <p>
+                Are you sure you want to completely remove article <strong className="text-slate-900 font-bold">{deletingArticleName}</strong>?
+              </p>
+              <p className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-rose-800">
+                ⚠️ This will permanently remove all associated stock inventory, cutting records, and delivery history for this article.
+              </p>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setDeletingArticleName(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Cancel / Back
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingArticle}
+                onClick={handleConfirmDeleteArticle}
+                className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50 transition cursor-pointer"
+              >
+                {isDeletingArticle ? 'Deleting...' : 'Delete Article'}
+              </button>
+            </div>
           </div>
         </div>
       )}

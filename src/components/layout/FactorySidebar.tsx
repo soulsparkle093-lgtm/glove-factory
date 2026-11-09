@@ -57,6 +57,13 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
     { id: 'settings', labelEn: 'System Settings', description: 'Company Profile & Preferences', icon: Settings }
   ];
 
+  const visibleNavItems = navItems.filter(item => {
+    if (item.id === 'stitching' && settings.moduleVisibility?.stitching === false) return false;
+    if (item.id === 'stock' && settings.moduleVisibility?.finishedGoods === false) return false;
+    if (item.id === 'cuttings' && settings.moduleVisibility?.cutting === false) return false;
+    return true;
+  });
+
   const handleNav = (mod: FactoryModule) => {
     setActiveModule(mod);
     if (mod === 'stock_management') {
@@ -117,7 +124,7 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
 
         {/* Navigation items */}
         <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
-          {navItems.map(item => {
+          {visibleNavItems.map(item => {
             const Icon = item.icon;
             const isActive = activeModule === item.id;
             return (

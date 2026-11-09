@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   ArrowLeft, 
   FileText, 
@@ -22,6 +22,7 @@ import {
   X,
   Plus,
   Printer,
+  Pencil,
   Truck
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
@@ -111,6 +112,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     deliveryHistory,
     settings,
     deliverFromStock,
+    updateStockDelivery,
     showToast
   } = useFactory();
 
@@ -132,6 +134,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
   // Quick Deliver Modal state
   const [isDeliverModalOpen, setIsDeliverModalOpen] = useState(false);
   const [isSavingDelivery, setIsSavingDelivery] = useState(false);
+  const savingDeliveryLockRef = useRef(false);
   const [deliveryForm, setDeliveryForm] = useState({
     date: new Date().toISOString().slice(0, 10),
     billNo: '',
@@ -140,10 +143,26 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     size: '10',
     qty: '',
     rate: '',
-    vehicleNo: 'LES-8921',
-    driverName: 'Muhammad Akram',
-    biltyNo: 'BL-4491'
+    vehicleNo: '',
+    driverName: '',
+    biltyNo: ''
   });
+
+  // Edit Delivery Modal state
+  const [editingDelivery, setEditingDelivery] = useState<OrderDeliveryRow | null>(null);
+  const [editDeliveryForm, setEditDeliveryForm] = useState({
+    date: '',
+    billNo: '',
+    gatePassNo: '',
+    article: '',
+    size: '',
+    qty: '',
+    rate: '',
+    vehicleNo: '',
+    driverName: '',
+    biltyNo: ''
+  });
+  const [isUpdatingDelivery, setIsUpdatingDelivery] = useState(false);
 
   // Drag-to-scroll refs for tables
   const deliveryTableScrollRef = useDragToScroll<HTMLDivElement>();
@@ -336,7 +355,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
   }, [validOrderItems, order.cuttingArticleSizes, orderCuttingRecords]);
 
   // Delivery History:
-  // Automatically queries deliveryHistory from stock_delivery_history, orderDispatchHistory, and invoices
+  // Authoritative queries from stock_delivery_history (deliveryHistory). Fallback to orderDispatchHistory only if none found.
   const orderDeliveryRecords = useMemo(() => {
     const list: OrderDeliveryRow[] = [];
     const seenIds = new Set<string>();
@@ -346,30 +365,40 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
       (order?.items || []).map(i => normalize(i.title || i.gloveType || i.article || ''))
     );
 
-    // 1. From stock_delivery_history (deliveryHistory in context)
-    (deliveryHistory || [])
-      .filter(d => {
-        const matchesId = d.orderId === orderId || d.customerOrderId === orderId;
-        const matchesNo = Boolean(order && d.orderNo && d.orderNo === order.orderNo);
-        const matchesCustomer = Boolean(
-          order && d.customerName && order.customerName &&
-          normalize(d.customerName) === normalize(order.customerName) &&
-          (orderArticleSet.size === 0 || orderArticleSet.has(normalize(d.article)))
-        );
-        return matchesId || matchesNo || matchesCustomer;
-      })
-      .forEach((d, idx) => {
-        if (seenIds.has(d.id)) return;
-        seenIds.add(d.id);
+    // 1. Authoritative records from stock_delivery_history (deliveryHistory in context)
+    // Strictly filter by order ID; never allow cross-order or cross-customer leaks
+    const matchingStockDeliveries = (deliveryHistory || []).filter(d => {
+      const matchesId = d.orderId === orderId || d.customerOrderId === orderId;
+      const matchesNo = Boolean(order && d.orderNo && d.orderNo === order.orderNo);
+      if (!matchesId && !matchesNo) return false;
+      // Safety: Never show deliveries belonging to a different customer name (e.g. Oshawa Traders on Bestway)
+      if (order?.customerName && d.customerName) {
+        if (normalize(order.customerName) !== normalize(d.customerName)) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (matchingStockDeliveries.length > 0) {
+      matchingStockDeliveries.forEach((d, idx) => {
         const qty = Number(d.quantity) || 0;
+        const rawSize = d.size || '10';
+        // Size must remain immutable label e.g. "10", never overwritten by quantity e.g. "10000"
+        const cleanSize = (rawSize === '10000' || rawSize === '10,000' || (Number(rawSize) > 50 && Number(rawSize) === qty)) ? '10' : rawSize;
+        const signature = `${d.billNo || idx}_${d.article || ''}_${cleanSize}_${qty}_${d.date || d.deliveryDate || ''}`;
+        if (seenIds.has(d.id) || seenIds.has(signature)) return;
+        seenIds.add(d.id);
+        seenIds.add(signature);
+
         const matchingItem = order?.items?.find(i => normalize(i.title || i.gloveType || i.article || '') === normalize(d.article));
-        const rate = Number(d.rate) || Number(matchingItem?.rate) || 235;
+        const rate = (d.rate !== undefined && d.rate !== null) ? Number(d.rate) : (Number(matchingItem?.rate) || 0);
         const amount = Number(d.amount) || (qty * rate);
         const billNo = d.billNo || `Bill No. ${19 + idx}`;
         const gatePassNo = d.gatePassNo || `GP-${String(idx + 1).padStart(3, '0')}`;
-        const vehicleNo = d.vehicleNo || 'LES-8921';
-        const driverName = d.driverName || 'Muhammad Akram';
-        const biltyNo = d.biltyNo || 'BL-4491';
+        const vehicleNo = d.vehicleNo || '';
+        const driverName = d.driverName || '';
+        const biltyNo = d.biltyNo || '';
 
         list.push({
           id: d.id,
@@ -377,7 +406,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           billNo,
           gatePassNo,
           article: d.article || order?.items?.[0]?.title || '1202',
-          size: d.size || '10',
+          size: cleanSize,
           qty,
           rate,
           amount,
@@ -390,73 +419,41 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           notes: ''
         });
       });
-
-    // 2. From orderDispatchHistory (if not already added)
-    (orderDispatchHistory || [])
-      .filter(entry => entry.orderId === orderId && entry.actionType === 'dispatched_to_customer')
-      .forEach((entry, idx) => {
-        if (seenIds.has(entry.id)) return;
-        seenIds.add(entry.id);
-        const qty = Number(entry.quantity) || 0;
-        const billNo = `Bill No. ${19 + list.length}`;
-        const gatePassNo = `GP-${String(list.length + 1).padStart(3, '0')}`;
-        const vehicleNo = 'LES-8921';
-        const driverName = 'Muhammad Akram';
-        const biltyNo = 'BL-4491';
-
-        list.push({
-          id: entry.id,
-          date: entry.date || entry.createdAt?.slice(0, 10) || new Date().toISOString().slice(0, 10),
-          billNo,
-          gatePassNo,
-          article: entry.article || order?.items?.[0]?.title || '1202',
-          size: entry.sizes ? (Object.entries(entry.sizes).find(([, q]) => Number(q) > 0)?.[0] || '10') : '10',
-          qty,
-          rate: order?.items?.[0]?.rate || 235,
-          amount: qty * (order?.items?.[0]?.rate || 235),
-          deliveredTo: order?.customerName || '',
-          vehicleNo,
-          driverName,
-          biltyNo,
-          status: 'Delivered',
-          balanceRemaining: 0,
-          notes: entry.notes || ''
-        });
-      });
-
-    // 3. From invoices for this order
-    (invoices || [])
-      .filter(inv => inv.orderId === orderId)
-      .forEach((inv, invIdx) => {
-        (inv.items || []).forEach((item, itemIdx) => {
-          const invKey = `inv-${inv.id}-${itemIdx}`;
-          if (seenIds.has(invKey)) return;
-          seenIds.add(invKey);
-          const qty = Number(item.qty) || 0;
-          const rate = Number(item.rate) || 235;
-          const amount = Number(item.amount) || (qty * rate);
-          const billNo = inv.invoiceNo || `Bill No. ${19 + invIdx}`;
+    } else {
+      // 2. Fallback to orderDispatchHistory only if no deliveryHistory records exist
+      (orderDispatchHistory || [])
+        .filter(entry => entry.orderId === orderId && entry.actionType === 'dispatched_to_customer')
+        .forEach((entry, idx) => {
+          if (seenIds.has(entry.id)) return;
+          seenIds.add(entry.id);
+          const qty = Number(entry.quantity) || 0;
+          const billNo = `Bill No. ${19 + list.length}`;
           const gatePassNo = `GP-${String(list.length + 1).padStart(3, '0')}`;
+          const vehicleNo = (entry as any).vehicleNo || '';
+          const driverName = (entry as any).driverName || '';
+          const biltyNo = (entry as any).biltyNo || '';
+          const rate = Number(order?.items?.[0]?.rate) || 0;
 
           list.push({
-            id: invKey,
-            date: inv.date || new Date().toISOString().slice(0, 10),
+            id: entry.id,
+            date: entry.date || entry.createdAt?.slice(0, 10) || new Date().toISOString().slice(0, 10),
             billNo,
             gatePassNo,
-            article: item.gloveType || order?.items?.[0]?.title || '1202',
-            size: item.size || '10',
+            article: entry.article || order?.items?.[0]?.title || '1202',
+            size: entry.sizes ? (Object.entries(entry.sizes).find(([, q]) => Number(q) > 0)?.[0] || '10') : '10',
             qty,
             rate,
-            amount,
-            deliveredTo: inv.customerName || order?.customerName || '',
-            vehicleNo: 'LES-8921',
-            driverName: 'Muhammad Akram',
-            biltyNo: 'BL-4491',
+            amount: qty * rate,
+            deliveredTo: order?.customerName || '',
+            vehicleNo,
+            driverName,
+            biltyNo,
             status: 'Delivered',
-            balanceRemaining: 0
+            balanceRemaining: 0,
+            notes: entry.notes || ''
           });
         });
-      });
+    }
 
     // Sort by date ascending
     list.sort((a, b) => safeStringCompare(a.date, b.date));
@@ -471,7 +468,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         balanceRemaining: remaining
       };
     });
-  }, [deliveryHistory, orderDispatchHistory, invoices, order, orderId, totalOriginalPairs]);
+  }, [deliveryHistory, orderDispatchHistory, order, orderId, totalOriginalPairs]);
 
   const totalDeliveredPairs = useMemo(() => {
     return orderDeliveryRecords.reduce((sum, r) => sum + r.qty, 0);
@@ -576,28 +573,85 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     const firstItem = order.items?.[0];
     const nextBillNo = `Bill No. ${19 + orderDeliveryRecords.length}`;
     const nextGpNo = `GP-${String(orderDeliveryRecords.length + 1).padStart(3, '0')}`;
+    const rawSize = firstItem?.customSizes?.[0]?.size || firstItem?.size || '10';
+    const cleanSize = (rawSize === '10000' || rawSize === '10,000') ? '10' : rawSize;
     setDeliveryForm({
       date: new Date().toISOString().slice(0, 10),
       billNo: nextBillNo,
       gatePassNo: nextGpNo,
       article: firstItem?.title || firstItem?.article || '1202',
-      size: firstItem?.size || '10',
+      size: cleanSize,
       qty: remainingToDeliverPairs > 0 ? String(Math.min(remainingToDeliverPairs, 1000)) : '1000',
-      rate: String(firstItem?.rate || 235),
-      vehicleNo: 'LES-8921',
-      driverName: 'Muhammad Akram',
-      biltyNo: 'BL-4491'
+      rate: String(firstItem?.rate !== undefined ? firstItem.rate : 0),
+      vehicleNo: '',
+      driverName: '',
+      biltyNo: ''
     });
     setIsDeliverModalOpen(true);
   };
 
+  const handleOpenEditDelivery = (row: OrderDeliveryRow) => {
+    setEditingDelivery(row);
+    setEditDeliveryForm({
+      date: row.date,
+      billNo: row.billNo,
+      gatePassNo: row.gatePassNo,
+      article: row.article,
+      size: row.size,
+      qty: String(row.qty),
+      rate: String(row.rate ?? 0),
+      vehicleNo: row.vehicleNo || '',
+      driverName: row.driverName || '',
+      biltyNo: row.biltyNo || ''
+    });
+  };
+
+  const handleSaveDeliveryUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDelivery) return;
+    const qty = Number(editDeliveryForm.qty);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      showToast('Enter a valid delivery quantity in pairs.', 'error');
+      return;
+    }
+    const rate = Number(editDeliveryForm.rate) || 0;
+    setIsUpdatingDelivery(true);
+    try {
+      if (updateStockDelivery) {
+        await updateStockDelivery(editingDelivery.id, {
+          date: editDeliveryForm.date,
+          billNo: editDeliveryForm.billNo.trim(),
+          gatePassNo: editDeliveryForm.gatePassNo.trim(),
+          article: editDeliveryForm.article.trim(),
+          size: editDeliveryForm.size.trim(),
+          quantity: qty,
+          rate,
+          amount: qty * rate,
+          vehicleNo: editDeliveryForm.vehicleNo.trim(),
+          driverName: editDeliveryForm.driverName.trim(),
+          biltyNo: editDeliveryForm.biltyNo.trim()
+        });
+      }
+      showToast('Delivery updated successfully.');
+      setEditingDelivery(null);
+    } catch (err: any) {
+      console.error('Error updating delivery:', err);
+      showToast(err?.message || 'Could not update delivery.', 'error');
+    } finally {
+      setIsUpdatingDelivery(false);
+    }
+  };
+
   const handleSaveQuickDelivery = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingDeliveryLockRef.current || isSavingDelivery) return;
     const qty = Number(deliveryForm.qty);
     if (!Number.isFinite(qty) || qty <= 0) {
       showToast('Enter a valid delivery quantity in pairs.', 'error');
       return;
     }
+    const rate = Number(deliveryForm.rate) || 0;
+    savingDeliveryLockRef.current = true;
     setIsSavingDelivery(true);
     try {
       await deliverFromStock({
@@ -609,8 +663,8 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
         gatePassNo: deliveryForm.gatePassNo.trim(),
         article: deliveryForm.article.trim(),
         size: deliveryForm.size.trim(),
-        rate: Number(deliveryForm.rate) || 235,
-        amount: qty * (Number(deliveryForm.rate) || 235),
+        rate,
+        amount: qty * rate,
         vehicleNo: deliveryForm.vehicleNo.trim(),
         driverName: deliveryForm.driverName.trim(),
         biltyNo: deliveryForm.biltyNo.trim()
@@ -622,6 +676,9 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
       showToast(err?.message || 'Could not record delivery.', 'error');
     } finally {
       setIsSavingDelivery(false);
+      setTimeout(() => {
+        savingDeliveryLockRef.current = false;
+      }, 1000);
     }
   };
 
@@ -767,87 +824,80 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
           </div>
         </div>
 
-        {/* Glove Items Table with Original Immutable Quantities */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="bg-slate-100 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
-                <th className="py-3 px-4">#</th>
-                <th className="py-3 px-4">Glove Item / Article</th>
-                <th className="py-3 px-4">Color</th>
-                <th className="py-3 px-4 text-center">Size Matrix Breakdown (S, M, L, XL, 2XL)</th>
-                <th className="py-3 px-4 text-right font-black text-slate-900">Original Qty</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 font-medium">
-              {validOrderItems.map((item, idx) => {
-                const origQty = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
-                const sz = item.sizes || { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 };
-                return (
-                  <tr key={item.id || idx} className="hover:bg-slate-50/80 transition">
-                    <td className="py-3.5 px-4 font-mono text-slate-400 text-[11px]">{idx + 1}</td>
-                    <td className="py-3.5 px-4">
-                      <span className="font-bold text-slate-900 text-sm block">
-                        {item.title || item.gloveType}
-                      </span>
-                      {item.leatherType && (
-                        <span className="text-[10px] text-slate-400 block">{item.leatherType}</span>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-4">
-                      {item.color ? (
-                        <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 text-slate-700 border border-slate-200">
-                          {item.color}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400 text-[11px]">-</span>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-4">
-                      {item.customSizes && item.customSizes.length > 0 ? (
-                        <div className="flex items-center justify-center gap-1.5 sm:gap-2 flex-wrap">
-                          {item.customSizes
-                            .filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0))
-                            .map((cs, cIdx) => (
-                              <span key={cs.id || cIdx} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-[11px] font-mono">
-                                <span className="font-bold text-slate-700">{cs.size}:</span> {Number(cs.quantity || 0).toLocaleString()}
-                              </span>
-                            ))}
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-center gap-1.5 sm:gap-2 flex-wrap">
-                          {Object.entries(sz).filter(([, q]) => Number(q) > 0).length > 0 ? (
-                            Object.entries(sz).filter(([, q]) => Number(q) > 0).map(([k, q]) => (
-                              <span key={k} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-[11px] font-mono">
-                                <span className="font-bold text-slate-700">{k.toUpperCase()}:</span> {Number(q || 0).toLocaleString()}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-slate-400 text-[11px]">-</span>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-4 text-right">
-                      <span className="font-mono font-black text-sm text-blue-700 bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-100">
-                        {origQty} Pairs
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            <tfoot>
-              <tr className="bg-slate-50 font-black text-xs text-slate-900 border-t border-slate-200">
-                <td colSpan={4} className="py-3 px-4 text-right uppercase tracking-wider">
-                  Total Original Order Pairs:
-                </td>
-                <td className="py-3 px-4 text-right font-mono text-sm text-blue-700">
-                  {totalOriginalPairs} Pairs
-                </td>
-              </tr>
-            </tfoot>
-          </table>
+        {/* Glove Items Grouped by Article on Top with Sizes Below */}
+        <div className="p-4 sm:p-5 space-y-4">
+          {validOrderItems.map((item, idx) => {
+            const origQty = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
+            let sizeRows: { size: string; quantity: number }[] = [];
+            if (item.customSizes && item.customSizes.length > 0) {
+              sizeRows = item.customSizes
+                .filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0))
+                .map(cs => ({ size: cs.size || 'Standard', quantity: Number(cs.quantity || 0) }));
+            }
+            if (sizeRows.length === 0 && item.size) {
+              const rawSize = item.size;
+              const cleanSize = (rawSize === '10000' || rawSize === '10,000' || rawSize === String(origQty)) ? '10' : rawSize;
+              sizeRows = [{ size: cleanSize, quantity: origQty }];
+            } else if (sizeRows.length === 0) {
+              const sz = Object.entries(item.sizes || {}).filter(([, q]) => Number(q) > 0);
+              sizeRows = sz.length
+                ? sz.map(([s, q]) => ({ size: s.toUpperCase(), quantity: Number(q || 0) }))
+                : [{ size: 'Standard', quantity: origQty }];
+            }
+            return (
+              <div key={item.id || idx} className="rounded-xl border border-slate-200 overflow-hidden bg-white shadow-2xs">
+                {/* Article Header (Article on top) */}
+                <div className="bg-slate-50 border-b border-slate-200 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="w-6 h-6 rounded-md bg-blue-100 text-blue-800 flex items-center justify-center text-xs font-mono font-black">
+                      {idx + 1}
+                    </span>
+                    <div>
+                      <h4 className="font-black text-slate-900 text-sm sm:text-base">
+                        Article: {item.title || item.gloveType || item.article}
+                      </h4>
+                      <div className="flex flex-wrap items-center gap-2 mt-0.5 text-xs text-slate-500">
+                        {item.leatherType && <span>Leather: {item.leatherType}</span>}
+                        {item.color && (
+                          <>
+                            <span>&bull;</span>
+                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-medium">Color: {item.color}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 self-start sm:self-auto">
+                    <span className="rounded-lg bg-blue-50 border border-blue-200 px-3 py-1 font-mono text-xs sm:text-sm font-black text-blue-800">
+                      Total: {origQty.toLocaleString()} Pairs
+                    </span>
+                  </div>
+                </div>
+
+                {/* Sizes Table Below */}
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-100/70 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                    <tr>
+                      <th className="py-2.5 px-4">Size Name</th>
+                      <th className="py-2.5 px-4 text-right font-black text-slate-900">Ordered Quantity</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium">
+                    {sizeRows.map((sr, sIdx) => (
+                      <tr key={sIdx} className="hover:bg-slate-50/60">
+                        <td className="py-2.5 px-4 font-mono font-bold text-slate-800">
+                          Size: {sr.size}
+                        </td>
+                        <td className="py-2.5 px-4 text-right font-mono font-bold text-blue-700">
+                          {sr.quantity.toLocaleString()} Pairs
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -1379,15 +1429,26 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                           {row.balanceRemaining.toLocaleString()} <span className="text-[10px] font-normal text-slate-400">pairs</span>
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedGatePass(row)}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-bold text-blue-700 hover:bg-blue-50 border border-blue-200 cursor-pointer"
-                            title="Print Gate Pass Slip"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                            <span>Print GP</span>
-                          </button>
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditDelivery(row)}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-bold text-slate-700 hover:text-blue-700 hover:bg-blue-50 border border-slate-200 cursor-pointer"
+                              title="Edit Delivery Entry"
+                            >
+                              <Pencil className="w-3.5 h-3.5 text-blue-600" />
+                              <span>Edit</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedGatePass(row)}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-bold text-blue-700 hover:bg-blue-50 border border-blue-200 cursor-pointer"
+                              title="Print Gate Pass Slip"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span>Print GP</span>
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1573,13 +1634,29 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
 
               <label className="text-xs font-bold text-slate-700">
                 Article *
-                <input
+                <select
                   required
                   value={deliveryForm.article}
-                  onChange={e => setDeliveryForm({ ...deliveryForm, article: e.target.value })}
-                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
-                  placeholder="1202"
-                />
+                  onChange={e => {
+                    const nextArt = e.target.value;
+                    const matchingItem = order.items.find(i => (i.title || i.gloveType || i.article) === nextArt);
+                    const defaultSize = matchingItem?.customSizes?.[0]?.size || matchingItem?.size || '10';
+                    const cleanDefSize = (defaultSize === '10000' || defaultSize === '10,000') ? '10' : defaultSize;
+                    const defaultRate = matchingItem?.rate !== undefined ? String(matchingItem.rate) : deliveryForm.rate;
+                    setDeliveryForm({
+                      ...deliveryForm,
+                      article: nextArt,
+                      size: cleanDefSize,
+                      rate: defaultRate
+                    });
+                  }}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold bg-white"
+                >
+                  {(order.items && order.items.length > 0 ? order.items : [{ title: deliveryForm.article || '1202' }]).map((i: any, idx: number) => {
+                    const artName = i.title || i.gloveType || i.article || `Article ${idx + 1}`;
+                    return <option key={idx} value={artName}>{artName}</option>;
+                  })}
+                </select>
               </label>
 
               <label className="text-xs font-bold text-slate-700">
@@ -1588,7 +1665,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                   required
                   value={deliveryForm.size}
                   onChange={e => setDeliveryForm({ ...deliveryForm, size: e.target.value })}
-                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono font-bold"
                   placeholder="10"
                 />
               </label>
@@ -1686,6 +1763,169 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
               >
                 <Truck className="w-3.5 h-3.5" />
                 <span>{isSavingDelivery ? 'Delivering...' : 'Confirm Delivery & Gate Pass'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* =========================================================================
+          EDIT DELIVERY / GATE PASS MODAL
+          ========================================================================= */}
+      {editingDelivery && (
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingDelivery(null);
+          }}
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
+        >
+          <form 
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleSaveDeliveryUpdate} 
+            className="w-full max-w-lg rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto max-h-[92vh] overflow-y-auto"
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                  <Pencil className="w-4 h-4 text-blue-600" />
+                  <span>Edit Delivery &amp; Gate Pass</span>
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Update delivery details for Order #{order.orderNo}. Empty fields will be saved as empty.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingDelivery(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 cursor-pointer"
+                title="Close / Back (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-bold text-slate-700">
+                Gate Pass No. *
+                <input
+                  required
+                  value={editDeliveryForm.gatePassNo}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, gatePassNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 font-mono font-bold text-emerald-700 px-3 py-2 text-xs bg-emerald-50/50"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Bill / Invoice No. *
+                <input
+                  required
+                  value={editDeliveryForm.billNo}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, billNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 font-mono font-bold px-3 py-2 text-xs"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Delivery Date *
+                <input
+                  required
+                  type="date"
+                  value={editDeliveryForm.date}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, date: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Article *
+                <input
+                  required
+                  value={editDeliveryForm.article}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, article: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Size *
+                <input
+                  required
+                  value={editDeliveryForm.size}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, size: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Quantity Delivered (Pairs) *
+                <input
+                  required
+                  type="number"
+                  min="1"
+                  value={editDeliveryForm.qty}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, qty: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono font-bold text-emerald-700"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Rate per Pair (Rs.)
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={editDeliveryForm.rate}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, rate: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  placeholder="0"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Vehicle No.
+                <input
+                  value={editDeliveryForm.vehicleNo}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, vehicleNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono uppercase"
+                  placeholder="Optional vehicle number"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700">
+                Driver Name
+                <input
+                  value={editDeliveryForm.driverName}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, driverName: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs"
+                  placeholder="Optional driver name"
+                />
+              </label>
+
+              <label className="text-xs font-bold text-slate-700 sm:col-span-2">
+                Bilty / Reference No.
+                <input
+                  value={editDeliveryForm.biltyNo}
+                  onChange={e => setEditDeliveryForm({ ...editDeliveryForm, biltyNo: e.target.value })}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
+                  placeholder="Optional bilty number"
+                />
+              </label>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setEditingDelivery(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Cancel / Back
+              </button>
+              <button
+                type="submit"
+                disabled={isUpdatingDelivery}
+                className="px-5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20 transition active:scale-95 disabled:opacity-50 cursor-pointer"
+              >
+                {isUpdatingDelivery ? 'Saving...' : 'Save Changes'}
               </button>
             </div>
           </form>
@@ -1825,11 +2065,11 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
               <div className="mt-5 grid grid-cols-2 gap-4 border border-slate-200 rounded-xl p-3 text-xs bg-slate-50/50">
                 <div>
                   <span className="text-[10px] font-bold uppercase text-slate-400 block">Vehicle / Truck No.</span>
-                  <span className="font-mono font-bold text-slate-900 uppercase">{selectedGatePass.vehicleNo || 'LES-8921'}</span>
+                  <span className="font-mono font-bold text-slate-900 uppercase">{selectedGatePass.vehicleNo || '—'}</span>
                 </div>
                 <div>
                   <span className="text-[10px] font-bold uppercase text-slate-400 block">Driver Name</span>
-                  <span className="font-bold text-slate-900">{selectedGatePass.driverName || 'Muhammad Akram'}</span>
+                  <span className="font-bold text-slate-900">{selectedGatePass.driverName || '—'}</span>
                 </div>
               </div>
 

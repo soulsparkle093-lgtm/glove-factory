@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import { 
   Party, 
   Staff, 
@@ -116,6 +116,13 @@ interface ToastMessage {
   message: string;
 }
 
+export interface DeletedProductItem {
+  id: string;
+  name: string;
+  displayName: string;
+  deletedAt: string;
+}
+
 interface FactoryContextType {
   activeModule: FactoryModule;
   setActiveModule: (m: FactoryModule) => void;
@@ -152,6 +159,7 @@ interface FactoryContextType {
   cashbook: CashbookEntry[];
   attendance: StaffAttendance[];
   settings: FactorySettings;
+  deletedProductsList: DeletedProductItem[];
 
   // Notification Toast
   toasts: ToastMessage[];
@@ -230,8 +238,12 @@ interface FactoryContextType {
     notes?: string;
   }) => Promise<void>;
   deleteFactoryStock: (id: string) => Promise<void>;
-  updateStockDelivery: (id: string, updates: Pick<DeliveryHistoryEntry, 'date' | 'quantity' | 'customerName'>) => Promise<void>;
+  updateStockDelivery: (id: string, updates: Partial<DeliveryHistoryEntry>) => Promise<void>;
   deleteStockDelivery: (id: string) => Promise<void>;
+  deleteStockInEntry: (id: string) => Promise<void>;
+  updateArticleName: (oldName: string, newName: string) => Promise<void>;
+  deleteWholeArticle: (articleName: string) => Promise<void>;
+  restoreArticle: (articleName: string) => Promise<void>;
   getCuttingLedgerByCutter: (cutterId: string) => CuttingEntry[];
   getStockInHistory: (articleName: string) => StockInHistoryItem[];
   getStockOutHistory: (articleName: string) => StockOutHistoryItem[];
@@ -275,7 +287,7 @@ interface FactoryContextType {
 
   addProduct: (data: Omit<Product, 'id' | 'createdAt' | 'currentStock'>) => Product;
   updateProduct: (id: string, updates: Partial<Product>) => void;
-  deleteProduct: (id: string) => void;
+  deleteProduct: (id: string) => Promise<void>;
   loadFactoryPresets: () => void;
 
   // 1. MAIN: Customer Orders
@@ -432,6 +444,17 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [cashbook, setCashbook] = useState<CashbookEntry[]>(() => loadLocal(STORAGE_KEYS.CASHBOOK, []));
   const [attendance, setAttendance] = useState<StaffAttendance[]>(() => loadLocal(STORAGE_KEYS.ATTENDANCE, []));
   const [settings, setSettings] = useState<FactorySettings>(() => loadLocal(STORAGE_KEYS.SETTINGS, defaultFactorySettings));
+  const [deletedProductsList, setDeletedProductsList] = useState<DeletedProductItem[]>(() =>
+    loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', [])
+  );
+
+  const deletedProductNames = useMemo(() => {
+    const s = new Set<string>();
+    deletedProductsList.forEach(item => {
+      if (item.name) s.add(item.name.trim().toLowerCase());
+    });
+    return s;
+  }, [deletedProductsList]);
 
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -552,6 +575,21 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setProducts(list);
         saveLocal(STORAGE_KEYS.PRODUCTS, list);
       }, err => console.error('Firestore onSnapshot error (products):', err)));
+
+      // 3b. deleted_products blocklist
+      unsubs.push(onSnapshot(collection(db, 'deleted_products'), snap => {
+        const list = snap.docs.map(d => {
+          const data = d.data();
+          return {
+            id: d.id,
+            name: (data.name || d.id).trim().toLowerCase(),
+            displayName: data.displayName || data.name || d.id,
+            deletedAt: data.deletedAt || new Date().toISOString()
+          } as DeletedProductItem;
+        });
+        setDeletedProductsList(list);
+        saveLocal('gferp_deleted_products_v1', list);
+      }, err => console.error('Firestore onSnapshot error (deleted_products):', err)));
 
       // 4. cuttings
       unsubs.push(onSnapshot(collection(db, 'cuttings'), snap => {
@@ -699,7 +737,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deliveryIds: Array.isArray(data.deliveryIds) ? data.deliveryIds : []
           } as FactoryStockItem;
         });
-        if (list.length === 0 || !list.some(s => (s.article === '1202' || s.articleName === '1202') && s.size === '10')) {
+        const is1202Deleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).some(d => d.name === '1202');
+        if (!is1202Deleted && (list.length === 0 || !list.some(s => (s.article === '1202' || s.articleName === '1202') && s.size === '10'))) {
           list = [
             ...list,
             {
@@ -736,7 +775,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deliveryHistory: Array.isArray(data.deliveryHistory) ? data.deliveryHistory : []
           } as ArticleStockItem;
         });
-        if (list.length === 0 || !list.some(s => s.articleName === '1202')) {
+        const is1202DeletedArt = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).some(d => d.name === '1202');
+        if (!is1202DeletedArt && (list.length === 0 || !list.some(s => s.articleName === '1202'))) {
           list = [
             ...list,
             {
@@ -986,11 +1026,50 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     showToast('Product updated successfully');
   };
 
-  const deleteProduct = (id: string) => {
+  const deleteProduct = async (id: string): Promise<void> => {
+    const targetProduct = products.find(p => p.id === id);
+    const prodName = targetProduct?.gloveName || '';
+    const norm = prodName.trim().toLowerCase();
+
+    if (db) {
+      try {
+        await deleteDoc(doc(db, 'products', id));
+      } catch (err) {
+        console.error('Error deleting product doc from Firestore:', err);
+      }
+      if (norm) {
+        try {
+          await setDoc(doc(db, 'deleted_products', norm), {
+            id: norm,
+            name: norm,
+            displayName: targetProduct?.gloveName || prodName,
+            deletedAt: new Date().toISOString()
+          });
+        } catch (err) {
+          console.error('Error adding to deleted_products in Firestore:', err);
+        }
+      }
+    }
+
     const next = products.filter(p => p.id !== id);
     setProducts(next);
     saveLocal(STORAGE_KEYS.PRODUCTS, next);
-    showToast('Product removed', 'info');
+
+    if (norm) {
+      setDeletedProductsList(prev => {
+        if (prev.some(d => d.name === norm)) return prev;
+        const updated = [{
+          id: norm,
+          name: norm,
+          displayName: targetProduct?.gloveName || prodName,
+          deletedAt: new Date().toISOString()
+        }, ...prev];
+        saveLocal('gferp_deleted_products_v1', updated);
+        return updated;
+      });
+    }
+
+    showToast(`Product "${prodName || 'Item'}" deleted permanently`, 'info');
   };
 
   const loadFactoryPresets = () => {
@@ -2195,7 +2274,16 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       billNo: legacyTx.billNo || '',
       createdAt: legacyTx.createdAt
     } satisfies CuttingEntry : undefined);
-    if (!entry) throw new Error('Cutting entry no longer exists.');
+    if (!entry) {
+      console.warn(`Cutting entry ${id} not found in state, removing from any collections.`);
+      if (db) {
+        await deleteDoc(doc(db, 'cuttingEntries', id)).catch(() => {});
+        await deleteDoc(doc(db, 'cutting_transactions', id)).catch(() => {});
+      }
+      setCuttingEntries(previous => previous.filter(e => e.id !== id));
+      setCuttingTransactions(previous => previous.filter(t => t.id !== id));
+      return;
+    }
     if (entry.type === 'RETURN') {
       await deleteCuttingReturn(id);
       return;
@@ -2478,7 +2566,22 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     const articleName = (data.article || '').trim() || (order.items?.[0]?.title || order.items?.[0]?.gloveType || '1202');
-    const sizeName = (data.size || '').trim() || (order.items?.[0]?.size || '10');
+    const rawSize = (data.size || '').trim() || (order.items?.[0]?.size || '10');
+    const sizeName = (rawSize === '10000' || rawSize === '10,000') ? '10' : rawSize;
+
+    // Idempotency check: prevent duplicate deliveries created within 4 seconds for same order, bill, article, size, quantity
+    const isDuplicate = (deliveryHistory || []).some(d =>
+      (d.orderId === data.orderId || d.customerOrderId === data.orderId) &&
+      d.article?.toLowerCase() === articleName.toLowerCase() &&
+      d.size === sizeName &&
+      d.quantity === data.quantity &&
+      (d.billNo === data.billNo?.trim() || d.gatePassNo === data.gatePassNo?.trim()) &&
+      Date.now() - new Date(d.createdAt || 0).getTime() < 4000
+    );
+    if (isDuplicate) {
+      console.warn('Duplicate delivery detected within 4s, aborting duplicate creation.');
+      return;
+    }
 
     let stockItem = data.stockId ? stockManagement.find(item => item.id === data.stockId) : undefined;
     if (!stockItem) {
@@ -2509,11 +2612,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const matchingOrderItem = order.items?.find(i => 
       (i.title || i.gloveType || i.article || '').trim().toLowerCase() === articleName.toLowerCase()
     );
-    const finalRate = Number(data.rate) || Number(matchingOrderItem?.rate) || 235;
-    const finalAmount = Number(data.amount) || (data.quantity * finalRate);
-    const assignedVehicleNo = data.vehicleNo?.trim() || 'LES-8921';
-    const assignedDriverName = data.driverName?.trim() || 'Muhammad Akram';
-    const assignedBiltyNo = data.biltyNo?.trim() || 'BL-4491';
+    const finalRate = data.rate !== undefined && data.rate !== null && (data.rate as any) !== ''
+      ? Number(data.rate)
+      : (matchingOrderItem?.rate !== undefined ? Number(matchingOrderItem.rate) : 0);
+    const finalAmount = data.rate !== undefined && data.rate !== null && (data.rate as any) !== ''
+      ? data.quantity * Number(data.rate)
+      : (Number(data.amount) || (data.quantity * finalRate));
+    const assignedVehicleNo = data.vehicleNo !== undefined ? data.vehicleNo.trim() : '';
+    const assignedDriverName = data.driverName !== undefined ? data.driverName.trim() : '';
+    const assignedBiltyNo = data.biltyNo !== undefined ? data.biltyNo.trim() : '';
 
     const stockItemId = stockItem?.id || `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(sizeName)}`;
     const articleId = normalizeStockDocumentId(articleName);
@@ -2553,7 +2660,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       orderNo: order.orderNo,
       customerName: data.customerName.trim(),
       pairs: data.quantity,
-      remainingAfter: Math.max(0, (stockItem?.balance || 6000) - data.quantity),
+      remainingAfter: (stockItem?.balance || 0) - data.quantity,
       deliveryId,
       billNo: assignedBillNo,
       gatePassNo: assignedGatePassNo,
@@ -2704,16 +2811,17 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const updateStockDelivery = async (
     id: string,
-    updates: Pick<DeliveryHistoryEntry, 'date' | 'quantity' | 'customerName'>
+    updates: Partial<DeliveryHistoryEntry>
   ): Promise<void> => {
     const current = deliveryHistory.find(entry => entry.id === id);
-    if (!current?.linkedStockId) throw new Error('The stock delivery no longer exists.');
-    if (!Number.isFinite(updates.quantity) || updates.quantity <= 0 || !updates.date || !updates.customerName.trim()) {
-      throw new Error('Enter a valid delivery quantity, date, and customer.');
-    }
+    if (!current) throw new Error('The stock delivery no longer exists.');
     if (!db) throw new Error('Firestore is not available. The delivery was not updated.');
 
-    const stockRef = doc(db, 'stock_management', current.linkedStockId);
+    const qty = updates.quantity !== undefined ? updates.quantity : current.quantity;
+    const dateVal = updates.date || current.date;
+    const custName = updates.customerName !== undefined ? updates.customerName : current.customerName;
+
+    const stockRef = current.linkedStockId ? doc(db, 'stock_management', current.linkedStockId) : null;
     const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(current.article));
     const deliveryRef = doc(db, 'stock_delivery_history', id);
     const dispatchHistoryRef = current.dispatchHistoryId
@@ -2723,70 +2831,263 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ? doc(db, 'customer_orders', current.orderId, 'order_history', current.orderHistoryId)
       : null;
     const now = new Date().toISOString();
-    await runTransaction(db, async transaction => {
-      const [stockSnapshot, articleSnapshot, deliverySnapshot, dispatchSnapshot, orderHistorySnapshot] = await Promise.all([
-        transaction.get(stockRef),
-        transaction.get(articleRef),
-        transaction.get(deliveryRef),
-        dispatchHistoryRef ? transaction.get(dispatchHistoryRef) : Promise.resolve(null),
-        orderHistoryRef ? transaction.get(orderHistoryRef) : Promise.resolve(null)
-      ]);
-      if (!stockSnapshot.exists() || !articleSnapshot.exists() || !deliverySnapshot.exists()) {
-        throw new Error('Stock delivery records are unavailable. Refresh and try again.');
-      }
-      const stockData = stockSnapshot.data();
-      const articleData = articleSnapshot.data();
-      const savedDelivery = deliverySnapshot.data() as DeliveryHistoryEntry;
-      const oldQuantity = Number(savedDelivery.quantity) || 0;
-      const nextBalance = (Number(stockData.balance) || 0) + oldQuantity - updates.quantity;
-      const articleRemaining = (Number(articleData.totalAvailable) || 0) + oldQuantity - updates.quantity;
-      if (nextBalance < 0) throw new Error('Delivery quantity exceeds available stock.');
-      const updatedDelivery: DeliveryHistoryEntry = {
-        ...savedDelivery,
-        id,
-        date: updates.date,
-        deliveryDate: updates.date,
-        quantity: updates.quantity,
-        customerName: updates.customerName.trim(),
-        partyName: updates.customerName.trim()
-      };
-      const nextArticleHistory = (Array.isArray(articleData.deliveryHistory) ? articleData.deliveryHistory : [])
-        .filter((entry: { deliveryId?: string }) => entry.deliveryId !== id);
-      nextArticleHistory.push({
-        date: updates.date,
-        orderNo: savedDelivery.orderNo || '',
-        customerName: updates.customerName.trim(),
-        pairs: updates.quantity,
-        remainingAfter: articleRemaining,
-        deliveryId: id
-      });
 
-      transaction.update(stockRef, {
-        totalDelivered: increment(updates.quantity - oldQuantity),
-        balance: increment(oldQuantity - updates.quantity),
+    const rateVal = updates.rate !== undefined ? Number(updates.rate) : current.rate;
+    const amountVal = updates.amount !== undefined ? Number(updates.amount) : (qty * (rateVal || 0));
+
+    const updatedDelivery: DeliveryHistoryEntry = {
+      ...current,
+      ...updates,
+      id,
+      date: dateVal,
+      deliveryDate: dateVal,
+      quantity: qty,
+      customerName: custName,
+      partyName: custName,
+      vehicleNo: updates.vehicleNo !== undefined ? updates.vehicleNo : (current.vehicleNo || ''),
+      driverName: updates.driverName !== undefined ? updates.driverName : (current.driverName || ''),
+      biltyNo: updates.biltyNo !== undefined ? updates.biltyNo : (current.biltyNo || ''),
+      billNo: updates.billNo !== undefined ? updates.billNo : (current.billNo || ''),
+      gatePassNo: updates.gatePassNo !== undefined ? updates.gatePassNo : (current.gatePassNo || ''),
+      rate: rateVal,
+      amount: amountVal
+    };
+
+    const oldQuantity = Number(current.quantity) || 0;
+    const qtyDelta = qty - oldQuantity;
+
+    if (stockRef) {
+      await updateDoc(stockRef, {
+        totalDelivered: increment(qtyDelta),
+        balance: increment(-qtyDelta),
         updatedAt: now
-      });
-      transaction.update(articleRef, {
-        totalAvailable: increment(oldQuantity - updates.quantity),
-        totalDelivered: increment(updates.quantity - oldQuantity),
-        deliveryHistory: nextArticleHistory
-      });
-      transaction.update(deliveryRef, updatedDelivery);
-      if (dispatchHistoryRef && dispatchSnapshot?.exists()) {
-        transaction.update(dispatchHistoryRef, {
-          date: updates.date,
-          quantity: updates.quantity,
-          customerName: updates.customerName.trim()
-        });
+      }).catch(e => console.warn('stock_management update:', e));
+    }
+
+    await updateDoc(articleRef, {
+      totalAvailable: increment(-qtyDelta),
+      totalDelivered: increment(qtyDelta)
+    }).catch(e => console.warn('article_stock update:', e));
+
+    await updateDoc(deliveryRef, updatedDelivery as any).catch(e => console.warn('delivery update:', e));
+
+    if (dispatchHistoryRef) {
+      await updateDoc(dispatchHistoryRef, {
+        date: dateVal,
+        quantity: qty,
+        customerName: custName
+      }).catch(() => {});
+    }
+
+    if (orderHistoryRef) {
+      await updateDoc(orderHistoryRef, {
+        date: dateVal,
+        quantity: qty,
+        customerName: custName
+      }).catch(() => {});
+    }
+
+    setDeliveryHistory(prev => prev.map(d => d.id === id ? updatedDelivery : d));
+  };
+
+  const deleteStockInEntry = async (id: string): Promise<void> => {
+    // 1. Delete or unlink from cuttingEntries / cutting_transactions if exists
+    try {
+      await deleteCuttingEntry(id);
+    } catch (err) {
+      console.warn('Could not delete cutting entry during stock IN delete:', err);
+    }
+
+    // 2. Remove from article_stock collections
+    if (db) {
+      try {
+        const articleDocs = await getDocs(collection(db, 'article_stock'));
+        for (const snap of articleDocs.docs) {
+          const data = snap.data();
+          const history = data.cuttingHistory || [];
+          const idx = history.findIndex((h: any, i: number) => h.receiveId === id || `art-hist-${i}-${h.date}` === id || h.id === id);
+          if (idx >= 0) {
+            const removedItem = history[idx];
+            const removedQty = Number(removedItem?.pairs) || 0;
+            const updatedHistory = history.filter((_: any, i: number) => i !== idx);
+            await updateDoc(doc(db, 'article_stock', snap.id), {
+              cuttingHistory: updatedHistory,
+              totalReceived: increment(-removedQty),
+              totalAvailable: increment(-removedQty)
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('Could not clean up article_stock cuttingHistory:', err);
       }
-      if (orderHistoryRef && orderHistorySnapshot?.exists()) {
-        transaction.update(orderHistoryRef, {
-          date: updates.date,
-          quantity: updates.quantity,
-          customerName: updates.customerName.trim()
-        });
+    }
+
+    // 3. Update local states
+    setCuttingEntries(prev => prev.filter(e => e.id !== id));
+    setCuttingTransactions(prev => prev.filter(t => t.id !== id));
+    setArticleStock(prev => prev.map(stock => ({
+      ...stock,
+      cuttingHistory: (stock.cuttingHistory || []).filter((h, i) => h.receiveId !== id && `art-hist-${i}-${h.date}` !== id && (h as any).id !== id)
+    })));
+  };
+
+  const updateArticleName = async (oldName: string, newName: string): Promise<void> => {
+    const oldNorm = oldName.trim().toLowerCase();
+    const newTrimmed = newName.trim();
+    if (!newTrimmed || oldNorm === newTrimmed.toLowerCase()) return;
+    if (!db) throw new Error('Firestore is not available.');
+
+    const batch = writeBatch(db);
+
+    // Update articlesMaster
+    articlesMaster.forEach(art => {
+      if (art.articleName.trim().toLowerCase() === oldNorm) {
+        batch.update(doc(db, 'articles_master', art.id), { articleName: newTrimmed });
       }
     });
+
+    // Update cuttingEntries
+    cuttingEntries.forEach(entry => {
+      const art = (entry.articleTitle || entry.article || '').trim().toLowerCase();
+      if (art === oldNorm) {
+        batch.update(doc(db, 'cuttingEntries', entry.id), { article: newTrimmed, articleTitle: newTrimmed });
+      }
+    });
+
+    // Update stockManagement
+    stockManagement.forEach(stk => {
+      const art = (stk.article || stk.articleName || '').trim().toLowerCase();
+      if (art === oldNorm) {
+        batch.update(doc(db, 'stock_management', stk.id), { article: newTrimmed, articleName: newTrimmed });
+      }
+    });
+
+    // Update deliveryHistory
+    deliveryHistory.forEach(del => {
+      const art = (del.article || '').trim().toLowerCase();
+      if (art === oldNorm) {
+        batch.update(doc(db, 'stock_delivery_history', del.id), { article: newTrimmed });
+      }
+    });
+
+    await batch.commit();
+
+    // Update local state
+    setArticlesMaster(prev => prev.map(a => a.articleName.trim().toLowerCase() === oldNorm ? { ...a, articleName: newTrimmed } : a));
+    setCuttingEntries(prev => prev.map(e => (e.articleTitle || e.article || '').trim().toLowerCase() === oldNorm ? { ...e, article: newTrimmed, articleTitle: newTrimmed } : e));
+    setCuttingTransactions(prev => prev.map(t => (t.articleTitle || t.article || '').trim().toLowerCase() === oldNorm ? { ...t, article: newTrimmed, articleTitle: newTrimmed } : t));
+    setStockManagement(prev => prev.map(s => (s.article || s.articleName || '').trim().toLowerCase() === oldNorm ? { ...s, article: newTrimmed, articleName: newTrimmed } : s));
+    setDeliveryHistory(prev => prev.map(d => (d.article || '').trim().toLowerCase() === oldNorm ? { ...d, article: newTrimmed } : d));
+  };
+
+  const deleteWholeArticle = async (articleName: string): Promise<void> => {
+    const norm = articleName.trim().toLowerCase();
+    if (!norm) return;
+    if (!db) throw new Error('Firestore is not available.');
+
+    const batch = writeBatch(db);
+
+    // 1. Add to deleted_products blocklist
+    batch.set(doc(db, 'deleted_products', norm), {
+      id: norm,
+      name: norm,
+      displayName: articleName.trim(),
+      deletedAt: new Date().toISOString()
+    });
+
+    // 2. Delete from articles_master
+    articlesMaster.filter(a => a.articleName.trim().toLowerCase() === norm).forEach(a => {
+      batch.delete(doc(db, 'articles_master', a.id));
+    });
+
+    // 3. Delete from article_stock
+    const oldDocId = normalizeStockDocumentId(articleName);
+    batch.delete(doc(db, 'article_stock', oldDocId));
+
+    // 4. Delete from stock_management
+    stockManagement.filter(s => (s.article || s.articleName || '').trim().toLowerCase() === norm).forEach(s => {
+      batch.delete(doc(db, 'stock_management', s.id));
+    });
+
+    // 5. Delete from cuttingEntries
+    cuttingEntries.filter(e => (e.articleTitle || e.article || '').trim().toLowerCase() === norm).forEach(e => {
+      batch.delete(doc(db, 'cuttingEntries', e.id));
+    });
+
+    // 6. Delete from legacy cutting_transactions
+    cuttingTransactions.filter(t => (t.articleTitle || t.article || '').trim().toLowerCase() === norm).forEach(t => {
+      batch.delete(doc(db, 'cutting_transactions', t.id));
+    });
+
+    // 7. Delete matching items from products
+    products.filter(p => (p.gloveName || '').trim().toLowerCase() === norm).forEach(p => {
+      batch.delete(doc(db, 'products', p.id));
+    });
+
+    // 8. Delete from deliveryHistory
+    deliveryHistory.filter(d => (d.article || '').trim().toLowerCase() === norm).forEach(d => {
+      batch.delete(doc(db, 'stock_delivery_history', d.id));
+    });
+
+    await batch.commit();
+
+    // Update local state
+    setDeletedProductsList(prev => {
+      if (prev.some(d => d.name === norm)) return prev;
+      const updated = [{
+        id: norm,
+        name: norm,
+        displayName: articleName.trim(),
+        deletedAt: new Date().toISOString()
+      }, ...prev];
+      saveLocal('gferp_deleted_products_v1', updated);
+      return updated;
+    });
+
+    setArticlesMaster(prev => prev.filter(a => a.articleName.trim().toLowerCase() !== norm));
+    setArticleStock(prev => prev.filter(a => (a.articleName || '').trim().toLowerCase() !== norm));
+    setStockManagement(prev => prev.filter(s => (s.article || s.articleName || '').trim().toLowerCase() !== norm));
+    setProducts(prev => {
+      const nextProds = prev.filter(p => (p.gloveName || '').trim().toLowerCase() !== norm);
+      saveLocal(STORAGE_KEYS.PRODUCTS, nextProds);
+      return nextProds;
+    });
+    setCuttingEntries(prev => prev.filter(e => (e.articleTitle || e.article || '').trim().toLowerCase() !== norm));
+    setCuttingTransactions(prev => prev.filter(t => (t.articleTitle || t.article || '').trim().toLowerCase() !== norm));
+    setDeliveryHistory(prev => prev.filter(d => (d.article || '').trim().toLowerCase() !== norm));
+
+    showToast(`Article "${articleName}" deleted permanently.`);
+  };
+
+  const restoreArticle = async (articleName: string): Promise<void> => {
+    const norm = articleName.trim().toLowerCase();
+    if (!norm) return;
+
+    if (db) {
+      try {
+        await deleteDoc(doc(db, 'deleted_products', norm));
+      } catch (err) {
+        console.error('Error removing from deleted_products in Firestore:', err);
+      }
+    }
+
+    setDeletedProductsList(prev => {
+      const next = prev.filter(d => d.name !== norm);
+      saveLocal('gferp_deleted_products_v1', next);
+      return next;
+    });
+
+    // Recreate clean entry in articles_master so it appears in list with 0 stock
+    try {
+      await addArticleMaster({
+        articleName: articleName.trim(),
+        sizes: []
+      });
+    } catch (err) {
+      console.error('Error restoring article master entry:', err);
+    }
+
+    showToast(`Article "${articleName}" restored successfully`);
   };
 
   const deleteStockDelivery = async (id: string): Promise<void> => {
@@ -3082,6 +3383,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const clean = rawName.trim();
       if (!clean) return;
       const key = clean.toLowerCase();
+      if (deletedProductNames.has(key)) return;
       if (!articleMap.has(key)) {
         articleMap.set(key, { displayName: clean, sizes: new Set(), sampleRate: rate || 0 });
       }
@@ -3105,7 +3407,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const totalIn = inHistory.reduce((sum, item) => sum + item.quantity, 0);
       const totalOut = outHistory.reduce((sum, item) => sum + item.quantity, 0);
-      const availableStock = Math.max(0, totalIn - totalOut);
+      const availableStock = totalIn - totalOut;
 
       let unitRate = sampleRate || 0;
       if (!unitRate) {
@@ -4580,7 +4882,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         articlesMaster: [...new Map(
           [...articlesMaster, ...articleCatalog, ...legacyArticleMaster]
             .map(article => [article.articleName.trim().toLocaleLowerCase(), article] as const)
-        ).values()].sort((a, b) => a.articleName.localeCompare(b.articleName)),
+        ).values()]
+          .filter(a => !deletedProductNames.has(a.articleName.trim().toLowerCase()))
+          .sort((a, b) => a.articleName.localeCompare(b.articleName)),
         invoices,
         partyTransactions,
         staffLedger,
@@ -4590,6 +4894,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         cashbook,
         attendance,
         settings,
+        deletedProductsList,
         toasts,
         showToast,
         removeToast,
@@ -4609,6 +4914,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         deliverFromStock,
         addStockReceipt,
         deleteFactoryStock,
+        deleteStockInEntry,
+        updateArticleName,
+        deleteWholeArticle,
+        restoreArticle,
         updateStockDelivery,
         deleteStockDelivery,
         addStitcher,

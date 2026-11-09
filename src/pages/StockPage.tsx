@@ -12,7 +12,10 @@ import {
   Edit, 
   X,
   Sparkles,
-  ArrowLeft
+  ArrowLeft,
+  RotateCcw,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate } from '../utils/factoryFormatters';
@@ -25,6 +28,8 @@ export const StockPage: React.FC = () => {
     addProduct, 
     updateProduct, 
     deleteProduct, 
+    restoreArticle,
+    deletedProductsList = [],
     loadFactoryPresets, 
     settings 
   } = useFactory();
@@ -33,18 +38,23 @@ export const StockPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [isAddProductOpen, setIsAddProductOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [deletingProduct, setDeletingProduct] = useState<Product | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showDeletedProducts, setShowDeletedProducts] = useState(false);
+  const [restoringName, setRestoringName] = useState<string | null>(null);
 
   // Close on Escape key
   useEffect(() => {
-    if (!isAddProductOpen) return;
+    if (!isAddProductOpen && !deletingProduct) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsAddProductOpen(false);
+        setDeletingProduct(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAddProductOpen]);
+  }, [isAddProductOpen, deletingProduct]);
 
   // Form states
   const [gloveName, setGloveName] = useState('');
@@ -55,13 +65,18 @@ export const StockPage: React.FC = () => {
   const [salePrice, setSalePrice] = useState('450');
   const [lowStockLimit, setLowStockLimit] = useState('40');
 
-  // Calculations
-  const totalStockPairs = products.reduce((s, p) => s + p.currentStock, 0);
-  const totalStockCost = products.reduce((s, p) => s + (p.currentStock * p.purchasePrice), 0);
-  const totalStockRetail = products.reduce((s, p) => s + (p.currentStock * p.salePrice), 0);
-  const lowStockCount = products.filter(p => p.currentStock <= p.lowStockLimit).length;
+  // Filter out any products on the persistent deleted products blocklist
+  const visibleProducts = products.filter(
+    p => !deletedProductsList.some(d => d.name === p.gloveName.trim().toLowerCase())
+  );
 
-  const filteredProducts = products.filter(p => {
+  // Calculations
+  const totalStockPairs = visibleProducts.reduce((s, p) => s + p.currentStock, 0);
+  const totalStockCost = visibleProducts.reduce((s, p) => s + (p.currentStock * p.purchasePrice), 0);
+  const totalStockRetail = visibleProducts.reduce((s, p) => s + (p.currentStock * p.salePrice), 0);
+  const lowStockCount = visibleProducts.filter(p => p.currentStock <= p.lowStockLimit).length;
+
+  const filteredProducts = visibleProducts.filter(p => {
     if (search.trim()) {
       const q = search.toLowerCase();
       return p.gloveName.toLowerCase().includes(q) || 
@@ -311,8 +326,8 @@ export const StockPage: React.FC = () => {
                               <Edit className="w-3.5 h-3.5" />
                             </button>
                             <button
-                              onClick={() => deleteProduct(p.id)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
+                              onClick={() => setDeletingProduct(p)}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
                               title="Delete Model"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -324,6 +339,61 @@ export const StockPage: React.FC = () => {
                   })}
                 </tbody>
               </table>
+            )}
+
+            {/* Collapsible Deleted Products Archive & Restore */}
+            {deletedProductsList && deletedProductsList.length > 0 && (
+              <div className="border-t border-slate-200 bg-slate-50/70 p-4 sm:p-5">
+                <button
+                  type="button"
+                  onClick={() => setShowDeletedProducts(!showDeletedProducts)}
+                  className="flex w-full items-center justify-between text-left text-xs font-bold text-slate-700 hover:text-slate-900 transition cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <Trash2 className="h-4 w-4 text-slate-400" />
+                    <span>Deleted Products Archive ({deletedProductsList.length}) - View & Restore</span>
+                  </div>
+                  {showDeletedProducts ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </button>
+
+                {showDeletedProducts && (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-[11px] text-slate-500">
+                      Permanently deleted products are blocked from re-seeding or reappearing in Ready Stock after refresh. You can restore an item below.
+                    </p>
+                    <div className="divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white shadow-2xs overflow-hidden">
+                      {deletedProductsList.map((item) => (
+                        <div key={item.id} className="flex items-center justify-between p-3 text-xs">
+                          <div>
+                            <span className="font-bold text-slate-800">{item.displayName || item.name}</span>
+                            <span className="ml-2 text-[10px] text-slate-400">
+                              Deleted on {new Date(item.deletedAt).toLocaleDateString()}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={restoringName === item.name}
+                            onClick={async () => {
+                              try {
+                                setRestoringName(item.name);
+                                await restoreArticle(item.displayName || item.name);
+                              } catch (err) {
+                                console.error('Error restoring product:', err);
+                              } finally {
+                                setRestoringName(null);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-700 hover:bg-blue-100 transition cursor-pointer disabled:opacity-50"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5 text-blue-600" />
+                            <span>{restoringName === item.name ? 'Restoring...' : 'Restore'}</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         )}
@@ -539,6 +609,73 @@ export const StockPage: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Product Confirmation Modal */}
+      {deletingProduct && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDeletingProduct(null);
+          }}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-100 animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2 text-rose-600">
+                <Trash2 className="w-5 h-5" />
+                <h3 className="font-bold text-slate-900 text-base">Delete Glove Product?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingProduct(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="mt-3 space-y-2 text-xs text-slate-600">
+              <p className="text-slate-700 font-medium leading-relaxed">
+                Delete Product <strong className="text-slate-900 font-bold">{deletingProduct.gloveName}</strong>? Total <strong className="text-rose-600 font-bold">{deletingProduct.currentStock.toLocaleString()} Pairs</strong> will be removed permanently. This cannot be undone.
+              </p>
+              <p className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-rose-800">
+                ⚠️ This item will be permanently removed from Ready Stock and blocked from resurrecting upon refresh or reload.
+              </p>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setDeletingProduct(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Cancel / Back
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={async () => {
+                  setIsDeleting(true);
+                  try {
+                    await deleteProduct(deletingProduct.id);
+                    setDeletingProduct(null);
+                  } catch (err) {
+                    console.error('Error deleting product:', err);
+                  } finally {
+                    setIsDeleting(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white transition cursor-pointer disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting...' : 'Delete Product'}
+              </button>
+            </div>
           </div>
         </div>
       )}

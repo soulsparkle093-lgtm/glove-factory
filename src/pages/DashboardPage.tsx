@@ -121,13 +121,15 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
               <Plus className="w-4 h-4" />
               <span>+ New Order</span>
             </button>
-            <button
-              onClick={onOpenNewCutting}
-              className="px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm bg-amber-500 hover:bg-amber-600 text-white shadow-md transition active:scale-95 flex items-center gap-1.5"
-            >
-              <Scissors className="w-4 h-4" />
-              <span>+ Give Cutting</span>
-            </button>
+            {settings.moduleVisibility?.cutting !== false && (
+              <button
+                onClick={onOpenNewCutting}
+                className="px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm bg-amber-500 hover:bg-amber-600 text-white shadow-md transition active:scale-95 flex items-center gap-1.5"
+              >
+                <Scissors className="w-4 h-4" />
+                <span>+ Give Cutting</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -158,50 +160,54 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
         </div>
 
         {/* 2. Pending Cutting */}
-        <div 
-          onClick={() => setActiveModule('cuttings')}
-          className="bg-white rounded-2xl p-4 border border-amber-200 shadow-xs hover:shadow-md transition cursor-pointer group"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700">
-              Pending Cutting
-            </span>
-            <div className="w-7 h-7 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center group-hover:scale-110 transition">
-              <Scissors className="w-4 h-4" />
+        {settings.moduleVisibility?.cutting !== false && (
+          <div 
+            onClick={() => setActiveModule('cuttings')}
+            className="bg-white rounded-2xl p-4 border border-amber-200 shadow-xs hover:shadow-md transition cursor-pointer group"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700">
+                Pending Cutting
+              </span>
+              <div className="w-7 h-7 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center group-hover:scale-110 transition">
+                <Scissors className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="mt-2">
+              <div className="text-2xl font-black text-amber-600 group-hover:text-amber-700 transition">
+                {pendingCuttingPairs} <span className="text-xs font-normal text-slate-500">pairs</span>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                {pendingCuttings.length} batches given out
+              </p>
             </div>
           </div>
-          <div className="mt-2">
-            <div className="text-2xl font-black text-amber-600 group-hover:text-amber-700 transition">
-              {pendingCuttingPairs} <span className="text-xs font-normal text-slate-500">pairs</span>
-            </div>
-            <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-              {pendingCuttings.length} batches given out
-            </p>
-          </div>
-        </div>
+        )}
 
         {/* 3. Low Stock */}
-        <div 
-          onClick={() => setActiveModule('stock')}
-          className="bg-white rounded-2xl p-4 border border-rose-200 shadow-xs hover:shadow-md transition cursor-pointer group"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-700">
-              Low Stock Alert
-            </span>
-            <div className="w-7 h-7 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center group-hover:scale-110 transition">
-              <AlertTriangle className="w-4 h-4" />
+        {settings.moduleVisibility?.finishedGoods !== false && (
+          <div 
+            onClick={() => setActiveModule('stock')}
+            className="bg-white rounded-2xl p-4 border border-rose-200 shadow-xs hover:shadow-md transition cursor-pointer group"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-rose-700">
+                Low Stock Alert
+              </span>
+              <div className="w-7 h-7 rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center group-hover:scale-110 transition">
+                <AlertTriangle className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="mt-2">
+              <div className="text-2xl font-black text-rose-600">
+                {lowStockProducts.length}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                {totalReadyStockPairs} pairs ready in stock
+              </p>
             </div>
           </div>
-          <div className="mt-2">
-            <div className="text-2xl font-black text-rose-600">
-              {lowStockProducts.length}
-            </div>
-            <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-              {totalReadyStockPairs} pairs ready in stock
-            </p>
-          </div>
-        </div>
+        )}
 
         {/* 4. Total Receivable */}
         <div 

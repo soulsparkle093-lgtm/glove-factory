@@ -8,7 +8,7 @@ interface MobileBottomNavProps {
 }
 
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMobileMenu }) => {
-  const { activeModule, setActiveModule, cuttings, orders } = useFactory();
+  const { activeModule, setActiveModule, cuttings, orders, settings } = useFactory();
 
   const pendingCuttingsCount = cuttings.filter(c => c.status === 'Given').length;
   const activeOrdersCount = orders.filter(o => o.status !== 'Completed').length;
@@ -27,9 +27,15 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMobileMe
     { id: 'menu', labelEn: 'Menu', icon: Menu }
   ];
 
+  const visibleItems = items.filter(item => {
+    if (item.id === 'cuttings' && settings.moduleVisibility?.cutting === false) return false;
+    if (item.id === 'stock' && settings.moduleVisibility?.finishedGoods === false) return false;
+    return true;
+  });
+
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-2 py-1.5 flex items-center justify-around lg:hidden shadow-xl">
-      {items.map(item => {
+      {visibleItems.map(item => {
         const Icon = item.icon;
         const isActive = activeModule === item.id;
 
