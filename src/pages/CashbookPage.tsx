@@ -39,14 +39,24 @@ export const CashbookPage: React.FC = () => {
   const cashOutOnly = cashbook.filter(c => c.type === 'out' && c.paymentMode === 'cash').reduce((s, c) => s + c.amount, 0);
   const physicalCashInHand = cashInOnly - cashOutOnly;
 
-  const filteredEntries = cashbook.filter(c => {
-    if (typeFilter !== 'all' && c.type !== typeFilter) return false;
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      return c.description.toLowerCase().includes(q) || c.category.toLowerCase().includes(q);
-    }
-    return true;
-  });
+  const filteredEntries = cashbook
+    .filter(c => {
+      if (typeFilter !== 'all' && c.type !== typeFilter) return false;
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        return c.description.toLowerCase().includes(q) || c.category.toLowerCase().includes(q);
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const cmpDate = (b.date || '').localeCompare(a.date || '');
+      if (cmpDate !== 0) return cmpDate;
+      const bCreated = (b as any).createdAt || '';
+      const aCreated = (a as any).createdAt || '';
+      const cmpCreated = bCreated.localeCompare(aCreated);
+      if (cmpCreated !== 0) return cmpCreated;
+      return (b.id || '').localeCompare(a.id || '');
+    });
 
   const handleOpenModal = (type: 'in' | 'out') => {
     setEntryType(type);

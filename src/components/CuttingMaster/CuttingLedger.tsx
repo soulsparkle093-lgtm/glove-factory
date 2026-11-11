@@ -160,7 +160,7 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
           entry.average || '-',
           rate ? `Rs. ${rate}` : 'Rs. 0',
           isReturn ? `-Rs. ${Math.abs(amount).toLocaleString()}` : `Rs. ${amount.toLocaleString()}`,
-          `Rs. ${runningBal.toLocaleString()}`
+          `Rs. ${(entry.runningBalance !== undefined ? entry.runningBalance : runningBal).toLocaleString()}`
         ];
       });
 

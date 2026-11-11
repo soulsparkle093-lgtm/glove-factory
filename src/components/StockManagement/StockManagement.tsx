@@ -748,19 +748,20 @@ export const StockManagement: React.FC = () => {
 
   const handleConfirmDeleteArticle = async () => {
     if (!deletingArticleName) return;
+    const nameToDelete = deletingArticleName;
     setIsDeletingArticle(true);
     try {
       if (deleteWholeArticle) {
-        await deleteWholeArticle(deletingArticleName);
+        await deleteWholeArticle(nameToDelete);
       }
-      if (selectedArticleName && selectedArticleName.trim().toLowerCase() === deletingArticleName.trim().toLowerCase()) {
+      if (selectedArticleName && selectedArticleName.trim().toLowerCase() === nameToDelete.trim().toLowerCase()) {
         setSelectedArticleName(null);
       }
-      showToast('Article Deleted Successfully.');
+      showToast(`${nameToDelete} deleted permanently.`);
       setDeletingArticleName(null);
     } catch (err) {
       console.error('Error deleting article:', err);
-      showToast(err instanceof Error ? err.message : 'Could not delete article.', 'error');
+      showToast('Delete failed, please try again', 'error');
     } finally {
       setIsDeletingArticle(false);
     }
@@ -2343,7 +2344,7 @@ export const StockManagement: React.FC = () => {
                   onClick={() => setDeletingArticleName(null)}
                   className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
                 >
-                  Cancel / Back
+                  Cancel
                 </button>
                 <button
                   type="button"
@@ -2351,7 +2352,7 @@ export const StockManagement: React.FC = () => {
                   onClick={handleConfirmDeleteArticle}
                   className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50 transition cursor-pointer"
                 >
-                  {isDeletingArticle ? 'Deleting...' : 'Delete Article'}
+                  {isDeletingArticle ? 'Deleting...' : 'Delete Permanently'}
                 </button>
               </div>
             </div>
@@ -3957,14 +3958,20 @@ export const StockManagement: React.FC = () => {
               </button>
             </div>
 
-            <div className="mt-3 space-y-2 text-xs text-slate-600">
-              <p>
-                Are you sure you want to completely remove article <strong className="text-slate-900 font-bold">{deletingArticleName}</strong>?
-              </p>
-              <p className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-rose-800">
-                ⚠️ This will permanently remove all associated stock inventory, cutting records, and delivery history for this article.
-              </p>
-            </div>
+            {(() => {
+              const deletingItem = distinctArticles.find(a => a.articleName.trim().toLowerCase() === (deletingArticleName || '').trim().toLowerCase());
+              const deletingPairs = deletingItem ? deletingItem.availableStock : 0;
+              return (
+                <div className="mt-3 space-y-2 text-xs text-slate-600">
+                  <p className="text-slate-700 font-medium leading-relaxed">
+                    Delete Article <strong className="text-slate-900 font-bold">{deletingArticleName}</strong>? Total <strong className="text-rose-600 font-bold">{deletingPairs.toLocaleString()} Pairs</strong> will be removed permanently. This cannot be undone.
+                  </p>
+                  <p className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-rose-800">
+                    ⚠️ This will permanently remove all stock inventory for this article. This cannot be undone.
+                  </p>
+                </div>
+              );
+            })()}
 
             <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
               <button
@@ -3972,7 +3979,7 @@ export const StockManagement: React.FC = () => {
                 onClick={() => setDeletingArticleName(null)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
               >
-                Cancel / Back
+                Cancel
               </button>
               <button
                 type="button"
@@ -3980,7 +3987,7 @@ export const StockManagement: React.FC = () => {
                 onClick={handleConfirmDeleteArticle}
                 className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50 transition cursor-pointer"
               >
-                {isDeletingArticle ? 'Deleting...' : 'Delete Article'}
+                {isDeletingArticle ? 'Deleting...' : 'Delete Permanently'}
               </button>
             </div>
           </div>

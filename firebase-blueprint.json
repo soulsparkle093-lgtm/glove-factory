@@ -108,6 +108,31 @@
         "remaining": { "type": "number" }
       },
       "required": ["invoiceNo", "customerName", "grandTotal"]
+    },
+    "DeletedProduct": {
+      "title": "Deleted Product Blocklist",
+      "description": "Blocklist of deleted articles and products to prevent re-creation upon refresh or background sync",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "displayName": { "type": "string" },
+        "deletedAt": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "StockManagementItem": {
+      "title": "Stock Management Item",
+      "description": "Active stock counts per article and size",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "article": { "type": "string" },
+        "size": { "type": "string" },
+        "qty": { "type": "number" },
+        "balance": { "type": "number" }
+      },
+      "required": ["article"]
     }
   },
   "firestore": {
@@ -138,6 +163,14 @@
     "/sales_invoices/{invoiceId}": {
       "schema": "SaleInvoice",
       "description": "Sale invoices"
+    },
+    "/deleted_products/{productId}": {
+      "schema": "DeletedProduct",
+      "description": "Blocklist of deleted articles preventing resurrection on page refresh"
+    },
+    "/stock_management/{stockId}": {
+      "schema": "StockManagementItem",
+      "description": "Active stock items"
     }
   }
 }

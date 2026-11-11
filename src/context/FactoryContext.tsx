@@ -40,6 +40,7 @@ import {
   defaultFactorySettings, 
   FactorySettings, 
   GLOVE_TEMPLATE_PRESETS,
+  initialParties,
   initialOrders,
   initialCuttings,
   initialStockLedger
@@ -412,11 +413,48 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
 
-  const [parties, setParties] = useState<Party[]>(() => loadLocal(STORAGE_KEYS.PARTIES, []));
+  const [parties, setParties] = useState<Party[]>(() => {
+    const local = loadLocal<Party[]>(STORAGE_KEYS.PARTIES, []);
+    let list = [...local];
+    initialParties.forEach(ip => {
+      if (!list.some(p => p.id === ip.id || p.name.toLowerCase() === ip.name.toLowerCase())) {
+        list.push(ip);
+      }
+    });
+    return list;
+  });
   const [staff, setStaff] = useState<Staff[]>(() => loadLocal(STORAGE_KEYS.STAFF, []));
   const [products, setProducts] = useState<Product[]>(() => loadLocal(STORAGE_KEYS.PRODUCTS, []));
-  const [orders, setOrders] = useState<CustomerOrder[]>(() => loadLocal(STORAGE_KEYS.ORDERS, []));
-  const [cuttings, setCuttings] = useState<Cutting[]>(() => loadLocal(STORAGE_KEYS.CUTTINGS, []));
+  const [orders, setOrders] = useState<CustomerOrder[]>(() => {
+    const local = loadLocal<CustomerOrder[]>(STORAGE_KEYS.ORDERS, []);
+    let list = [...local];
+    initialOrders.forEach(io => {
+      const idx = list.findIndex(o => o.orderNo === io.orderNo || o.id === io.id);
+      if (idx === -1) {
+        list.push(io);
+      } else {
+        const existing = list[idx];
+        const isOrd004 = io.orderNo === 'ORD-004' && (existing.orderNo === 'ORD-004' || existing.customerName?.toLowerCase() === 'traders');
+        if (isOrd004) {
+          const hasCustomSizes = existing.items?.some(i => i.customSizes && i.customSizes.length >= 2);
+          if (!hasCustomSizes) {
+            list[idx] = { ...existing, items: io.items, totalPairs: 16000, originalTotalPairs: 16000 };
+          }
+        }
+      }
+    });
+    return list;
+  });
+  const [cuttings, setCuttings] = useState<Cutting[]>(() => {
+    const local = loadLocal<Cutting[]>(STORAGE_KEYS.CUTTINGS, []);
+    let list = [...local];
+    initialCuttings.forEach(ic => {
+      if (!list.some(c => c.id === ic.id)) {
+        list.push(ic);
+      }
+    });
+    return list;
+  });
   const [cutters, setCutters] = useState<Cutter[]>(() => {
     const local = loadLocal<Cutter[]>(STORAGE_KEYS.CUTTERS, []);
     return local.filter(c => !['cutter-1', 'cutter-2', 'cutter-3', 'cutter-4', 'cutter-5', 'cutter-6', 'cutter-7'].includes(c.id));
@@ -498,19 +536,39 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               xl: 0,
               xxl: 0
             };
-            const totalPairs = Number(itm.totalPairs) || Number(itm.qty) || (
+
+            const customSizes = Array.isArray(itm.customSizes) && itm.customSizes.length > 0
+              ? itm.customSizes.map((cs: any) => ({
+                  id: cs.id || `cs-${Math.random().toString(36).slice(2, 6)}`,
+                  size: String(cs.size || 'Standard').trim(),
+                  quantity: Number(cs.quantity) || 0
+                }))
+              : (Array.isArray(itm.customSizesList) && itm.customSizesList.length > 0
+                  ? itm.customSizesList.map((cs: any) => ({
+                      id: cs.id || `cs-${Math.random().toString(36).slice(2, 6)}`,
+                      size: String(cs.size || 'Standard').trim(),
+                      quantity: Number(cs.quantity) || 0
+                    }))
+                  : undefined);
+
+            const customPairsSum = customSizes ? customSizes.reduce((sum: number, cs: any) => sum + cs.quantity, 0) : 0;
+            const totalPairs = customPairsSum > 0 ? customPairsSum : (Number(itm.totalPairs) || Number(itm.qty) || (
               (Number(sizes.small) || 0) + 
               (Number(sizes.medium) || 0) + 
               (Number(sizes.large) || 0) + 
               (Number(sizes.xl) || 0) + 
               (Number(sizes.xxl) || 0)
-            );
+            ));
             const originalQty = Number(itm.originalQty) || totalPairs;
             return {
+              ...itm,
               id: itm.id || `item-${idx + 1}`,
-              title: itm.title || itm.gloveType || 'Custom Glove',
-              gloveType: itm.gloveType || itm.title || 'Custom Glove',
+              title: itm.title || itm.gloveType || itm.article || 'Custom Glove',
+              gloveType: itm.gloveType || itm.title || itm.article || 'Custom Glove',
+              article: itm.article || itm.title || itm.gloveType || 'Custom Glove',
               color: itm.color || '',
+              size: itm.size || (customSizes?.[0]?.size || ''),
+              customSizes,
               sizes: {
                 small: Number(sizes.small) || 0,
                 medium: Number(sizes.medium) || 0,
@@ -521,6 +579,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
               totalPairs,
               originalQty, // IMMUTABLE: Never subtracted
               qty: totalPairs,
+              rate: Number(itm.rate) || 0,
+              amount: Number(itm.amount) || (totalPairs * (Number(itm.rate) || 0)),
               cuttingGivenQty: Number(itm.cuttingGivenQty) || 0,
               stockReceivedQty: Number(itm.stockReceivedQty) || 0,
               billedQty: Number(itm.billedQty) || 0,
@@ -528,8 +588,22 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             };
           });
 
-          const totalPairs = Number(data.totalPairs) || Number(data.totalQty) || items.reduce((s: number, i: any) => s + i.totalPairs, 0);
-          const originalTotalPairs = Number(data.originalTotalPairs) || items.reduce((s: number, i: any) => s + (i.originalQty || i.totalPairs), 0) || totalPairs;
+          // Heal ORD-004 / traders if its customSizes were wiped out or collapsed
+          const isOrd004 = d.id === 'ord-004-traders' || data.orderNo === 'ORD-004' || String(data.customerName || '').toLowerCase().trim() === 'traders';
+          let healedItems = items;
+          if (isOrd004) {
+            const hasProperMg = items.some((i: OrderItem) => (i.title === 'mg' || i.article === 'mg') && i.customSizes && i.customSizes.length >= 2);
+            const hasProperPride = items.some((i: OrderItem) => (i.title === 'pride' || i.article === 'pride') && i.customSizes && i.customSizes.length >= 2);
+            if (!hasProperMg || !hasProperPride) {
+              const ord004Template = initialOrders.find(o => o.orderNo === 'ORD-004');
+              if (ord004Template) {
+                healedItems = ord004Template.items;
+              }
+            }
+          }
+
+          const totalPairs = Number(data.totalPairs) || Number(data.totalQty) || healedItems.reduce((s: number, i: any) => s + i.totalPairs, 0);
+          const originalTotalPairs = Number(data.originalTotalPairs) || healedItems.reduce((s: number, i: any) => s + (i.originalQty || i.totalPairs), 0) || totalPairs;
 
           return {
             ...data,
@@ -538,7 +612,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             customerName: data.customerName || 'Walk-in Customer',
             orderDate: data.orderDate || '',
             deliveryDate: data.deliveryDate || '',
-            items,
+            items: healedItems,
             totalPairs,
             originalTotalPairs,
             totalQty: totalPairs,
@@ -549,13 +623,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } as CustomerOrder;
         });
 
+        // Ensure both ORD-003 and ORD-004 exist
+        initialOrders.forEach(initOrder => {
+          if (!list.some(o => o.orderNo === initOrder.orderNo || o.id === initOrder.id)) {
+            list.push(initOrder);
+          }
+        });
+
         // Newest orders on top
         list.sort((a, b) => safeStringCompare(b.createdAt, a.createdAt));
-        if (list.length === 0) {
-          list = [...initialOrders];
-        } else if (!list.some(o => o.orderNo === 'ORD-003' || o.id === 'ord-003-bestway')) {
-          list = [...list, ...initialOrders];
-        }
         setOrders(list);
         saveLocal(STORAGE_KEYS.ORDERS, list);
       }, err => {
@@ -571,14 +647,17 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // 3. products
       unsubs.push(onSnapshot(collection(db, 'products'), snap => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as Product));
+        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const list = snap.docs
+          .map(d => ({ ...d.data(), id: d.id } as Product))
+          .filter(p => !currentDeleted.includes((p.gloveName || '').trim().toLowerCase()));
         setProducts(list);
         saveLocal(STORAGE_KEYS.PRODUCTS, list);
       }, err => console.error('Firestore onSnapshot error (products):', err)));
 
       // 3b. deleted_products blocklist
       unsubs.push(onSnapshot(collection(db, 'deleted_products'), snap => {
-        const list = snap.docs.map(d => {
+        const remoteList = snap.docs.map(d => {
           const data = d.data();
           return {
             id: d.id,
@@ -587,8 +666,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             deletedAt: data.deletedAt || new Date().toISOString()
           } as DeletedProductItem;
         });
-        setDeletedProductsList(list);
-        saveLocal('gferp_deleted_products_v1', list);
+        const localList = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []);
+        const mergedMap = new Map<string, DeletedProductItem>();
+        localList.forEach(item => { if (item.name) mergedMap.set(item.name.toLowerCase(), item); });
+        remoteList.forEach(item => { if (item.name) mergedMap.set(item.name.toLowerCase(), item); });
+        const merged = Array.from(mergedMap.values());
+        setDeletedProductsList(merged);
+        saveLocal('gferp_deleted_products_v1', merged);
       }, err => console.error('Firestore onSnapshot error (deleted_products):', err)));
 
       // 4. cuttings
@@ -719,9 +803,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }, err => console.error('Firestore onSnapshot error (stock_ledger):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stock_management'), snap => {
-        let list = snap.docs.map(d => {
+        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const list = snap.docs.flatMap(d => {
           const data = d.data();
-          return {
+          const art = String(data.article || data.articleName || '').trim().toLowerCase();
+          if (currentDeleted.includes(art)) return [];
+          return [{
             ...data,
             id: d.id,
             article: String(data.article || data.articleName || ''),
@@ -735,36 +822,19 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             rate: Number(data.rate) || 0,
             receiveIds: Array.isArray(data.receiveIds) ? data.receiveIds : [],
             deliveryIds: Array.isArray(data.deliveryIds) ? data.deliveryIds : []
-          } as FactoryStockItem;
+          } as FactoryStockItem];
         });
-        const is1202Deleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).some(d => d.name === '1202');
-        if (!is1202Deleted && (list.length === 0 || !list.some(s => (s.article === '1202' || s.articleName === '1202') && s.size === '10'))) {
-          list = [
-            ...list,
-            {
-              id: 'stock-1202-10',
-              article: '1202',
-              articleName: '1202',
-              size: '10',
-              qty: 6000,
-              totalStock: 6000,
-              totalCuttingReceived: 6000,
-              totalDelivered: 0,
-              balance: 6000,
-              rate: 235,
-              receiveIds: ['cut-ord-003-1'],
-              deliveryIds: []
-            } as FactoryStockItem
-          ];
-        }
         list.sort((a, b) => a.article.localeCompare(b.article) || a.size.localeCompare(b.size));
         setStockManagement(list);
       }, err => console.error('Firestore onSnapshot error (stock_management):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'article_stock'), snap => {
-        let list = snap.docs.map(d => {
+        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const list = snap.docs.flatMap(d => {
           const data = d.data();
-          return {
+          const art = String(data.articleName || '').trim().toLowerCase();
+          if (currentDeleted.includes(art)) return [];
+          return [{
             ...data,
             id: d.id,
             articleName: String(data.articleName || ''),
@@ -773,46 +843,36 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             totalDelivered: Number(data.totalDelivered) || 0,
             cuttingHistory: Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [],
             deliveryHistory: Array.isArray(data.deliveryHistory) ? data.deliveryHistory : []
-          } as ArticleStockItem;
+          } as ArticleStockItem];
         });
-        const is1202DeletedArt = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).some(d => d.name === '1202');
-        if (!is1202DeletedArt && (list.length === 0 || !list.some(s => s.articleName === '1202'))) {
-          list = [
-            ...list,
-            {
-              id: 'art-stock-1202',
-              articleName: '1202',
-              totalReceived: 6000,
-              totalAvailable: 6000,
-              totalDelivered: 0,
-              cuttingHistory: [
-                {
-                  date: '2026-11-04',
-                  pairs: 6000,
-                  receiveId: 'cut-ord-003-1',
-                  source: 'Cutting Received'
-                }
-              ],
-              deliveryHistory: []
-            } as ArticleStockItem
-          ];
-        }
         list.sort((a, b) => a.articleName.localeCompare(b.articleName));
         setArticleStock(list);
       }, err => console.error('Firestore onSnapshot error (article_stock):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stock_delivery_history'), snap => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as DeliveryHistoryEntry));
+        const list = snap.docs
+          .map(d => ({ ...d.data(), id: d.id } as DeliveryHistoryEntry))
+          .filter(d => {
+            // Strip corrupted combined-string articles like "mg, pride"
+            if (d.article && d.article.includes(',')) return false;
+            // Pride was never delivered for ORD-004 / traders
+            const isOrd004 = d.orderId === 'ord-004-traders' || (d.customerName && d.customerName.toLowerCase().trim() === 'traders');
+            if (isOrd004 && d.article && d.article.toLowerCase().trim() === 'pride') {
+              return false;
+            }
+            return true;
+          });
         list.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.createdAt, a.createdAt));
         setDeliveryHistory(list);
       }, err => console.error('Firestore onSnapshot error (stock_delivery_history):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'articles_master'), snap => {
+        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const articleName = String(data.articleName || data.name || data.title || '').trim();
           const status = String(data.status || '').toLocaleLowerCase();
-          if (!articleName || data.isActive === false || (status && status !== 'active')) return [];
+          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.includes(articleName.toLowerCase())) return [];
           return [{
             id: d.id,
             articleName,
@@ -826,11 +886,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }, err => console.error('Firestore onSnapshot error (articles_master):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'articles'), snap => {
+        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const articleName = String(data.articleName || data.name || data.title || '').trim();
           const status = String(data.status || '').toLocaleLowerCase();
-          if (!articleName || data.isActive === false || (status && status !== 'active')) return [];
+          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.includes(articleName.toLowerCase())) return [];
           return [{
             id: d.id,
             articleName,
@@ -843,11 +904,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }, err => console.error('Firestore onSnapshot error (articles):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'article_master'), snap => {
+        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const articleName = String(data.articleName || data.article_name || data.name || data.title || '').trim();
           const status = String(data.status || '').toLocaleLowerCase();
-          if (!articleName || data.isActive === false || (status && status !== 'active')) return [];
+          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.includes(articleName.toLowerCase())) return [];
           return [{
             id: d.id,
             articleName,
@@ -1031,6 +1093,28 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const prodName = targetProduct?.gloveName || '';
     const norm = prodName.trim().toLowerCase();
 
+    if (norm) {
+      const blockItem: DeletedProductItem = {
+        id: norm,
+        name: norm,
+        displayName: targetProduct?.gloveName || prodName,
+        deletedAt: new Date().toISOString()
+      };
+      if (db) {
+        try {
+          await setDoc(doc(db, 'deleted_products', norm), blockItem);
+        } catch (err) {
+          console.error('Error adding to deleted_products in Firestore:', err);
+        }
+      }
+      setDeletedProductsList(prev => {
+        if (prev.some(d => d.name === norm)) return prev;
+        const updated = [blockItem, ...prev];
+        saveLocal('gferp_deleted_products_v1', updated);
+        return updated;
+      });
+    }
+
     if (db) {
       try {
         await deleteDoc(doc(db, 'products', id));
@@ -1039,37 +1123,22 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
       if (norm) {
         try {
-          await setDoc(doc(db, 'deleted_products', norm), {
-            id: norm,
-            name: norm,
-            displayName: targetProduct?.gloveName || prodName,
-            deletedAt: new Date().toISOString()
+          const snapProds = await getDocs(collection(db, 'products'));
+          snapProds.docs.forEach(d => {
+            const data = d.data();
+            if (String(data.gloveName || '').trim().toLowerCase() === norm) {
+              void deleteDoc(doc(db, 'products', d.id));
+            }
           });
-        } catch (err) {
-          console.error('Error adding to deleted_products in Firestore:', err);
-        }
+        } catch (e) { /* ignore */ }
       }
     }
 
-    const next = products.filter(p => p.id !== id);
+    const next = products.filter(p => p.id !== id && (p.gloveName || '').trim().toLowerCase() !== norm);
     setProducts(next);
     saveLocal(STORAGE_KEYS.PRODUCTS, next);
 
-    if (norm) {
-      setDeletedProductsList(prev => {
-        if (prev.some(d => d.name === norm)) return prev;
-        const updated = [{
-          id: norm,
-          name: norm,
-          displayName: targetProduct?.gloveName || prodName,
-          deletedAt: new Date().toISOString()
-        }, ...prev];
-        saveLocal('gferp_deleted_products_v1', updated);
-        return updated;
-      });
-    }
-
-    showToast(`Product "${prodName || 'Item'}" deleted permanently`, 'info');
+    showToast(`Product "${prodName || 'Item'}" deleted permanently.`, 'info');
   };
 
   const loadFactoryPresets = () => {
@@ -2533,6 +2602,16 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       throw new Error(`Article "${articleName}" already exists.`);
     }
 
+    const norm = articleName.toLowerCase();
+    if (db) {
+      void deleteDoc(doc(db, 'deleted_products', norm)).catch(() => {});
+    }
+    setDeletedProductsList(prev => {
+      const next = prev.filter(d => d.name !== norm);
+      saveLocal('gferp_deleted_products_v1', next);
+      return next;
+    });
+
     const createdAt = new Date().toISOString();
     const articleRef = await addDoc(collection(db, 'articles_master'), { articleName, sizes, createdAt });
     await updateDoc(articleRef, { id: articleRef.id });
@@ -2565,8 +2644,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       throw new Error('Enter a valid delivery quantity, date, and customer.');
     }
 
-    const articleName = (data.article || '').trim() || (order.items?.[0]?.title || order.items?.[0]?.gloveType || '1202');
-    const rawSize = (data.size || '').trim() || (order.items?.[0]?.size || '10');
+    const articleName = (typeof data.article === 'string' ? data.article.trim() : '') || (order.items?.[0]?.title || order.items?.[0]?.gloveType || '1202');
+    const rawSize = (typeof data.size === 'string' ? data.size.trim() : '') || (order.items?.[0]?.size || '10');
     const sizeName = (rawSize === '10000' || rawSize === '10,000') ? '10' : rawSize;
 
     // Idempotency check: prevent duplicate deliveries created within 4 seconds for same order, bill, article, size, quantity
@@ -2618,9 +2697,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const finalAmount = data.rate !== undefined && data.rate !== null && (data.rate as any) !== ''
       ? data.quantity * Number(data.rate)
       : (Number(data.amount) || (data.quantity * finalRate));
-    const assignedVehicleNo = data.vehicleNo !== undefined ? data.vehicleNo.trim() : '';
-    const assignedDriverName = data.driverName !== undefined ? data.driverName.trim() : '';
-    const assignedBiltyNo = data.biltyNo !== undefined ? data.biltyNo.trim() : '';
+    const assignedVehicleNo = typeof data.vehicleNo === 'string' ? data.vehicleNo.trim() : '';
+    const assignedDriverName = typeof data.driverName === 'string' ? data.driverName.trim() : '';
+    const assignedBiltyNo = typeof data.biltyNo === 'string' ? data.biltyNo.trim() : '';
 
     const stockItemId = stockItem?.id || `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(sizeName)}`;
     const articleId = normalizeStockDocumentId(articleName);
@@ -2671,6 +2750,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       biltyNo: assignedBiltyNo
     };
 
+    const currentTotalDelivered = order.totalDelivered || 0;
+    const newTotalDelivered = currentTotalDelivered + data.quantity;
+    const totalOrderPairs = order.totalPairs || order.totalQty || 0;
+    const newRemainingPairs = Math.max(0, totalOrderPairs - newTotalDelivered);
+    const updatedStatus = newRemainingPairs === 0 ? 'Completed' : (newTotalDelivered > 0 ? 'Partial-Billed' : order.status);
+
     if (db) {
       try {
         const stockRef = doc(db, 'stock_management', stockItemId);
@@ -2707,10 +2792,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           notes: `Delivered · GP: ${assignedGatePassNo} · Bill: ${assignedBillNo}`,
           createdAt: now
         });
-        batch.update(orderDocRef, {
+        batch.set(orderDocRef, {
+          id: order.id,
+          orderNo: order.orderNo,
+          customerName: order.customerName,
           totalDelivered: increment(data.quantity),
+          remaining: newRemainingPairs,
+          status: updatedStatus,
           updatedAt: now
-        });
+        }, { merge: true });
         batch.set(stockRef, {
           id: stockItemId,
           article: articleName,
@@ -2738,6 +2828,31 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     setDeliveryHistory(prev => [delivery, ...prev.filter(d => d.id !== delivery.id)]);
+    setOrderDispatchHistory(prev => [{
+      id: dispatchHistoryId,
+      orderId: order.id,
+      orderNo: order.orderNo,
+      date: data.date,
+      actionType: 'dispatched_to_customer',
+      quantity: data.quantity,
+      article: articleName,
+      billNo: assignedBillNo,
+      gatePassNo: assignedGatePassNo,
+      notes: `Stock delivery · ${sizeName} · Gate Pass: ${assignedGatePassNo} · Bill: ${assignedBillNo}`,
+      createdAt: now
+    }, ...prev]);
+    setOrders(prev => prev.map(o => {
+      if (o.id === order.id) {
+        return {
+          ...o,
+          totalDelivered: newTotalDelivered,
+          remaining: newRemainingPairs,
+          status: updatedStatus,
+          updatedAt: now
+        };
+      }
+      return o;
+    }));
     setStockManagement(prev => {
       const idx = prev.findIndex(s => s.id === stockItemId);
       if (idx >= 0) {
@@ -2981,70 +3096,124 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const deleteWholeArticle = async (articleName: string): Promise<void> => {
-    const norm = articleName.trim().toLowerCase();
+    const rawTrimmed = articleName.trim();
+    const norm = rawTrimmed.toLowerCase();
     if (!norm) return;
-    if (!db) throw new Error('Firestore is not available.');
 
-    const batch = writeBatch(db);
-
-    // 1. Add to deleted_products blocklist
-    batch.set(doc(db, 'deleted_products', norm), {
+    // 1. Add to deleted_products blocklist IMMEDIATELY in Firestore & LocalStorage
+    const blockItem: DeletedProductItem = {
       id: norm,
       name: norm,
-      displayName: articleName.trim(),
+      displayName: rawTrimmed,
       deletedAt: new Date().toISOString()
-    });
+    };
 
-    // 2. Delete from articles_master
-    articlesMaster.filter(a => a.articleName.trim().toLowerCase() === norm).forEach(a => {
-      batch.delete(doc(db, 'articles_master', a.id));
-    });
+    if (db) {
+      try {
+        await setDoc(doc(db, 'deleted_products', norm), blockItem);
+      } catch (err) {
+        console.error('Error adding to deleted_products in Firestore:', err);
+      }
+    }
 
-    // 3. Delete from article_stock
-    const oldDocId = normalizeStockDocumentId(articleName);
-    batch.delete(doc(db, 'article_stock', oldDocId));
-
-    // 4. Delete from stock_management
-    stockManagement.filter(s => (s.article || s.articleName || '').trim().toLowerCase() === norm).forEach(s => {
-      batch.delete(doc(db, 'stock_management', s.id));
-    });
-
-    // 5. Delete from cuttingEntries
-    cuttingEntries.filter(e => (e.articleTitle || e.article || '').trim().toLowerCase() === norm).forEach(e => {
-      batch.delete(doc(db, 'cuttingEntries', e.id));
-    });
-
-    // 6. Delete from legacy cutting_transactions
-    cuttingTransactions.filter(t => (t.articleTitle || t.article || '').trim().toLowerCase() === norm).forEach(t => {
-      batch.delete(doc(db, 'cutting_transactions', t.id));
-    });
-
-    // 7. Delete matching items from products
-    products.filter(p => (p.gloveName || '').trim().toLowerCase() === norm).forEach(p => {
-      batch.delete(doc(db, 'products', p.id));
-    });
-
-    // 8. Delete from deliveryHistory
-    deliveryHistory.filter(d => (d.article || '').trim().toLowerCase() === norm).forEach(d => {
-      batch.delete(doc(db, 'stock_delivery_history', d.id));
-    });
-
-    await batch.commit();
-
-    // Update local state
     setDeletedProductsList(prev => {
       if (prev.some(d => d.name === norm)) return prev;
-      const updated = [{
-        id: norm,
-        name: norm,
-        displayName: articleName.trim(),
-        deletedAt: new Date().toISOString()
-      }, ...prev];
+      const updated = [blockItem, ...prev];
       saveLocal('gferp_deleted_products_v1', updated);
       return updated;
     });
 
+    // 2. Perform backend deletions across all stock & article collections
+    if (db) {
+      const deletePromises: Promise<any>[] = [];
+
+      // A. stock_management
+      try {
+        const snap = await getDocs(collection(db, 'stock_management'));
+        snap.docs.forEach(d => {
+          const data = d.data();
+          const art = String(data.article || data.articleName || '').trim().toLowerCase();
+          if (art === norm || d.id.toLowerCase().startsWith(`${normalizeStockDocumentId(norm)}__`)) {
+            deletePromises.push(deleteDoc(doc(db, 'stock_management', d.id)));
+          }
+        });
+      } catch (err) {
+        console.error('Error fetching stock_management for deletion:', err);
+      }
+
+      // B. article_stock
+      try {
+        const normDocId = normalizeStockDocumentId(rawTrimmed);
+        deletePromises.push(deleteDoc(doc(db, 'article_stock', normDocId)));
+        const snap = await getDocs(collection(db, 'article_stock'));
+        snap.docs.forEach(d => {
+          const data = d.data();
+          const art = String(data.articleName || '').trim().toLowerCase();
+          if (art === norm || d.id.toLowerCase() === normDocId) {
+            deletePromises.push(deleteDoc(doc(db, 'article_stock', d.id)));
+          }
+        });
+      } catch (err) {
+        console.error('Error fetching article_stock for deletion:', err);
+      }
+
+      // C. articles_master
+      try {
+        const snap = await getDocs(collection(db, 'articles_master'));
+        snap.docs.forEach(d => {
+          const data = d.data();
+          const art = String(data.articleName || data.name || '').trim().toLowerCase();
+          if (art === norm) {
+            deletePromises.push(deleteDoc(doc(db, 'articles_master', d.id)));
+          }
+        });
+      } catch (err) {
+        console.error('Error fetching articles_master for deletion:', err);
+      }
+
+      // D. legacy articles & article_master
+      try {
+        const snap1 = await getDocs(collection(db, 'articles'));
+        snap1.docs.forEach(d => {
+          const data = d.data();
+          const art = String(data.articleName || data.name || '').trim().toLowerCase();
+          if (art === norm) {
+            deletePromises.push(deleteDoc(doc(db, 'articles', d.id)));
+          }
+        });
+      } catch (err) { /* ignore */ }
+
+      try {
+        const snap2 = await getDocs(collection(db, 'article_master'));
+        snap2.docs.forEach(d => {
+          const data = d.data();
+          const art = String(data.articleName || data.article_name || data.name || '').trim().toLowerCase();
+          if (art === norm) {
+            deletePromises.push(deleteDoc(doc(db, 'article_master', d.id)));
+          }
+        });
+      } catch (err) { /* ignore */ }
+
+      // E. products
+      try {
+        const snapProds = await getDocs(collection(db, 'products'));
+        snapProds.docs.forEach(d => {
+          const data = d.data();
+          const art = String(data.gloveName || '').trim().toLowerCase();
+          if (art === norm) {
+            deletePromises.push(deleteDoc(doc(db, 'products', d.id)));
+          }
+        });
+      } catch (err) { /* ignore */ }
+
+      // Wait for all deletions to settle
+      await Promise.allSettled(deletePromises);
+    }
+
+    // 3. Update all local React states
     setArticlesMaster(prev => prev.filter(a => a.articleName.trim().toLowerCase() !== norm));
+    setArticleCatalog(prev => prev.filter(a => a.articleName.trim().toLowerCase() !== norm));
+    setLegacyArticleMaster(prev => prev.filter(a => a.articleName.trim().toLowerCase() !== norm));
     setArticleStock(prev => prev.filter(a => (a.articleName || '').trim().toLowerCase() !== norm));
     setStockManagement(prev => prev.filter(s => (s.article || s.articleName || '').trim().toLowerCase() !== norm));
     setProducts(prev => {
@@ -3052,15 +3221,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       saveLocal(STORAGE_KEYS.PRODUCTS, nextProds);
       return nextProds;
     });
-    setCuttingEntries(prev => prev.filter(e => (e.articleTitle || e.article || '').trim().toLowerCase() !== norm));
-    setCuttingTransactions(prev => prev.filter(t => (t.articleTitle || t.article || '').trim().toLowerCase() !== norm));
-    setDeliveryHistory(prev => prev.filter(d => (d.article || '').trim().toLowerCase() !== norm));
 
-    showToast(`Article "${articleName}" deleted permanently.`);
+    showToast(`${rawTrimmed} deleted permanently.`);
   };
 
   const restoreArticle = async (articleName: string): Promise<void> => {
-    const norm = articleName.trim().toLowerCase();
+    const rawTrimmed = articleName.trim();
+    const norm = rawTrimmed.toLowerCase();
     if (!norm) return;
 
     if (db) {
@@ -3077,17 +3244,41 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return next;
     });
 
-    // Recreate clean entry in articles_master so it appears in list with 0 stock
+    // Recreate clean entry in articles_master and products with 0 stock
     try {
-      await addArticleMaster({
-        articleName: articleName.trim(),
-        sizes: []
-      });
+      if (db) {
+        const articleRef = await addDoc(collection(db, 'articles_master'), {
+          articleName: rawTrimmed,
+          sizes: [],
+          createdAt: new Date().toISOString()
+        });
+        await updateDoc(articleRef, { id: articleRef.id });
+
+        const prodRef = await addDoc(collection(db, 'products'), {
+          gloveName: rawTrimmed,
+          size: 'L',
+          color: 'Yellow',
+          leatherType: 'Goatskin Leather',
+          purchasePrice: 280,
+          salePrice: 420,
+          lowStockLimit: 40,
+          currentStock: 0,
+          createdAt: new Date().toISOString()
+        });
+        await updateDoc(prodRef, { id: prodRef.id });
+      } else {
+        setArticlesMaster(prev => [...prev, {
+          id: `local_${Date.now()}`,
+          articleName: rawTrimmed,
+          sizes: [],
+          createdAt: new Date().toISOString()
+        }].sort((a, b) => a.articleName.localeCompare(b.articleName)));
+      }
     } catch (err) {
       console.error('Error restoring article master entry:', err);
     }
 
-    showToast(`Article "${articleName}" restored successfully`);
+    showToast(`Article "${rawTrimmed}" restored successfully.`);
   };
 
   const deleteStockDelivery = async (id: string): Promise<void> => {
@@ -3392,12 +3583,23 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (rate && !entry.sampleRate) entry.sampleRate = rate;
     };
 
-    (articlesMaster || []).forEach(a => recordArticle(a.articleName));
-    (articleStock || []).forEach(a => recordArticle(a.articleName));
-    (stockManagement || []).forEach(s => recordArticle(s.articleName || s.article, s.size, Number(s.rate) || 0));
-    (cuttingEntries || []).forEach(c => recordArticle(c.article || c.articleTitle, c.size || c.sizeName, Number(c.rate) || 0));
-    (deliveryHistory || []).forEach(d => recordArticle(d.article, d.size));
-    (products || []).forEach(p => recordArticle(p.gloveName, p.size, Number(p.salePrice || p.purchasePrice) || 0));
+    // ONLY record from active non-deleted stock items and master directory
+    (stockManagement || []).forEach(s => {
+      const art = s.articleName || s.article;
+      if (art && !deletedProductNames.has(art.trim().toLowerCase())) {
+        recordArticle(art, s.size, Number(s.rate) || 0);
+      }
+    });
+    (articleStock || []).forEach(a => {
+      if (a.articleName && !deletedProductNames.has(a.articleName.trim().toLowerCase())) {
+        recordArticle(a.articleName);
+      }
+    });
+    (articlesMaster || []).forEach(a => {
+      if (a.articleName && !deletedProductNames.has(a.articleName.trim().toLowerCase())) {
+        recordArticle(a.articleName);
+      }
+    });
 
     const result: DistinctArticleStock[] = [];
 
@@ -4864,7 +5066,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setSelectedInvoiceId,
         parties,
         staff,
-        products,
+        products: products.filter(p => !deletedProductNames.has((p.gloveName || '').trim().toLowerCase())),
         orders,
         cuttings,
         cutters,
@@ -4876,8 +5078,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         cuttingEntries,
         orderDispatchHistory,
         stockLedger,
-        stockManagement,
-        articleStock,
+        stockManagement: stockManagement.filter(s => !deletedProductNames.has((s.article || s.articleName || '').trim().toLowerCase())),
+        articleStock: articleStock.filter(a => !deletedProductNames.has((a.articleName || '').trim().toLowerCase())),
         deliveryHistory,
         articlesMaster: [...new Map(
           [...articlesMaster, ...articleCatalog, ...legacyArticleMaster]

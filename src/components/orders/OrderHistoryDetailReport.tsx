@@ -27,13 +27,14 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
   articleName,
   totalOrder
 }) => {
-  const { orders, cuttingTransactions, cuttingEntries, cuttings, deliveryHistory, orderDispatchHistory, invoices } = useFactory();
+  const { orders, cuttingTransactions, cuttingEntries, cuttings, deliveryHistory, orderDispatchHistory } = useFactory();
   const order = orders.find(item => item.id === orderId);
 
   const rows = useMemo(() => {
     const groups = new Map<string, OrderSummaryRow>();
     const getGroup = (articleValue: string, sizeValue: string): OrderSummaryRow => {
-      const article = articleValue.trim() || articleName || 'Unspecified Article';
+      const rawArt = (articleValue || '').trim();
+      const article = (rawArt && !rawArt.includes(',')) ? rawArt : (articleName && !articleName.includes(',') ? articleName : 'Article');
       const size = formatSize(sizeValue);
       const key = `${normalize(article)}___${normalize(size)}`;
       const existing = groups.get(key);
@@ -43,27 +44,31 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
       return created;
     };
 
+    // 1. Seed strictly from customer order items and their custom sizes
     (order?.items || []).forEach(item => {
-      const article = item.article || item.title || item.gloveType || articleName;
+      const art = item.title || item.gloveType || item.article || 'Article';
       if (item.customSizes && item.customSizes.length > 0) {
-        item.customSizes.filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0)).forEach(cs => {
-          getGroup(article, cs.size || '-').totalOrder += Number(cs.quantity) || 0;
-        });
+        item.customSizes
+          .filter(cs => Number(cs.quantity) > 0 || (cs.size && cs.size.trim().length > 0))
+          .forEach(cs => {
+            getGroup(art, cs.size || '-').totalOrder += Number(cs.quantity) || 0;
+          });
       } else {
-        const sizes = Object.entries(item.sizes || {})
-          .filter(([, quantity]) => Number(quantity) > 0);
+        const sizes = Object.entries(item.sizes || {}).filter(([, quantity]) => Number(quantity) > 0);
         if (sizes.length) {
           sizes.forEach(([size, quantity]) => {
-            getGroup(article, size).totalOrder += Number(quantity) || 0;
+            getGroup(art, size).totalOrder += Number(quantity) || 0;
           });
         } else {
           const quantity = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
-          getGroup(article, item.size || '-').totalOrder += quantity;
+          getGroup(art, item.size || '-').totalOrder += quantity;
         }
       }
     });
 
     (order?.cuttingArticleSizes || []).forEach(item => getGroup(item.article, item.size));
+
+    // 2. Cutting Transactions & Entries for this order
     const transactions = cuttingTransactions.filter(transaction => transaction.orderId === orderId);
     const transactionsById = new Map(transactions.map(transaction => [transaction.id, transaction]));
     const savedEntriesById = new Map(cuttingEntries.map(entry => [entry.id, entry]));
@@ -71,10 +76,10 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
     transactions.forEach(transaction => {
       if (transaction.type !== 'RECEIVE') return;
       const savedEntry = savedEntriesById.get(transaction.id);
-      const group = getGroup(
-        savedEntry?.articleTitle || savedEntry?.article || transaction.articleTitle || transaction.article,
-        savedEntry?.sizeName || savedEntry?.size || transaction.sizeName || transaction.size || '-'
-      );
+      const art = savedEntry?.articleTitle || savedEntry?.article || transaction.articleTitle || transaction.article;
+      const sz = savedEntry?.sizeName || savedEntry?.size || transaction.sizeName || transaction.size || '-';
+      if (!art || art.includes(',')) return;
+      const group = getGroup(art, sz);
       group.cutting += Number(savedEntry?.pairs ?? transaction.totalQty ?? transaction.qty) || 0;
     });
 
@@ -84,10 +89,11 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
         : transactionsById.get(entry.id);
       const linkedOrderId = entry.orderId || originalTransaction?.orderId;
       if (linkedOrderId !== orderId) return;
-      if (entry.type === 'RETURN') {
-        getGroup(entry.articleTitle || entry.article, entry.sizeName || entry.size || '-').cutting += Number(entry.pairs) || 0;
-      } else if (entry.type === 'RECEIVE' && !transactionsById.has(entry.id)) {
-        getGroup(entry.articleTitle || entry.article, entry.sizeName || entry.size || '-').cutting += Number(entry.pairs) || 0;
+      if (entry.type === 'RETURN' || entry.type === 'RECEIVE') {
+        const art = entry.articleTitle || entry.article;
+        const sz = entry.sizeName || entry.size || '-';
+        if (!art || art.includes(',')) return;
+        getGroup(art, sz).cutting += Number(entry.pairs) || 0;
       }
     });
 
@@ -95,70 +101,45 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
       .filter(cutting => cutting.orderId === orderId && cutting.status === 'Received' &&
         !transactionsById.has(cutting.id) && !savedEntriesById.has(cutting.id))
       .forEach(cutting => {
-        getGroup(cutting.gloveType || articleName, cutting.size || '-').cutting += Number(cutting.qty) || 0;
+        const art = cutting.gloveType || (cutting as any).article;
+        const sz = cutting.size || '-';
+        if (!art || art.includes(',')) return;
+        getGroup(art, sz).cutting += Number(cutting.qty) || 0;
       });
 
-    deliveryHistory
-      .filter(delivery => (delivery.orderId || delivery.customerOrderId) === orderId)
-      .forEach(delivery => {
-        getGroup(delivery.article, delivery.size || '-').delivered += Number(delivery.quantity) || 0;
-      });
-
-    const orderDeliveries = deliveryHistory.filter(delivery =>
-      (delivery.orderId || delivery.customerOrderId) === orderId
+    // 3. Deliveries: Authoritative deliveryHistory for this order (never double-add or cross-pollute)
+    const orderDeliveries = (deliveryHistory || []).filter(delivery =>
+      (delivery.orderId === orderId || delivery.customerOrderId === orderId) &&
+      (!order?.orderNo || !delivery.orderNo || delivery.orderNo === order.orderNo)
     );
-    const matchedDeliveryIndexes = new Set<number>();
-    orderDispatchHistory
-      .filter(entry => entry.orderId === orderId && entry.actionType === 'dispatched_to_customer')
-      .forEach(entry => {
-        const hasInvoiceBreakdown = invoices.some(invoice =>
-          invoice.orderId === orderId &&
-          invoice.items.some(item => normalize(item.gloveType) === normalize(entry.article || articleName))
-        );
-        if (hasInvoiceBreakdown) return;
-        const duplicateIndex = orderDeliveries.findIndex((delivery, index) =>
-          !matchedDeliveryIndexes.has(index) &&
-          normalize(delivery.article) === normalize(entry.article || articleName) &&
-          delivery.date === entry.date &&
-          Number(delivery.quantity) === Number(entry.quantity)
-        );
-        if (duplicateIndex >= 0) {
-          matchedDeliveryIndexes.add(duplicateIndex);
-          return;
-        }
-        const sizes = Object.entries(entry.sizes || {})
-          .filter(([, quantity]) => Number(quantity) > 0);
-        if (sizes.length) {
-          sizes.forEach(([size, quantity]) => {
-            getGroup(entry.article || articleName, size).delivered += Number(quantity) || 0;
-          });
-        } else {
-          getGroup(entry.article || articleName, '-').delivered += Number(entry.quantity) || 0;
-        }
+
+    if (orderDeliveries.length > 0) {
+      orderDeliveries.forEach(delivery => {
+        const art = delivery.article;
+        // Skip combined strings like "mg, pride"
+        if (!art || art.includes(',')) return;
+        const sz = delivery.size || '-';
+        getGroup(art, sz).delivered += Number(delivery.quantity) || 0;
       });
-
-    const invoiceTotals = new Map<string, { row: OrderSummaryRow; quantity: number }>();
-    invoices
-      .filter(invoice => invoice.orderId === orderId)
-      .forEach(invoice => invoice.items.forEach(item => {
-        const row = getGroup(item.gloveType || articleName, item.size || '-');
-        const current = invoiceTotals.get(row.key);
-        invoiceTotals.set(row.key, {
-          row,
-          quantity: (current?.quantity || 0) + (Number(item.qty) || 0)
+    } else {
+      // Fallback only if no deliveryHistory records exist
+      orderDispatchHistory
+        .filter(entry => entry.orderId === orderId && entry.actionType === 'dispatched_to_customer')
+        .forEach(entry => {
+          const art = entry.article;
+          if (!art || art.includes(',')) return;
+          const sz = (entry as any).size || '-';
+          getGroup(art, sz).delivered += Number(entry.quantity) || 0;
         });
-      }));
-    invoiceTotals.forEach(({ row, quantity }) => {
-      row.delivered = Math.max(row.delivered, quantity);
-    });
+    }
 
-    if (groups.size === 0) {
-      getGroup(articleName, '-').totalOrder = totalOrder;
+    if (groups.size === 0 && totalOrder) {
+      getGroup(articleName || 'Article', '-').totalOrder = totalOrder;
     }
 
     const allRows = [...groups.values()];
 
-    // Filter out duplicate phantom rows (e.g. 'pride / -' or 'pride / Matrix') when concrete sizes exist
+    // Filter out phantom rows (e.g. '-' or 'matrix' or 'unspecified') when concrete sizes exist
     const filteredRows = allRows.filter(row => {
       const cleanSize = row.size.trim().toLowerCase();
       const isPhantom = cleanSize === '-' || cleanSize === 'matrix' || cleanSize === 'unspecified';
@@ -170,40 +151,51 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
         r.size.trim().toLowerCase() !== 'unspecified'
       );
       if (siblingsWithRealSizes.length > 0) {
-        // If real sizes exist for this article, suppress phantom rows with 0 totalOrder
-        if (row.totalOrder === 0) return false;
+        if (row.totalOrder === 0 && row.delivered === 0 && row.cutting === 0) return false;
       }
       return true;
     });
 
-    return filteredRows.sort((a, b) =>
-      a.article.localeCompare(b.article) || a.size.localeCompare(b.size, undefined, { numeric: true })
-    );
-  }, [articleName, cuttingEntries, cuttingTransactions, cuttings, deliveryHistory, invoices, order, orderDispatchHistory, orderId, totalOrder]);
+    return filteredRows.sort((a, b) => {
+      const artCmp = a.article.localeCompare(b.article);
+      if (artCmp !== 0) return artCmp;
+      const numA = parseFloat(a.size);
+      const numB = parseFloat(b.size);
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+      return a.size.localeCompare(b.size, undefined, { numeric: true });
+    });
+  }, [articleName, cuttingEntries, cuttingTransactions, cuttings, deliveryHistory, order, orderDispatchHistory, orderId, totalOrder]);
 
   // Group by Article with sizes below it
   const groupedArticles = useMemo(() => {
     const articleMap = new Map<string, OrderSummaryRow[]>();
     rows.forEach(r => {
-      const art = r.article || articleName || 'Article';
+      const art = r.article || 'Article';
       if (!articleMap.has(art)) articleMap.set(art, []);
       articleMap.get(art)!.push(r);
     });
     return Array.from(articleMap.entries()).map(([artName, sizeRows]) => {
-      const artTotalOrder = sizeRows.reduce((sum, r) => sum + r.totalOrder, 0);
-      const artCutting = sizeRows.reduce((sum, r) => sum + r.cutting, 0);
-      const artDelivered = sizeRows.reduce((sum, r) => sum + r.delivered, 0);
-      const artBalance = artTotalOrder - artDelivered;
+      // Sort sizes strictly ascending: 7, 8, 9, 10
+      const sortedSizes = [...sizeRows].sort((a, b) => {
+        const numA = parseFloat(a.size);
+        const numB = parseFloat(b.size);
+        if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+        return a.size.localeCompare(b.size, undefined, { numeric: true });
+      });
+      const artTotalOrder = sortedSizes.reduce((sum, r) => sum + r.totalOrder, 0);
+      const artCutting = sortedSizes.reduce((sum, r) => sum + r.cutting, 0);
+      const artDelivered = sortedSizes.reduce((sum, r) => sum + r.delivered, 0);
+      const artBalance = Math.max(0, artTotalOrder - artDelivered);
       return {
         article: artName,
-        sizeRows,
+        sizeRows: sortedSizes,
         totalOrder: artTotalOrder,
         cutting: artCutting,
         delivered: artDelivered,
         balance: artBalance
       };
     });
-  }, [rows, articleName]);
+  }, [rows]);
 
   const totals = rows.reduce((summary, row) => ({
     cutting: summary.cutting + row.cutting,

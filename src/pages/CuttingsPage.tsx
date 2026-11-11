@@ -147,6 +147,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     articlesMaster,
     createArticleMaster,
     createCustomerOrder,
+    deletedProductsList = [],
     updateCuttingEntry,
     deleteCuttingEntry,
     updateCuttingReturn,
@@ -631,13 +632,17 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     });
 
     let runningBalance = 0;
-    return combined.map(row => {
+    const computed = combined.map(row => {
       runningBalance += row.amount;
       return {
         ...row,
         runningBal: runningBalance
       };
     });
+
+    // Requirement: Newest entry on top, oldest at bottom (reverse chronological display)
+    // Running balance was computed chronologically from oldest to newest, so row[0] (newest) has the final balance!
+    return [...computed].reverse();
   }, [visibleLedgerEntries, dateFilteredPayments, activeCutter?.name]);
 
   // Dynamically filter customer orders that contain the selected Article
@@ -807,12 +812,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
     setIsSubmittingTx(true);
     try {
-      // Auto-save new article in master catalog if it doesn't already exist
+      // Auto-save new article in master catalog if it doesn't already exist and is not deleted
       if (createArticleMaster) {
+        const normArticle = finalArticle.trim().toLowerCase();
+        const isDeleted = (deletedProductsList || []).some(d => d.name === normArticle);
         const existsInMaster = articlesMaster.some(
-          a => a.articleName.trim().toLowerCase() === finalArticle.toLowerCase()
+          a => a.articleName.trim().toLowerCase() === normArticle
         );
-        if (!existsInMaster) {
+        if (!existsInMaster && !isDeleted) {
           try {
             await createArticleMaster({
               articleName: finalArticle,
@@ -822,6 +829,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           } catch (autoSaveErr) {
             console.warn('Auto-save article warning:', autoSaveErr);
           }
+        } else if (isDeleted) {
+          console.log(`Skipped auto-creating deleted article: "${finalArticle}"`);
         }
       }
 
