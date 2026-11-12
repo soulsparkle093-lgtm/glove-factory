@@ -34,7 +34,9 @@ import {
   FactoryArticleMaster,
   StockInHistoryItem,
   StockOutHistoryItem,
-  DistinctArticleStock
+  DistinctArticleStock,
+  CompanyOrderStats,
+  OrderCompany
 } from '../types/factory';
 import { 
   defaultFactorySettings, 
@@ -86,7 +88,8 @@ const STORAGE_KEYS = {
   STITCHING_ORDERS: 'gferp_stitching_orders_v1',
   STITCHER_KHATA: 'gferp_stitcher_khata_v1',
   STITCHING_HISTORY: 'gferp_stitching_history_v1',
-  ORDER_HISTORY: 'gferp_order_dispatch_history_v3'
+  ORDER_HISTORY: 'gferp_order_dispatch_history_v3',
+  ORDER_COMPANIES: 'gferp_order_companies_v1'
 };
 
 function loadLocal<T>(key: string, fallback: T): T {
@@ -249,6 +252,12 @@ interface FactoryContextType {
   getStockInHistory: (articleName: string) => StockInHistoryItem[];
   getStockOutHistory: (articleName: string) => StockOutHistoryItem[];
   getDistinctArticles: () => DistinctArticleStock[];
+
+  // Customer Order Companies
+  getCompanyStats: () => CompanyOrderStats[];
+  updateCompanyAndSyncOrders: (oldName: string, updates: Partial<OrderCompany>) => Promise<void>;
+  toggleCompanyComplete: (companyName: string, isCompleted: boolean) => Promise<void>;
+  upsertOrderCompany: (company: Partial<OrderCompany> & { name: string }) => Promise<void>;
 
   // Stitching orders and stitcher khata
   addStitcher: (data: { name: string; phone?: string; city?: string; perPairRate?: number; stitcherType?: Stitcher['stitcherType']; isActive?: boolean }) => Promise<Stitcher>;
@@ -484,6 +493,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [settings, setSettings] = useState<FactorySettings>(() => loadLocal(STORAGE_KEYS.SETTINGS, defaultFactorySettings));
   const [deletedProductsList, setDeletedProductsList] = useState<DeletedProductItem[]>(() =>
     loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', [])
+  );
+  const [orderCompanies, setOrderCompanies] = useState<OrderCompany[]>(() =>
+    loadLocal<OrderCompany[]>(STORAGE_KEYS.ORDER_COMPANIES, [])
   );
 
   const deletedProductNames = useMemo(() => {
@@ -927,6 +939,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setInvoices(list);
         saveLocal(STORAGE_KEYS.INVOICES, list);
       }, err => console.error('Firestore onSnapshot error (sales_invoices):', err)));
+
+      // 11. order_companies
+      unsubs.push(onSnapshot(collection(db, 'order_companies'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as OrderCompany));
+        setOrderCompanies(list);
+        saveLocal(STORAGE_KEYS.ORDER_COMPANIES, list);
+      }, err => console.error('Firestore onSnapshot error (order_companies):', err)));
     } catch (e) {
       console.warn('Firestore onSnapshot setup notice:', e);
     }
@@ -3640,6 +3659,224 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return result.sort((a, b) => a.articleName.localeCompare(b.articleName));
   };
 
+  const getCompanyStats = (): CompanyOrderStats[] => {
+    const nameMap = new Map<string, string>();
+
+    orders.forEach(o => {
+      const name = (o.customerName || '').trim();
+      if (name) nameMap.set(name.toLowerCase(), name);
+    });
+
+    parties.filter(p => p.type === 'customer').forEach(p => {
+      const name = (p.name || '').trim();
+      if (name && !nameMap.has(name.toLowerCase())) nameMap.set(name.toLowerCase(), name);
+    });
+
+    orderCompanies.forEach(c => {
+      const name = (c.name || '').trim();
+      if (name && !nameMap.has(name.toLowerCase())) nameMap.set(name.toLowerCase(), name);
+    });
+
+    const companyRecordsByNorm = new Map<string, OrderCompany>();
+    orderCompanies.forEach(c => {
+      const norm = (c.normalizedName || c.name || '').trim().toLowerCase();
+      if (norm) companyRecordsByNorm.set(norm, c);
+    });
+
+    const partiesByNorm = new Map<string, Party>();
+    parties.filter(p => p.type === 'customer').forEach(p => {
+      const norm = (p.name || '').trim().toLowerCase();
+      if (norm) partiesByNorm.set(norm, p);
+    });
+
+    const result: CompanyOrderStats[] = Array.from(nameMap.entries()).map(([norm, displayName]) => {
+      const existingComp = companyRecordsByNorm.get(norm);
+      const party = partiesByNorm.get(norm);
+
+      const comp: OrderCompany = existingComp || {
+        id: `comp-${norm}`,
+        name: displayName,
+        normalizedName: norm,
+        contactPerson: party?.name || displayName,
+        phone: party?.phone || '',
+        address: party?.address || '',
+        notes: '',
+        status: 'active',
+        isCompleted: false,
+        createdAt: new Date().toISOString()
+      };
+
+      const allOrders = orders
+        .filter(o => (o.customerName || '').trim().toLowerCase() === norm)
+        .sort((a, b) => safeStringCompare(b.orderDate || b.createdAt, a.orderDate || a.createdAt));
+
+      const activeOrders = allOrders.filter(o => o.status !== 'Completed');
+      const completedOrders = allOrders.filter(o => o.status === 'Completed');
+
+      const totalPairsLifetime = allOrders.reduce((sum, o) => {
+        return sum + (Number(o.originalTotalPairs) || Number(o.totalPairs) || Number(o.totalQty) || 0);
+      }, 0);
+
+      const compDeliveries = (deliveryHistory || []).filter(d => {
+        if (d.article && d.article.includes(',')) return false;
+        const custMatch = (d.customerName || '').trim().toLowerCase() === norm;
+        const ordMatch = allOrders.some(o => o.id === d.orderId || o.id === d.customerOrderId || (o.orderNo && o.orderNo === d.orderNo));
+        return custMatch || ordMatch;
+      });
+
+      const totalDeliveredPairs = compDeliveries.reduce((sum, d) => sum + (Number(d.quantity) || 0), 0);
+      const totalRemainingPairs = Math.max(0, totalPairsLifetime - totalDeliveredPairs);
+      const lastOrderDate = allOrders[0]?.orderDate || allOrders[0]?.createdAt || '';
+      const isCompleted = comp.isCompleted === true || (allOrders.length > 0 && activeOrders.length === 0 && totalRemainingPairs === 0);
+
+      return {
+        company: comp,
+        name: comp.name || displayName,
+        normalizedName: norm,
+        totalOrdersCount: allOrders.length,
+        activeOrdersCount: activeOrders.length,
+        completedOrdersCount: completedOrders.length,
+        totalPairsLifetime,
+        totalDeliveredPairs,
+        totalRemainingPairs,
+        lastOrderDate,
+        isCompleted,
+        activeOrders,
+        completedOrders,
+        allOrders
+      };
+    });
+
+    return result.sort((a, b) => {
+      if (a.isCompleted !== b.isCompleted) return a.isCompleted ? 1 : -1;
+      return safeStringCompare(b.lastOrderDate, a.lastOrderDate) || a.name.localeCompare(b.name);
+    });
+  };
+
+  const upsertOrderCompany = async (company: Partial<OrderCompany> & { name: string }): Promise<void> => {
+    const rawName = company.name.trim();
+    const norm = rawName.toLowerCase();
+    if (!norm) return;
+
+    const existing = orderCompanies.find(c => (c.normalizedName || c.name || '').trim().toLowerCase() === norm);
+    const id = existing?.id || company.id || `comp-${norm}`;
+
+    const updated: OrderCompany = {
+      ...(existing || {}),
+      ...company,
+      id,
+      name: rawName,
+      normalizedName: norm,
+      createdAt: existing?.createdAt || company.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    if (db) {
+      try {
+        await setDoc(doc(db, 'order_companies', id), updated);
+      } catch (err) {
+        console.error('Error saving order_company to Firestore:', err);
+      }
+    }
+
+    setOrderCompanies(prev => {
+      const idx = prev.findIndex(c => (c.normalizedName || c.name || '').trim().toLowerCase() === norm);
+      let list = [...prev];
+      if (idx >= 0) {
+        list[idx] = updated;
+      } else {
+        list.push(updated);
+      }
+      saveLocal(STORAGE_KEYS.ORDER_COMPANIES, list);
+      return list;
+    });
+
+    showToast(`Company "${rawName}" saved.`);
+  };
+
+  const updateCompanyAndSyncOrders = async (oldName: string, updates: Partial<OrderCompany>): Promise<void> => {
+    const oldNorm = oldName.trim().toLowerCase();
+    const newName = (updates.name || oldName).trim();
+    const newNorm = newName.toLowerCase();
+
+    await upsertOrderCompany({
+      ...updates,
+      name: newName,
+      normalizedName: newNorm
+    });
+
+    if (newNorm !== oldNorm) {
+      const matchingOrders = orders.filter(o => (o.customerName || '').trim().toLowerCase() === oldNorm);
+      if (db && matchingOrders.length > 0) {
+        try {
+          const batch = writeBatch(db);
+          matchingOrders.forEach(o => {
+            batch.update(doc(db, 'customer_orders', o.id), { customerName: newName, updatedAt: new Date().toISOString() });
+          });
+          await batch.commit();
+        } catch (err) {
+          console.error('Error syncing order company names to Firestore:', err);
+        }
+      }
+
+      setOrders(prev => prev.map(o => {
+        if ((o.customerName || '').trim().toLowerCase() === oldNorm) {
+          return { ...o, customerName: newName, updatedAt: new Date().toISOString() };
+        }
+        return o;
+      }));
+
+      setDeliveryHistory(prev => prev.map(d => {
+        if ((d.customerName || '').trim().toLowerCase() === oldNorm) {
+          return { ...d, customerName: newName };
+        }
+        return d;
+      }));
+    }
+
+    showToast(`Company details updated.`);
+  };
+
+  const toggleCompanyComplete = async (companyName: string, isCompleted: boolean): Promise<void> => {
+    const norm = companyName.trim().toLowerCase();
+    const existing = orderCompanies.find(c => (c.normalizedName || c.name || '').trim().toLowerCase() === norm);
+    const id = existing?.id || `comp-${norm}`;
+
+    const updated: OrderCompany = {
+      ...(existing || {
+        id,
+        name: companyName,
+        normalizedName: norm,
+        createdAt: new Date().toISOString()
+      }),
+      isCompleted,
+      status: isCompleted ? 'completed' : 'active',
+      updatedAt: new Date().toISOString()
+    };
+
+    if (db) {
+      try {
+        await setDoc(doc(db, 'order_companies', id), updated);
+      } catch (err) {
+        console.error('Error toggling company completion in Firestore:', err);
+      }
+    }
+
+    setOrderCompanies(prev => {
+      const idx = prev.findIndex(c => (c.normalizedName || c.name || '').trim().toLowerCase() === norm);
+      let list = [...prev];
+      if (idx >= 0) {
+        list[idx] = updated;
+      } else {
+        list.push(updated);
+      }
+      saveLocal(STORAGE_KEYS.ORDER_COMPANIES, list);
+      return list;
+    });
+
+    showToast(isCompleted ? `Marked "${companyName}" as Completed.` : `Restored "${companyName}" to Active.`);
+  };
+
   const deleteCuttingTransaction = async (id: string): Promise<void> => {
     if (db) {
       try {
@@ -5166,7 +5403,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         getCuttingLedgerByCutter,
         getStockInHistory,
         getStockOutHistory,
-        getDistinctArticles
+        getDistinctArticles,
+        getCompanyStats,
+        updateCompanyAndSyncOrders,
+        toggleCompanyComplete,
+        upsertOrderCompany
       }}
     >
       {children}

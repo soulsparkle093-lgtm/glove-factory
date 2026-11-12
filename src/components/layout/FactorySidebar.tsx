@@ -16,7 +16,8 @@ import {
   ShieldCheck,
   PackageCheck,
   AlertTriangle,
-  Shirt
+  Shirt,
+  Building2
 } from 'lucide-react';
 import { useFactory } from '../../context/FactoryContext';
 import { FactoryModule } from '../../types/factory';
@@ -43,6 +44,7 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
   }[] = [
     { id: 'dashboard', labelEn: 'Dashboard', description: 'Overview & Analytics', icon: LayoutDashboard },
     { id: 'orders', labelEn: 'Customer Orders', description: 'Orders & Production', icon: FileText, badge: activeOrdersCount > 0 ? activeOrdersCount : undefined, badgeColor: 'bg-blue-600' },
+    { id: 'order_companies', labelEn: 'Order Companies', description: 'Company-Wise Orders & History', icon: Building2 },
     { id: 'cuttings', labelEn: 'Cutting Management', description: 'Worker & Contractor Cutting', icon: Scissors, badge: pendingCuttingsCount > 0 ? pendingCuttingsCount : undefined, badgeColor: 'bg-amber-500' },
     { id: 'stitching', labelEn: 'Stitching Management', description: 'Stitching Orders & Stitcher Khata', icon: Shirt, badge: undefined },
     { id: 'stock', labelEn: 'Finished Goods Stock', description: 'Auto Stock Calculation', icon: Boxes, badge: lowStockCount > 0 ? lowStockCount : undefined, badgeColor: 'bg-rose-500' },

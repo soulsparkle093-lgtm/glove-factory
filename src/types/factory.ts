@@ -109,6 +109,37 @@ export interface CustomerOrder {
   updatedAt?: string;
 }
 
+export interface OrderCompany {
+  id: string;
+  name: string;
+  normalizedName?: string;
+  contactPerson?: string;
+  phone?: string;
+  address?: string;
+  notes?: string;
+  status?: 'active' | 'completed' | string;
+  isCompleted?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface CompanyOrderStats {
+  company: OrderCompany;
+  name: string;
+  normalizedName: string;
+  totalOrdersCount: number;
+  activeOrdersCount: number;
+  completedOrdersCount: number;
+  totalPairsLifetime: number;
+  totalDeliveredPairs: number;
+  totalRemainingPairs: number;
+  lastOrderDate: string;
+  isCompleted: boolean;
+  activeOrders: CustomerOrder[];
+  completedOrders: CustomerOrder[];
+  allOrders: CustomerOrder[];
+}
+
 export type CutterCategory = 'cutting_man' | 'cutting_maker' | 'product';
 export type CuttingType = 'cutting_man' | 'cutter_maker';
 

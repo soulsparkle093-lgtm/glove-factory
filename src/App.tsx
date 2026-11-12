@@ -26,6 +26,8 @@ import { ExpensePage } from './pages/ExpensePage';
 import { CashbookPage } from './pages/CashbookPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { OrderCompaniesPage } from './pages/OrderCompaniesPage';
+import { CompanyDetailPage } from './pages/CompanyDetailPage';
 
 // Modals
 import { CreateOrderModal } from './components/orders/CreateOrderModal';
@@ -41,12 +43,15 @@ const FactoryAppContent: React.FC = () => {
     setSelectedOrderId,
     selectedInvoiceId,
     setSelectedInvoiceId,
+    selectedCompanyName,
+    setSelectedCompanyName,
     invoices
   } = useFactory();
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isOrderModalOpen, setIsOrderModalOpen] = useState(false);
   const [orderToEdit, setOrderToEdit] = useState<any>(null);
+  const [orderModalInitialCustomer, setOrderModalInitialCustomer] = useState<string | undefined>(undefined);
   
   // Cutting modal state
   const [isCuttingModalOpen, setIsCuttingModalOpen] = useState(false);
@@ -60,8 +65,9 @@ const FactoryAppContent: React.FC = () => {
   // Active print invoice
   const invoiceForPrint = invoices.find(i => i.id === selectedInvoiceId);
 
-  const handleOpenNewOrder = () => {
+  const handleOpenNewOrder = (initialCustomer?: string) => {
     setOrderToEdit(null);
+    setOrderModalInitialCustomer(typeof initialCustomer === 'string' ? initialCustomer : undefined);
     setIsOrderModalOpen(true);
   };
 
@@ -115,13 +121,42 @@ const FactoryAppContent: React.FC = () => {
             />
           )}
 
+          {activeModule === 'order_companies' && (
+            <OrderCompaniesPage
+              onBackToOrders={() => setActiveModule('orders')}
+              onSelectCompany={(name) => {
+                setSelectedCompanyName(name);
+                setActiveModule('company_detail');
+              }}
+              onOpenCreateOrderForCompany={(name) => handleOpenNewOrder(name)}
+            />
+          )}
+
+          {activeModule === 'company_detail' && (
+            <CompanyDetailPage
+              companyName={selectedCompanyName || 'traders'}
+              onBack={() => setActiveModule('order_companies')}
+              onSelectOrder={(orderId) => {
+                setSelectedOrderId(orderId);
+                setActiveModule('order_detail');
+              }}
+              onOpenCreateOrder={(name) => handleOpenNewOrder(name)}
+              onOpenCuttingForOrder={(orderId) => handleOpenCutting(orderId)}
+              onOpenInvoiceForOrder={(orderId) => handleOpenSaleInvoice(orderId)}
+            />
+          )}
+
           {activeModule === 'order_detail' && (
             selectedOrderId ? (
               <OrderDetailPage
                 orderId={selectedOrderId}
                 onBack={() => {
                   setSelectedOrderId(null);
-                  setActiveModule('orders');
+                  if (selectedCompanyName) {
+                    setActiveModule('company_detail');
+                  } else {
+                    setActiveModule('orders');
+                  }
                 }}
                 onOpenCuttingModalForOrder={(ordId, itemId) => handleOpenCutting(ordId, itemId)}
                 onOpenInvoiceModalForOrder={(ordId) => handleOpenSaleInvoice(ordId)}

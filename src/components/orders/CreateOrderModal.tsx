@@ -7,6 +7,7 @@ interface CreateOrderModalProps {
   isOpen: boolean;
   onClose: () => void;
   orderToEdit?: CustomerOrder | null;
+  initialCustomerName?: string;
   onOpenAddParty?: () => void;
 }
 
@@ -38,7 +39,8 @@ const createEmptyRow = (): GloveFormRow => ({
 export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
   isOpen,
   onClose,
-  orderToEdit
+  orderToEdit,
+  initialCustomerName
 }) => {
   const { parties, articleStock, createCustomerOrder, updateCustomerOrder } = useFactory();
 
@@ -129,9 +131,15 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
           setRows([createEmptyRow()]);
         }
       } else {
-        // Brand new order: 100% BLANK state
-        setCustomerName('');
-        setCustomerPhone('');
+        // Brand new order: initialize (or prefill company name if provided)
+        const initName = initialCustomerName ? initialCustomerName.trim() : '';
+        setCustomerName(initName);
+        if (initName) {
+          const matchedParty = parties.find(p => p.name.trim().toLowerCase() === initName.toLowerCase());
+          setCustomerPhone(matchedParty?.phone || '');
+        } else {
+          setCustomerPhone('');
+        }
         setOrderDate(new Date().toISOString().split('T')[0]);
 
         const d = new Date();
@@ -141,7 +149,7 @@ export const CreateOrderModal: React.FC<CreateOrderModalProps> = ({
         setRows([createEmptyRow()]);
       }
     }
-  }, [isOpen, orderToEdit]);
+  }, [isOpen, orderToEdit, initialCustomerName, parties]);
 
   if (!isOpen) return null;
 

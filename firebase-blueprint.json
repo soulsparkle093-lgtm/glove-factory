@@ -24,6 +24,25 @@
       },
       "required": ["customerName", "orderDate", "deliveryDate", "items", "totalPairs", "status"]
     },
+    "OrderCompany": {
+      "title": "Order Company",
+      "description": "Company and buyer profiles for company-wise order management and history",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "normalizedName": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "status": { "type": "string" },
+        "isCompleted": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name"]
+    },
     "Party": {
       "title": "Party",
       "description": "Suppliers, customers, and outside cutter makers in Khata ledger",
@@ -171,6 +190,10 @@
     "/stock_management/{stockId}": {
       "schema": "StockManagementItem",
       "description": "Active stock items"
+    },
+    "/order_companies/{companyId}": {
+      "schema": "OrderCompany",
+      "description": "Companies and buyers for company-wise order tracking and history"
     }
   }
 }

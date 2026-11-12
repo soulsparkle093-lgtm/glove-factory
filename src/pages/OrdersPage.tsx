@@ -13,12 +13,15 @@ import {
   Package,
   Layers,
   CheckCircle2,
-  X
+  X,
+  Building2
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatDate, getOrderStatusBadge } from '../utils/factoryFormatters';
 import { CustomerOrder } from '../types/factory';
 import { useDragToScroll } from '../hooks/useDragToScroll';
+import { OrderCompaniesPage } from './OrderCompaniesPage';
+import { CompanyDetailPage } from './CompanyDetailPage';
 
 interface OrdersPageProps {
   onOpenCreateOrder: () => void;
@@ -33,12 +36,43 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
 }) => {
   const { orders, setSelectedOrderId, setActiveModule, deleteCustomerOrder } = useFactory();
 
+  const [viewMode, setViewMode] = useState<'orders' | 'companies' | 'company_detail'>('orders');
+  const [selectedCompanyName, setSelectedCompanyName] = useState<string | null>(null);
+
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [orderToDelete, setOrderToDelete] = useState<CustomerOrder | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const ordersTableRef = useDragToScroll<HTMLDivElement>();
+
+  if (viewMode === 'companies') {
+    return (
+      <OrderCompaniesPage
+        onBackToOrders={() => setViewMode('orders')}
+        onSelectCompany={(name) => {
+          setSelectedCompanyName(name);
+          setViewMode('company_detail');
+        }}
+        onOpenCreateOrderForCompany={() => onOpenCreateOrder()}
+      />
+    );
+  }
+
+  if (viewMode === 'company_detail' && selectedCompanyName) {
+    return (
+      <CompanyDetailPage
+        companyName={selectedCompanyName}
+        onBack={() => setViewMode('companies')}
+        onSelectOrder={(orderId) => {
+          setSelectedOrderId(orderId);
+          setActiveModule('order_detail');
+        }}
+        onOpenCreateOrder={() => onOpenCreateOrder()}
+        onOpenCuttingForOrder={(orderId) => onOpenCuttingForOrder(orderId)}
+      />
+    );
+  }
 
   const filteredOrders = orders.filter(ord => {
     if (statusFilter !== 'all' && ord.status !== statusFilter) return false;
@@ -111,13 +145,25 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
               <p className="text-xs text-slate-500">Real-time synchronized across mobile and desktop devices</p>
             </div>
 
-            <button
-              onClick={onOpenCreateOrder}
-              className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 transition active:scale-95 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>+ Create Customer Order</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setViewMode('companies')}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 transition active:scale-95 cursor-pointer border border-slate-300"
+                title="View and manage orders grouped by customer companies"
+              >
+                <Building2 className="w-4 h-4 text-blue-600" />
+                <span>View By Companies</span>
+              </button>
+
+              <button
+                onClick={onOpenCreateOrder}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/25 transition active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Create Customer Order</span>
+              </button>
+            </div>
           </div>
 
           {/* Search & Stage Filter */}
