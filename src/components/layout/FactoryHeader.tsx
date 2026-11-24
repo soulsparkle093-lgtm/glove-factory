@@ -28,9 +28,11 @@ export const FactoryHeader: React.FC<FactoryHeaderProps> = ({
       case 'dashboard':
         return { en: 'Factory Dashboard', sub: 'Overview & Production Metrics' };
       case 'orders':
-        return { en: 'Customer Orders', sub: 'Orders & Production Workflow' };
+      case 'order_companies':
+      case 'company_detail':
+        return { en: 'Customer Orders', sub: 'Companies, Orders & Production' };
       case 'order_detail':
-        return { en: 'Order Detail', sub: 'Live Stage Progress & History' };
+        return { en: 'Customer Orders', sub: 'Full Order Detail & History' };
       case 'cuttings':
         return { en: 'Cutting Management', sub: 'Factory Workers & Outside Contractors' };
       case 'stitching':

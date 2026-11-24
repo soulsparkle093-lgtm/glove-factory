@@ -193,6 +193,10 @@ export interface CuttingTransaction {
   linkedStockId?: string;
   parentCuttingId?: string;
   isSizeMatrixChild?: boolean;
+  isExtraCutting?: boolean;
+  extraCuttingQty?: number;
+  isDeleted?: boolean;
+  pairs?: number;
   notes?: string;
   createdAt: string;
 }
@@ -237,6 +241,9 @@ export interface CuttingEntry {
   articleStockAdjustedQty?: number;
   parentCuttingId?: string;
   isSizeMatrixChild?: boolean;
+  isExtraCutting?: boolean;
+  extraCuttingQty?: number;
+  isDeleted?: boolean;
   createdAt: string;
   editedAt?: unknown;
   editedBy?: string;
@@ -254,6 +261,8 @@ export interface OrderDispatchHistory {
   remainingBalance?: number;
   article?: string;
   sizes?: SizeMatrix;
+  isExtraCutting?: boolean;
+  extraCuttingQty?: number;
   createdAt: string;
 }
 
@@ -275,6 +284,8 @@ export interface Cutting {
   status: 'Given' | 'Received';
   receivedDate?: string;
   notes?: string;
+  isExtraCutting?: boolean;
+  extraCuttingQty?: number;
   createdAt: string;
 }
 
@@ -386,6 +397,8 @@ export interface StockLedgerEntry {
   qty: number;
   date: string;
   referenceId: string; // Cutting ID or Invoice ID
+  isExtraCutting?: boolean;
+  extraCuttingQty?: number;
   notes?: string;
   createdAt: string;
 }
@@ -568,7 +581,15 @@ export interface ArticleStockCuttingHistoryEntry {
   pairs: number;
   receiveId: string;
   source: string;
+  cutterName?: string;
+  customerName?: string;
+  orderNo?: string;
+  orderId?: string;
+  article?: string;
+  size?: string;
   totalBalance?: number;
+  isExtraCutting?: boolean;
+  extraCuttingQty?: number;
   reason?: string;
   returnReferenceId?: string;
 }
@@ -599,6 +620,11 @@ export interface StockInHistoryItem {
   time?: string;
   formattedDateTime: string;
   source: string;
+  cutterName?: string;
+  customerName?: string;
+  orderNo?: string;
+  orderId?: string;
+  article?: string;
   quantity: number;
   rate?: number;
   size?: string;
@@ -629,6 +655,9 @@ export interface DistinctArticleStock {
   sizes?: string[];
   lastReceivedDate?: string;
   lastDeliveredDate?: string;
+  lastOrderNo?: string;
+  lastCustomerName?: string;
+  lastUsedSource?: string;
 }
 
 export interface StaffAttendance {
@@ -645,6 +674,8 @@ export type FactoryModule =
   | 'dashboard' 
   | 'orders' 
   | 'order_detail'
+  | 'order_companies'
+  | 'company_detail'
   | 'cuttings' 
   | 'stitching'
   | 'stock_management'

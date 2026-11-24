@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Cutter, CuttingEntry } from '../../types/factory';
 import { formatDate, safeStringCompare } from '../../utils/factoryFormatters';
+import { useFactory } from '../../context/FactoryContext';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -79,6 +80,8 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
   // Debugging log for ledger data
   console.log('Rendering CuttingLedger for cutter:', cutter.name, 'with entries count:', ledgerData.length, ledgerData);
 
+  const { orders = [], setSelectedOrderId, setSelectedCompanyName, setActiveModule } = useFactory();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [dateFilter, setDateFilter] = useState<LedgerDateFilter>('All Time');
   const [fromDate, setFromDate] = useState('');
@@ -113,6 +116,7 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
     return ledgerData.filter(entry => {
       const matchSearch = !q || 
         (entry.customerName && entry.customerName.toLowerCase().includes(q)) ||
+        (entry.orderNo && entry.orderNo.toLowerCase().includes(q)) ||
         (entry.article && entry.article.toLowerCase().includes(q)) ||
         (entry.billNo && entry.billNo.toLowerCase().includes(q));
 
@@ -154,6 +158,8 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
 
         return [
           formatDate(entry.date),
+          entry.customerName || 'Stock - No Order',
+          entry.orderNo || 'Stock - No Order',
           entry.article || '-',
           entry.size || '-',
           isReturn ? `-${Math.abs(pairs)}` : String(pairs),
@@ -165,10 +171,12 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
       });
 
       autoTable(doc, {
-        head: [['DATE', 'ARTICLE', 'SIZE', 'PAIRS', 'AVERAGE', 'RATE', 'AMOUNT', 'BALANCE']],
+        head: [['DATE', 'CUSTOMER', 'ORDER NO / PO NO', 'ARTICLE', 'SIZE', 'PAIRS', 'AVERAGE', 'RATE', 'AMOUNT', 'BALANCE']],
         body: tableRows,
         foot: [[
           'TOTAL',
+          '',
+          '',
           '',
           '',
           `${totalPairsCount.toLocaleString()} Pairs`,
@@ -392,19 +400,20 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
               </p>
             </div>
           ) : (
-            <table className="w-full min-w-[900px] text-left text-xs">
+            <table className="w-full min-w-[1000px] text-left text-xs">
               <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-600">
                 <tr>
-                  <th className="px-4 py-3">Date</th>
-                  <th className="px-4 py-3">Customer</th>
-                  <th className="px-4 py-3">Article</th>
-                  <th className="px-4 py-3">Size</th>
-                  <th className="px-4 py-3 text-right">Pairs</th>
-                  <th className="px-4 py-3 text-right">Rate</th>
-                  <th className="px-4 py-3 text-right">Lot Total</th>
-                  <th className="px-4 py-3 text-right">Running Balance</th>
+                  <th className="px-4 py-3">1. Date</th>
+                  <th className="px-4 py-3">2. Customer</th>
+                  <th className="px-4 py-3">3. Order No / PO No</th>
+                  <th className="px-4 py-3">4. Article</th>
+                  <th className="px-4 py-3">5. Size</th>
+                  <th className="px-4 py-3 text-right">6. Pairs</th>
+                  <th className="px-4 py-3 text-right">7. Rate</th>
+                  <th className="px-4 py-3 text-right">8. Lot Total</th>
+                  <th className="px-4 py-3 text-right">9. Running Balance</th>
                   {(onEditEntry || onDeleteEntry || onReturnCutting) && (
-                    <th className="px-4 py-3 text-center">Actions</th>
+                    <th className="px-4 py-3 text-center">10. Actions</th>
                   )}
                 </tr>
               </thead>
@@ -414,14 +423,40 @@ export const CuttingLedger: React.FC<CuttingLedgerProps> = ({
                   const isReturn = entry.type === 'RETURN';
                   return (
                     <tr key={entry.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="px-4 py-3 font-mono text-slate-600">
+                      <td className="px-4 py-3 font-mono text-slate-600 whitespace-nowrap">
                         {formatDate(entry.date)}
                         {entry.billNo && (
                           <span className="ml-1 text-[10px] text-slate-400">#{entry.billNo}</span>
                         )}
                       </td>
                       <td className="px-4 py-3 font-semibold text-slate-900">
-                        {entry.customerName || 'Direct'}
+                        {entry.customerName || 'Stock - No Order'}
+                      </td>
+                      <td className="px-4 py-3">
+                        {entry.orderNo ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const target = orders.find(o => o.orderNo === entry.orderNo || o.id === entry.orderId);
+                              if (target) {
+                                setSelectedCompanyName(target.customerName);
+                                setSelectedOrderId(target.id);
+                                setActiveModule('order_detail');
+                              } else if (entry.orderId) {
+                                setSelectedCompanyName(entry.customerName || null);
+                                setSelectedOrderId(entry.orderId);
+                                setActiveModule('order_detail');
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-blue-50 text-blue-700 font-bold font-mono text-[11px] border border-blue-200 hover:bg-blue-100 hover:text-blue-900 transition cursor-pointer"
+                            title={`Click to view Order ${entry.orderNo}`}
+                          >
+                            <span>{entry.orderNo}</span>
+                            <span className="text-[10px]">&rarr;</span>
+                          </button>
+                        ) : (
+                          <span className="text-slate-400 font-mono text-[11px]">Stock - No Order</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span className="font-semibold text-slate-800">{entry.article || '-'}</span>

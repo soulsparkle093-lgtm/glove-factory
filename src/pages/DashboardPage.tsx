@@ -42,6 +42,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
     settings, 
     setActiveModule, 
     setSelectedOrderId,
+    setSelectedCompanyName,
     receiveCutting 
   } = useFactory();
 
@@ -329,6 +330,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                     <div 
                       key={ord.id} 
                       onClick={() => {
+                        setSelectedCompanyName(ord.customerName);
                         setSelectedOrderId(ord.id);
                         setActiveModule('order_detail');
                       }}

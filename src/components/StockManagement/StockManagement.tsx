@@ -42,6 +42,7 @@ export const StockManagement: React.FC = () => {
   const { 
     orders = [],
     stockManagement = [],
+    articleStock = [],
     deliveryHistory = [],
     getDistinctArticles, 
     getStockInHistory, 
@@ -59,6 +60,8 @@ export const StockManagement: React.FC = () => {
     deleteCuttingReturn,
     updateStockDelivery,
     deleteStockDelivery,
+    clearAllStockOutData,
+    invoices = [],
     showToast 
   } = useFactory();
 
@@ -72,6 +75,45 @@ export const StockManagement: React.FC = () => {
   const [isDeletingArticle, setIsDeletingArticle] = useState(false);
   const [showDeletedArticles, setShowDeletedArticles] = useState(false);
   const [restoringArticleName, setRestoringArticleName] = useState<string | null>(null);
+
+  // Delivery Edit & Delete states for Stock OUT
+  interface DeliveryEditTarget {
+    id: string;
+    groupId?: string;
+    customerName: string;
+    orderId?: string;
+    orderNo?: string;
+    referenceNo?: string;
+    date: string;
+    article: string;
+    size: string;
+    quantity: number;
+    rawDelivery?: any;
+  }
+  const [editingDelivery, setEditingDelivery] = useState<DeliveryEditTarget | null>(null);
+  const [editDeliveryForm, setEditDeliveryForm] = useState({
+    customerName: '',
+    orderId: '',
+    date: '',
+    article: '',
+    size: '',
+    quantity: ''
+  });
+  const [isSavingDeliveryEdit, setIsSavingDeliveryEdit] = useState(false);
+
+  interface DeliveryDeleteTarget {
+    id: string;
+    customerName: string;
+    orderId?: string;
+    orderNo?: string;
+    referenceNo?: string;
+    totalPairs: number;
+    items: Array<{ id: string; article: string; size: string; quantity: number; orderNo?: string; orderId?: string }>;
+  }
+  const [deletingDelivery, setDeletingDelivery] = useState<DeliveryDeleteTarget | null>(null);
+  const [isDeletingDeliveryGroup, setIsDeletingDeliveryGroup] = useState(false);
+  const [isClearAllStockOutOpen, setIsClearAllStockOutOpen] = useState(false);
+  const [isClearingAllStockOut, setIsClearingAllStockOut] = useState(false);
 
   // Active Tab in Directory: Stock IN Report vs Stock OUT Report
   const [activeTab, setActiveTab] = useState<'IN' | 'OUT'>('IN');
@@ -129,7 +171,7 @@ export const StockManagement: React.FC = () => {
   const [editOutCustomer, setEditOutCustomer] = useState('');
   const [isSavingOutEdit, setIsSavingOutEdit] = useState(false);
 
-  const [deletingItem, setDeletingItem] = useState<{ type: 'IN' | 'OUT' | 'RETURN'; id: string; label: string } | null>(null);
+  const [deletingItem, setDeletingItem] = useState<{ type: 'IN' | 'OUT' | 'RETURN'; id: string; label: string; quantity?: number } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Deliver modal state (opened from Deliver button in front of article in directory list)
@@ -235,6 +277,8 @@ export const StockManagement: React.FC = () => {
         else if (editingOutItem) setEditingOutItem(null);
         else if (editingReturnItem) setEditingReturnItem(null);
         else if (deletingItem) setDeletingItem(null);
+        else if (deletingDelivery) setDeletingDelivery(null);
+        else if (isClearAllStockOutOpen) setIsClearAllStockOutOpen(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -252,8 +296,36 @@ export const StockManagement: React.FC = () => {
     editingInItem,
     editingOutItem,
     editingReturnItem,
-    deletingItem
+    deletingItem,
+    deletingDelivery,
+    isClearAllStockOutOpen
   ]);
+
+  // Debug Console Log: inspect where Stock Out data is coming from
+  useEffect(() => {
+    try {
+      const localStockOutRaw = typeof window !== 'undefined' ? localStorage.getItem('gferp_stock_out_v1') : null;
+      const localStockOutArr = localStockOutRaw ? JSON.parse(localStockOutRaw) : [];
+      const articleStockDeliveryCount = (articleStock || []).reduce(
+        (sum, a) => sum + (Array.isArray(a.deliveryHistory) ? a.deliveryHistory.length : 0),
+        0
+      );
+      console.log('[StockManagement Debug] Stock Out Data Sources:', {
+        firestore_stock_delivery_history_count: (deliveryHistory || []).length,
+        firestore_article_stock_deliveryHistory_count: articleStockDeliveryCount,
+        localStorage_gferp_stock_out_v1_count: Array.isArray(localStockOutArr) ? localStockOutArr.length : 0,
+        sampleEntries: (deliveryHistory || []).slice(0, 5).map(d => ({
+          id: d.id,
+          customer: d.customerName,
+          article: d.article,
+          qty: d.quantity,
+          orderId: d.orderId
+        }))
+      });
+    } catch {
+      // ignore storage parse error in debug logger
+    }
+  }, [deliveryHistory, articleStock]);
 
   // Sync URL hash with selected article (/stock-management/[article_name])
   useEffect(() => {
@@ -334,7 +406,12 @@ export const StockManagement: React.FC = () => {
       articleName: found?.articleName || selectedArticleName,
       totalIn,
       totalOut,
-      availableStock: available
+      availableStock: available,
+      lastReceivedDate: found?.lastReceivedDate || selectedArticleInHistory[0]?.date,
+      lastDeliveredDate: found?.lastDeliveredDate || selectedArticleOutHistory[0]?.date,
+      lastOrderNo: found?.lastOrderNo,
+      lastCustomerName: found?.lastCustomerName,
+      lastUsedSource: found?.lastUsedSource
     };
   }, [selectedArticleName, distinctArticles, selectedArticleInHistory, selectedArticleOutHistory]);
 
@@ -348,44 +425,81 @@ export const StockManagement: React.FC = () => {
     return selectedArticleSummary.availableStock * 450;
   }, [selectedArticleSummary, distinctArticles]);
 
-  // Combined History List for Full Page Table
+  // Combined History List for Full Page Table (computed chronologically for accurate running balance, displayed newest first)
   const combinedArticleHistory = useMemo(() => {
-    const list: Array<{
+    const articleLabel = selectedArticleSummary?.articleName || selectedArticleName || 'Unspecified';
+    const rawList: Array<{
       id: string;
       date: string;
+      createdAt?: string;
       transferDate?: string;
       formattedDateTime: string;
       source: string;
+      cutter: string;
+      customer: string;
+      orderNo: string;
+      article: string;
+      size: string;
       orderLink: string;
       qtyIn?: number;
       qtyOut?: number;
       type: 'IN' | 'OUT' | 'RETURN';
+      typeLabel: string;
+      balance: number;
       billNo?: string;
       canTransfer?: boolean;
       raw: any;
     }> = [];
+
+    const extractCutter = (raw: Record<string, any> | undefined, fallbackSource?: string): string => {
+      if (raw?.cutterName && String(raw.cutterName).trim()) return String(raw.cutterName).trim();
+      const src = (fallbackSource || '').trim();
+      const match = src.match(/\(([^)]+)\)/);
+      if (match?.[1]) return match[1].trim();
+      if (src && !src.toLowerCase().includes('from cutting master')) return src;
+      return 'Cutting Master';
+    };
 
     // 1. IN / Receipts
     selectedArticleInHistory.forEach(item => {
       const raw = item.rawEntry as Record<string, any> | undefined;
       const isReturn = raw?.type === 'RETURN' || Number(item.quantity) < 0;
       const transferDate = raw?.transferDate || '';
-      const orderLink = raw?.orderNo 
-        ? `Against Order: ${raw.customerName ? `${raw.customerName} ` : ''}(${raw.orderNo})`
-        : (raw?.customerOrder ? `Against Order: ${raw.customerOrder}` : 'Direct Cutting / Stock');
-      const isUnlinked = !raw?.orderId && (!raw?.orderNo || raw?.orderNo === '') && (!raw?.customerOrder || raw?.customerOrder.toLowerCase().includes('direct') || raw?.customerOrder.toLowerCase().includes('stock'));
+      const rawCustomer = (item.customerName || raw?.customerName || '').trim();
+      const rawOrderNo = (item.orderNo && item.orderNo !== '-' ? item.orderNo : raw?.orderNo || '').trim();
+      const hasOrder = Boolean(rawOrderNo) || Boolean(item.orderId || raw?.orderId);
+      const customer = rawCustomer && !rawCustomer.toLowerCase().includes('stock')
+        ? rawCustomer
+        : (hasOrder ? (rawCustomer || 'Customer Order') : 'Stock - No Order');
+      const orderNo = rawOrderNo || '-';
+      const cutter = (item.cutterName || extractCutter(raw, item.source)).trim();
+      const article = (item.article || raw?.articleTitle || raw?.article || articleLabel).trim();
+      const size = (item.size || raw?.sizeName || raw?.size || 'Standard').trim() || 'Standard';
+
+      const orderLink = rawOrderNo
+        ? `Against Order: ${customer !== 'Stock - No Order' ? `${customer} ` : ''}(${rawOrderNo})`
+        : (raw?.customerOrder ? `Against Order: ${raw.customerOrder}` : 'Stock - No Order');
+      const isUnlinked = !raw?.orderId && !rawOrderNo && (!raw?.customerOrder || raw?.customerOrder.toLowerCase().includes('direct') || raw?.customerOrder.toLowerCase().includes('stock'));
       const canTransfer = !isReturn && isUnlinked;
 
-      list.push({
+      rawList.push({
         id: item.id,
         date: item.date,
+        createdAt: raw?.createdAt,
         transferDate,
         formattedDateTime: item.formattedDateTime || `${formatDate(item.date)} ${item.time || ''}`.trim(),
         source: item.source || 'From Cutting Master',
+        cutter,
+        customer,
+        orderNo,
+        article,
+        size,
         orderLink,
         qtyIn: isReturn ? undefined : item.quantity,
         qtyOut: isReturn ? Math.abs(item.quantity) : undefined,
         type: isReturn ? 'RETURN' : 'IN',
+        typeLabel: isReturn ? 'RETURN - Cutting' : (raw?.cutterName || (item.source || '').toLowerCase().includes('cutting') ? 'IN - Cutting Received' : 'IN - Stock Receipt'),
+        balance: 0,
         billNo: item.billNo || (raw?.billNo ? `Bill ${raw.billNo}` : '—'),
         canTransfer,
         raw: item
@@ -395,28 +509,56 @@ export const StockManagement: React.FC = () => {
     // 2. OUT / Deliveries
     selectedArticleOutHistory.forEach(item => {
       const raw = item.rawEntry as Record<string, any> | undefined;
-      const orderLink = item.orderNo 
-        ? `To Order: ${item.customerName ? `${item.customerName} ` : ''}(${item.orderNo})`
+      const customer = (item.customerName || raw?.customerName || 'Direct Dispatch').trim();
+      const orderNo = (item.orderNo || raw?.orderNo || '-').trim() || '-';
+      const article = (raw?.article || articleLabel).trim();
+      const size = (item.size || raw?.size || 'Standard').trim() || 'Standard';
+      const orderLink = orderNo !== '-'
+        ? `To Order: ${customer ? `${customer} ` : ''}(${orderNo})`
         : (item.orderName || 'Direct Customer Dispatch');
 
-      list.push({
+      rawList.push({
         id: item.id,
         date: item.date,
+        createdAt: raw?.createdAt,
         transferDate: raw?.transferDate || '',
         formattedDateTime: formatDate(item.date),
-        source: item.customerName ? `Dispatched to Customer (${item.customerName})` : 'Dispatched to Customer',
+        source: customer ? `Dispatched to ${customer}` : 'Dispatched to Customer',
+        cutter: '-',
+        customer,
+        orderNo,
+        article,
+        size,
         orderLink,
         qtyOut: item.quantity,
         type: 'OUT',
+        typeLabel: 'OUT - Dispatched',
+        balance: 0,
         billNo: raw?.billNo || '—',
         canTransfer: false,
         raw: item
       });
     });
 
-    // Sort newest first
-    return list.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.id, a.id));
-  }, [selectedArticleInHistory, selectedArticleOutHistory]);
+    // Sort oldest -> newest to compute chronological running balance
+    rawList.sort((a, b) =>
+      safeStringCompare(a.date, b.date) ||
+      safeStringCompare(a.createdAt, b.createdAt) ||
+      safeStringCompare(a.id, b.id)
+    );
+
+    let running = 0;
+    const withBalance = rawList.map(row => {
+      running += (row.qtyIn || 0) - (row.qtyOut || 0);
+      return {
+        ...row,
+        balance: running
+      };
+    });
+
+    // Display newest first while preserving chronological running balance
+    return withBalance.reverse();
+  }, [selectedArticleInHistory, selectedArticleOutHistory, selectedArticleSummary?.articleName, selectedArticleName]);
 
   const filteredCombinedHistory = useMemo(() => {
     if (historyFilter === 'ALL') return combinedArticleHistory;
@@ -814,7 +956,12 @@ export const StockManagement: React.FC = () => {
         }
         showToast('Stock In receipt deleted.');
       } else {
-        if (deleteStockDelivery) await deleteStockDelivery(deletingItem.id);
+        if (deleteStockDelivery) {
+          await deleteStockDelivery(deletingItem.id, {
+            article: selectedArticleSummary?.articleName,
+            quantity: deletingItem.quantity
+          });
+        }
         showToast('Stock delivery deleted.');
       }
       setDeletingItem(null);
@@ -823,6 +970,147 @@ export const StockManagement: React.FC = () => {
       showToast(err instanceof Error ? err.message : 'Could not delete entry.', 'error');
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const handleOpenEditDelivery = (group: { id: string; customerName: string; referenceNo: string; date: string; items: any[] }) => {
+    const firstItem = group.items[0];
+    const raw = deliveryHistory.find(d => d.id === firstItem?.id);
+    const targetOrder = orders.find(o => o.orderNo === firstItem?.orderNo || (raw && o.id === raw.orderId));
+    setEditingDelivery({
+      id: firstItem?.id || group.id,
+      groupId: group.id,
+      customerName: group.customerName,
+      orderId: targetOrder?.id || raw?.orderId || '',
+      orderNo: firstItem?.orderNo || targetOrder?.orderNo || '',
+      referenceNo: group.referenceNo,
+      date: group.date,
+      article: firstItem?.article || '',
+      size: firstItem?.size || 'Standard',
+      quantity: Number(firstItem?.quantity || group.items.reduce((s, i) => s + (Number(i.quantity) || 0), 0)),
+      rawDelivery: raw
+    });
+    setEditDeliveryForm({
+      customerName: group.customerName,
+      orderId: targetOrder?.id || raw?.orderId || '',
+      date: group.date,
+      article: firstItem?.article || '',
+      size: firstItem?.size || 'Standard',
+      quantity: String(firstItem?.quantity || group.items.reduce((s, i) => s + (Number(i.quantity) || 0), 0))
+    });
+  };
+
+  const handleOpenEditItemDelivery = (item: any, group: any) => {
+    const raw = deliveryHistory.find(d => d.id === item.id);
+    const targetOrder = orders.find(o => o.orderNo === item.orderNo || (raw && o.id === raw.orderId));
+    setEditingDelivery({
+      id: item.id,
+      groupId: group.id,
+      customerName: group.customerName,
+      orderId: targetOrder?.id || raw?.orderId || '',
+      orderNo: item.orderNo || targetOrder?.orderNo || '',
+      referenceNo: group.referenceNo,
+      date: group.date,
+      article: item.article,
+      size: item.size || 'Standard',
+      quantity: Number(item.quantity),
+      rawDelivery: raw
+    });
+    setEditDeliveryForm({
+      customerName: group.customerName,
+      orderId: targetOrder?.id || raw?.orderId || '',
+      date: group.date,
+      article: item.article,
+      size: item.size || 'Standard',
+      quantity: String(item.quantity)
+    });
+  };
+
+  const handleSaveDeliveryEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDelivery) return;
+    const qty = Number(editDeliveryForm.quantity);
+    if (!editDeliveryForm.date || !editDeliveryForm.customerName.trim() || !editDeliveryForm.article.trim() || !Number.isFinite(qty) || qty <= 0) {
+      showToast('Date, customer, article, and valid positive quantity are required.', 'error');
+      return;
+    }
+    setIsSavingDeliveryEdit(true);
+    try {
+      const targetOrder = editDeliveryForm.orderId ? orders.find(o => o.id === editDeliveryForm.orderId) : undefined;
+      await updateStockDelivery(editingDelivery.id, {
+        date: editDeliveryForm.date,
+        customerName: targetOrder?.customerName || editDeliveryForm.customerName.trim(),
+        orderId: editDeliveryForm.orderId || undefined,
+        orderNo: targetOrder?.orderNo || undefined,
+        article: editDeliveryForm.article.trim(),
+        size: editDeliveryForm.size.trim() || 'Standard',
+        quantity: qty
+      });
+      showToast('Stock Delivery updated successfully.');
+      setEditingDelivery(null);
+    } catch (err) {
+      console.error('Error updating delivery:', err);
+      showToast(err instanceof Error ? err.message : 'Could not update delivery.', 'error');
+    } finally {
+      setIsSavingDeliveryEdit(false);
+    }
+  };
+
+  const handleOpenDeleteDelivery = (group: { id: string; customerName: string; referenceNo: string; totalPairs: number; items: any[] }) => {
+    setDeletingDelivery({
+      id: group.id,
+      customerName: group.customerName,
+      referenceNo: group.referenceNo,
+      totalPairs: group.totalPairs,
+      items: group.items
+    });
+  };
+
+  const handleOpenDeleteItemDelivery = (item: any, group: any) => {
+    setDeletingDelivery({
+      id: item.id,
+      customerName: group.customerName,
+      orderId: item.orderId,
+      orderNo: item.orderNo,
+      referenceNo: group.referenceNo,
+      totalPairs: Number(item.quantity),
+      items: [item]
+    });
+  };
+
+  const handleConfirmDeleteDelivery = async () => {
+    if (!deletingDelivery) return;
+    setIsDeletingDeliveryGroup(true);
+    try {
+      for (const itm of deletingDelivery.items) {
+        if (itm.id) {
+          await deleteStockDelivery(itm.id, {
+            article: itm.article,
+            quantity: Number(itm.quantity) || 0,
+            orderId: itm.orderId || deletingDelivery.orderId
+          });
+        }
+      }
+      showToast(`Delivery deleted permanently. ${deletingDelivery.totalPairs.toLocaleString()} pairs returned back to stock.`);
+      setDeletingDelivery(null);
+    } catch (err) {
+      console.error('Error deleting delivery:', err);
+      showToast(err instanceof Error ? err.message : 'Could not delete delivery.', 'error');
+    } finally {
+      setIsDeletingDeliveryGroup(false);
+    }
+  };
+
+  const handleConfirmClearAllStockOut = async () => {
+    setIsClearingAllStockOut(true);
+    try {
+      await clearAllStockOutData();
+      setIsClearAllStockOutOpen(false);
+    } catch (err) {
+      console.error('Error clearing all stock out data:', err);
+      showToast(err instanceof Error ? err.message : 'Could not clear Stock Out data.', 'error');
+    } finally {
+      setIsClearingAllStockOut(false);
     }
   };
 
@@ -1270,6 +1558,7 @@ export const StockManagement: React.FC = () => {
         size: string;
         quantity: number;
         orderNo?: string;
+        orderId?: string;
       }>;
     }>();
 
@@ -1297,7 +1586,8 @@ export const StockManagement: React.FC = () => {
         article: d.article || 'Article',
         size: d.size || 'Standard',
         quantity: Number(d.quantity) || 0,
-        orderNo: d.orderNo
+        orderNo: d.orderNo,
+        orderId: d.orderId || d.customerOrderId
       });
     });
 
@@ -1387,33 +1677,56 @@ export const StockManagement: React.FC = () => {
             <p className="mt-1 text-[11px] text-purple-700/80">Delivered to customers & order dispatches</p>
           </div>
 
-          {/* Card 3: AVAILABLE STOCK (Green if positive, Red if negative) */}
+          {/* Card 3: AVAILABLE STOCK (Green if positive, Grey/Red if zero, Red if negative) */}
           <div className={`rounded-2xl border p-5 shadow-xs ${
             selectedArticleSummary.availableStock < 0
               ? 'border-rose-300 bg-rose-50 text-rose-700'
-              : 'border-emerald-300 bg-emerald-50 text-emerald-800'
+              : selectedArticleSummary.availableStock === 0
+                ? 'border-slate-300 bg-slate-50 text-slate-800'
+                : 'border-emerald-300 bg-emerald-50 text-emerald-800'
           }`}>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <span className={`text-[11px] font-bold uppercase tracking-wider block ${
-                selectedArticleSummary.availableStock < 0 ? 'text-rose-800' : 'text-emerald-800'
+                selectedArticleSummary.availableStock < 0
+                  ? 'text-rose-800'
+                  : selectedArticleSummary.availableStock === 0
+                    ? 'text-slate-700'
+                    : 'text-emerald-800'
               }`}>
-                AVAILABLE STOCK
+                CURRENT BALANCE
               </span>
               {selectedArticleSummary.availableStock < 0 && (
                 <span className="rounded-full bg-rose-600 px-2 py-0.5 text-[10px] font-bold text-white tracking-wide">
                   MINUS STOCK
                 </span>
               )}
+              {selectedArticleSummary.availableStock === 0 && (
+                <span className="rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[10px] font-bold text-rose-700 tracking-wide">
+                  Out of Stock - 0
+                </span>
+              )}
             </div>
             <div className={`mt-2 font-mono text-2xl sm:text-3xl font-black ${
-              selectedArticleSummary.availableStock < 0 ? 'text-rose-700' : 'text-emerald-700'
+              selectedArticleSummary.availableStock < 0
+                ? 'text-rose-700'
+                : selectedArticleSummary.availableStock === 0
+                  ? 'text-slate-700'
+                  : 'text-emerald-700'
             }`}>
               {selectedArticleSummary.availableStock.toLocaleString()} <span className={`text-sm font-semibold ${
-                selectedArticleSummary.availableStock < 0 ? 'text-rose-600' : 'text-emerald-600'
+                selectedArticleSummary.availableStock < 0
+                  ? 'text-rose-600'
+                  : selectedArticleSummary.availableStock === 0
+                    ? 'text-slate-500'
+                    : 'text-emerald-600'
               }`}>Pairs</span>
             </div>
             <p className={`mt-1 text-[11px] font-semibold ${
-              selectedArticleSummary.availableStock < 0 ? 'text-rose-700' : 'text-emerald-800'
+              selectedArticleSummary.availableStock < 0
+                ? 'text-rose-700'
+                : selectedArticleSummary.availableStock === 0
+                  ? 'text-slate-600'
+                  : 'text-emerald-800'
             }`}>
               {selectedArticleSummary.totalIn} - {selectedArticleSummary.totalOut} = {selectedArticleSummary.availableStock} in hand
               {selectedArticleSummary.availableStock < 0 && (
@@ -1431,6 +1744,53 @@ export const StockManagement: React.FC = () => {
               Rs. {articleStockValue.toLocaleString()}
             </div>
             <p className="mt-1 text-[11px] text-amber-800/80">Based on manufacturing product value</p>
+          </div>
+        </div>
+
+        {/* Last Activity & Usage Metadata Strip */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 rounded-2xl border border-slate-200 bg-slate-50/90 p-4 shadow-2xs">
+          <div className="flex items-center gap-3 rounded-xl bg-white border border-slate-200/80 px-3.5 py-2.5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
+              <Calendar className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                Last In Date
+              </span>
+              <span className="text-xs font-bold text-slate-900 font-mono truncate block">
+                {selectedArticleSummary.lastReceivedDate ? formatDate(selectedArticleSummary.lastReceivedDate) : 'No Stock IN yet'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 rounded-xl bg-white border border-slate-200/80 px-3.5 py-2.5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-purple-100 text-purple-700">
+              <Truck className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                Last Out Date
+              </span>
+              <span className="text-xs font-bold text-slate-900 font-mono truncate block">
+                {selectedArticleSummary.lastDeliveredDate ? formatDate(selectedArticleSummary.lastDeliveredDate) : 'No Stock OUT yet'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 rounded-xl bg-white border border-slate-200/80 px-3.5 py-2.5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-100 text-blue-700">
+              <User className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                Last Order / Customer Used
+              </span>
+              <span className="text-xs font-bold text-slate-900 truncate block">
+                {selectedArticleSummary.lastOrderNo || selectedArticleSummary.lastCustomerName
+                  ? `${selectedArticleSummary.lastOrderNo ? `Order #${selectedArticleSummary.lastOrderNo}` : ''}${selectedArticleSummary.lastOrderNo && selectedArticleSummary.lastCustomerName ? ' · ' : ''}${selectedArticleSummary.lastCustomerName || ''}`
+                  : (selectedArticleSummary.lastUsedSource || 'Registered in Catalog')}
+              </span>
+            </div>
           </div>
         </div>
 
@@ -1506,22 +1866,25 @@ export const StockManagement: React.FC = () => {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[950px] text-left text-xs">
+            <table className="w-full min-w-[1100px] text-left text-xs">
               <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-600">
                 <tr>
-                  <th className="px-4 py-3.5">DATE</th>
-                  <th className="px-4 py-3.5">TRANSFER DATE</th>
-                  <th className="px-4 py-3.5">SOURCE / CUTTING MASTER</th>
-                  <th className="px-4 py-3.5">ORDER LINK</th>
-                  <th className="px-4 py-3.5 text-right">QTY</th>
-                  <th className="px-4 py-3.5">BILL NO</th>
-                  <th className="px-4 py-3.5 text-center">ACT</th>
+                  <th className="px-3.5 py-3.5">DATE</th>
+                  <th className="px-3.5 py-3.5">TYPE (IN / OUT)</th>
+                  <th className="px-3.5 py-3.5">CUTTER / LEDGER</th>
+                  <th className="px-3.5 py-3.5">CUSTOMER</th>
+                  <th className="px-3.5 py-3.5">ORDER NO</th>
+                  <th className="px-3.5 py-3.5">ARTICLE</th>
+                  <th className="px-3.5 py-3.5">SIZE</th>
+                  <th className="px-3.5 py-3.5 text-right">PAIRS</th>
+                  <th className="px-3.5 py-3.5 text-right">BALANCE</th>
+                  <th className="px-3.5 py-3.5 text-center">ACT</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
                 {filteredCombinedHistory.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-slate-400">
+                    <td colSpan={10} className="py-12 text-center text-slate-400">
                       <Boxes className="mx-auto mb-2 h-8 w-8 opacity-40" />
                       <p className="font-semibold text-slate-600">No movement records found</p>
                       <p className="mt-1 text-xs text-slate-400">Click [IN / BUY] or receive cutting lots to log stock movements.</p>
@@ -1530,55 +1893,75 @@ export const StockManagement: React.FC = () => {
                 ) : (
                   filteredCombinedHistory.map(row => (
                     <tr key={row.id} className="hover:bg-slate-50 transition">
-                      <td className="px-4 py-3.5 font-mono text-slate-900 font-semibold whitespace-nowrap">
+                      <td className="px-3.5 py-3.5 font-mono text-slate-900 font-semibold whitespace-nowrap">
                         <div className="flex flex-col">
-                          <span>{row.formattedDateTime}</span>
+                          <span>{formatDate(row.date)}</span>
                           {row.transferDate ? (
-                            <span className="text-[10px] text-slate-400 font-normal">
-                              Received: {formatDate(row.date)}
+                            <span className="text-[10px] text-blue-600 font-normal">
+                              Transfer: {formatDate(row.transferDate)}
                             </span>
                           ) : null}
                         </div>
                       </td>
-                      <td className="px-4 py-3.5 whitespace-nowrap">
-                        {row.transferDate ? (
-                          <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[11px] font-mono font-bold text-blue-700 border border-blue-200">
-                            <Calendar className="h-3 w-3" />
-                            {formatDate(row.transferDate)}
-                          </span>
-                        ) : (
-                          <span className="text-slate-300 font-mono">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3.5 text-slate-800 font-semibold">
-                        {row.source}
-                      </td>
-                      <td className="px-4 py-3.5 text-slate-600">
-                        <span className={`rounded-md px-2 py-0.5 text-[11px] font-mono font-semibold ${
-                          row.orderLink.toLowerCase().includes('against order') || row.orderLink.toLowerCase().includes('to order')
-                            ? 'bg-blue-50 text-blue-800 border border-blue-200'
-                            : 'bg-slate-100 text-slate-700'
+                      <td className="px-3.5 py-3.5 whitespace-nowrap">
+                        <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-bold border ${
+                          row.type === 'IN'
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : row.type === 'OUT'
+                              ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-amber-50 text-amber-800 border-amber-200'
                         }`}>
-                          {row.orderLink}
+                          {row.typeLabel}
                         </span>
                       </td>
-                      <td className="px-4 py-3.5 text-right font-mono font-bold whitespace-nowrap">
+                      <td className="px-3.5 py-3.5 text-slate-800 font-semibold whitespace-nowrap">
+                        {row.cutter}
+                      </td>
+                      <td className="px-3.5 py-3.5 whitespace-nowrap">
+                        <span className={`text-xs font-semibold ${
+                          row.customer === 'Stock - No Order' ? 'text-slate-500' : 'text-slate-900'
+                        }`}>
+                          {row.customer}
+                        </span>
+                      </td>
+                      <td className="px-3.5 py-3.5 font-mono whitespace-nowrap">
+                        {row.orderNo !== '-' && row.orderNo !== 'Stock - No Order' ? (
+                          <span className="rounded-md bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5 text-[11px] font-bold">
+                            {row.orderNo}
+                          </span>
+                        ) : row.type === 'IN' ? (
+                          <span className="inline-flex items-center rounded-md bg-slate-100 text-slate-600 border border-slate-200 px-2 py-0.5 text-[11px] font-semibold">
+                            Stock - No Order
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 font-medium">Direct Dispatch</span>
+                        )}
+                      </td>
+                      <td className="px-3.5 py-3.5 text-slate-900 font-bold whitespace-nowrap">
+                        {row.article}
+                      </td>
+                      <td className="px-3.5 py-3.5 text-slate-700 font-mono whitespace-nowrap">
+                        {row.size}
+                      </td>
+                      <td className="px-3.5 py-3.5 text-right font-mono font-bold whitespace-nowrap">
                         {row.qtyIn !== undefined ? (
-                          <span className="text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md border border-emerald-200 text-xs font-mono font-bold">
+                          <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 text-xs font-mono font-bold">
                             +{row.qtyIn.toLocaleString()}
                           </span>
                         ) : row.qtyOut !== undefined ? (
-                          <span className="text-rose-700 bg-rose-50 px-2.5 py-1 rounded-md border border-rose-200 text-xs font-mono font-bold">
+                          <span className="text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200 text-xs font-mono font-bold">
                             -{row.qtyOut.toLocaleString()}
                           </span>
                         ) : (
                           <span className="text-slate-300">—</span>
                         )}
                       </td>
-                      <td className="px-4 py-3.5 font-mono text-slate-500">
-                        {row.billNo || '—'}
+                      <td className={`px-3.5 py-3.5 text-right font-mono font-black whitespace-nowrap ${
+                        row.balance < 0 ? 'text-rose-600' : 'text-slate-900'
+                      }`}>
+                        {row.balance.toLocaleString()}
                       </td>
-                      <td className="px-4 py-3.5 text-center">
+                      <td className="px-3.5 py-3.5 text-center">
                         <div className="flex items-center justify-center gap-1.5 flex-wrap">
                           {row.canTransfer && (
                             <button
@@ -1644,6 +2027,7 @@ export const StockManagement: React.FC = () => {
                             onClick={() => setDeletingItem({
                               type: row.type,
                               id: row.id,
+                              quantity: Number(row.qtyIn || row.qtyOut || 0),
                               label: `${row.type} (${row.qtyIn || row.qtyOut} pairs)`
                             })}
                             className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
@@ -2509,22 +2893,44 @@ export const StockManagement: React.FC = () => {
                 >
                   {/* Left Side: Article Name */}
                   <div className="flex items-center gap-3 sm:gap-4 min-w-0">
-                    <div className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 font-mono text-xs font-black text-slate-700 group-hover:bg-blue-600 group-hover:text-white transition-colors">
+                    <div className={`flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full border font-mono text-xs font-black transition-colors ${
+                      article.availableStock <= 0
+                        ? 'border-slate-200 bg-slate-100 text-slate-500 group-hover:bg-blue-600 group-hover:text-white'
+                        : 'border-slate-200 bg-slate-100 text-slate-700 group-hover:bg-blue-600 group-hover:text-white'
+                    }`}>
                       {index + 1}
                     </div>
                     <div className="min-w-0">
-                      <h3 className="font-bold text-slate-900 text-sm sm:text-base group-hover:text-blue-700 transition truncate">
-                        {article.articleName}
-                      </h3>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                        {article.sizes && article.sizes.length > 0 && (
-                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
-                            Sizes: {article.sizes.join(', ')}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-bold text-slate-900 text-sm sm:text-base group-hover:text-blue-700 transition truncate">
+                          {article.articleName}
+                        </h3>
+                        {article.availableStock === 0 && (
+                          <span className="inline-flex items-center rounded-md border border-rose-200 bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-rose-700">
+                            Out of Stock - 0
                           </span>
                         )}
-                        <span>Total Received: {article.totalIn.toLocaleString()} Pairs</span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 font-mono">
+                          Size {article.sizes && article.sizes.length > 0 ? article.sizes.join(', ') : 'Standard'}
+                        </span>
                         <span className="text-slate-300">·</span>
-                        <span className="text-purple-600">Delivered: {article.totalOut.toLocaleString()} Pairs</span>
+                        <span className="font-mono text-emerald-700 font-semibold">Stock IN {article.totalIn.toLocaleString()}</span>
+                        <span className="text-slate-300">·</span>
+                        <span className="font-mono text-rose-700 font-semibold">Stock OUT {article.totalOut.toLocaleString()}</span>
+                        <span className="text-slate-300">·</span>
+                        <span className={`font-mono font-bold ${article.availableStock <= 0 ? 'text-rose-700' : 'text-slate-800'}`}>
+                          In Stock: {article.availableStock.toLocaleString()} Pairs
+                        </span>
+                        {(article.lastOrderNo || article.lastCustomerName) && (
+                          <>
+                            <span className="text-slate-300">·</span>
+                            <span className="text-[11px] font-medium text-slate-600 truncate">
+                              Last: {article.lastOrderNo ? `#${article.lastOrderNo}` : ''}{article.lastOrderNo && article.lastCustomerName ? ' - ' : ''}{article.lastCustomerName || ''}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2533,7 +2939,11 @@ export const StockManagement: React.FC = () => {
                   <div className="flex items-center gap-3 sm:gap-4 shrink-0">
                     <div className="text-right">
                       <div className={`font-mono text-base sm:text-lg font-black transition ${
-                        article.availableStock < 0 ? 'text-rose-600' : 'text-slate-900 group-hover:text-blue-700'
+                        article.availableStock < 0
+                          ? 'text-rose-600'
+                          : article.availableStock === 0
+                            ? 'text-slate-500 group-hover:text-blue-700'
+                            : 'text-slate-900 group-hover:text-blue-700'
                       }`}>
                         {article.availableStock.toLocaleString()} <span className="text-xs font-normal text-slate-500">Pairs</span>
                       </div>
@@ -2541,10 +2951,14 @@ export const StockManagement: React.FC = () => {
                         <span className="inline-block rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">
                           MINUS
                         </span>
+                      ) : article.availableStock === 0 ? (
+                        <span className="inline-block rounded border border-rose-200 bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">
+                          Out of Stock - 0
+                        </span>
                       ) : (
-                        <div className="text-[10px] font-semibold text-slate-400">
-                          Click for Ledger &rarr;
-                        </div>
+                        <span className="inline-block rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                          In Stock · Ledger &rarr;
+                        </span>
                       )}
                     </div>
 
@@ -2632,21 +3046,32 @@ export const StockManagement: React.FC = () => {
       ) : (
         /* ================= STOCK OUT DELIVERIES REPORT ================= */
         <div className="rounded-2xl border border-slate-200 bg-white shadow-xs overflow-hidden">
-          <div className="border-b border-slate-200 bg-purple-50/70 p-4 sm:px-6 flex items-center justify-between">
+          <div className="border-b border-slate-200 bg-purple-50/70 p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <span className="h-2.5 w-2.5 rounded-full bg-purple-600" />
               <div>
                 <h2 className="text-sm font-black text-slate-800 uppercase tracking-wider">
-                  Stock OUT Deliveries & Dispatches
+                  Stock OUT Deliveries &amp; Dispatches
                 </h2>
                 <p className="text-[11px] text-slate-500">
                   Each delivery shown per customer shipment with expandable articles breakdown
                 </p>
               </div>
             </div>
-            <span className="rounded-full bg-white border border-purple-200 px-3 py-1 font-mono text-xs font-bold text-purple-700">
-              {filteredGroupedDeliveries.length} Shipments Recorded
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-white border border-purple-200 px-3 py-1 font-mono text-xs font-bold text-purple-700">
+                {filteredGroupedDeliveries.length} Shipments &bull; {groupedDeliveries.reduce((s, g) => s + g.totalPairs, 0).toLocaleString()} Pairs Out
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsClearAllStockOutOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 bg-rose-50 hover:bg-rose-600 hover:text-white px-3 py-1.5 text-xs font-bold text-rose-700 transition cursor-pointer"
+                title="Remove all old/stale Stock Out records permanently"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear All Stock Out Data</span>
+              </button>
+            </div>
           </div>
 
           <div className="divide-y divide-slate-100">
@@ -2706,8 +3131,8 @@ export const StockManagement: React.FC = () => {
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between sm:justify-end gap-4 shrink-0 pl-11 sm:pl-0">
-                        <div className="text-left sm:text-right">
+                      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-3 shrink-0 pl-11 sm:pl-0">
+                        <div className="text-left sm:text-right mr-1">
                           <span className="text-[10px] uppercase tracking-wider font-bold text-purple-700 block">
                             Delivered Quantity
                           </span>
@@ -2715,9 +3140,34 @@ export const StockManagement: React.FC = () => {
                             {delivery.totalPairs.toLocaleString()} <span className="text-xs font-normal text-purple-700">Pairs</span>
                           </span>
                         </div>
-                        <span className="text-xs font-bold text-blue-600 hover:text-blue-800">
-                          {isExpanded ? 'Hide Items ↑' : 'View Items ↓'}
-                        </span>
+                        {/* 3 Action Buttons requested: [ View Items ], [ Edit ], [ Delete ] */}
+                        <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={() => toggleDeliveryExpand(delivery.id)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-purple-200 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 text-xs font-bold text-purple-700 transition cursor-pointer"
+                          >
+                            <span>{isExpanded ? 'Hide Items ↑' : 'View Items ↓'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditDelivery(delivery)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-500 hover:bg-amber-600 px-3 py-1.5 text-xs font-bold text-white shadow-2xs transition cursor-pointer"
+                            title="Edit Delivery"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span>Edit</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenDeleteDelivery(delivery)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-rose-300 bg-rose-600 hover:bg-rose-700 px-3 py-1.5 text-xs font-bold text-white shadow-2xs transition cursor-pointer"
+                            title="Delete Delivery"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -2749,16 +3199,41 @@ export const StockManagement: React.FC = () => {
                                     {item.orderNo ? `Order #${item.orderNo}` : (delivery.referenceNo || 'Direct Dispatch')}
                                   </td>
                                   <td className="px-4 py-2.5 text-center">
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleSelectArticle(item.article);
-                                      }}
-                                      className="inline-flex items-center gap-1 rounded-md bg-blue-50 hover:bg-blue-100 px-2.5 py-1 text-[11px] font-bold text-blue-700 transition cursor-pointer"
-                                    >
-                                      <span>Ledger &rarr;</span>
-                                    </button>
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectArticle(item.article);
+                                        }}
+                                        className="inline-flex items-center gap-1 rounded-md bg-blue-50 hover:bg-blue-100 px-2 py-1 text-[11px] font-bold text-blue-700 transition cursor-pointer"
+                                        title="View Article Ledger"
+                                      >
+                                        <span>Ledger &rarr;</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleOpenEditItemDelivery(item, delivery);
+                                        }}
+                                        className="p-1 rounded text-amber-600 hover:bg-amber-50 transition cursor-pointer"
+                                        title="Edit this item"
+                                      >
+                                        <Pencil className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleOpenDeleteItemDelivery(item, delivery);
+                                        }}
+                                        className="p-1 rounded text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                                        title="Delete this item"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
                               ))}
@@ -3988,6 +4463,302 @@ export const StockManagement: React.FC = () => {
                 className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50 transition cursor-pointer"
               >
                 {isDeletingArticle ? 'Deleting...' : 'Delete Permanently'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Modal: Edit Stock Delivery (Stock OUT) */}
+      {editingDelivery && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingDelivery(null);
+          }}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl bg-white shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between bg-amber-500 px-5 py-4 text-white">
+              <div>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  <Pencil className="h-5 w-5" />
+                  <span>Edit Stock Delivery &bull; Dispatched Out</span>
+                </h3>
+                <p className="text-xs text-amber-100">Adjust quantity, customer, article, or linked order. Stock inventory updates automatically.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingDelivery(null)}
+                className="rounded-lg p-1 hover:bg-white/20 transition cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveDeliveryEdit} className="p-5 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Delivery Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={editDeliveryForm.date}
+                    onChange={e => setEditDeliveryForm(prev => ({ ...prev, date: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-semibold bg-white text-slate-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Customer Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editDeliveryForm.customerName}
+                    onChange={e => setEditDeliveryForm(prev => ({ ...prev, customerName: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-semibold bg-white text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1">
+                  Linked Customer Order (PO)
+                </label>
+                <select
+                  value={editDeliveryForm.orderId}
+                  onChange={e => {
+                    const oId = e.target.value;
+                    const ord = orders.find(o => o.id === oId);
+                    setEditDeliveryForm(prev => ({
+                      ...prev,
+                      orderId: oId,
+                      customerName: ord?.customerName || prev.customerName
+                    }));
+                  }}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-semibold bg-white text-slate-900"
+                >
+                  <option value="">-- Direct Dispatch / No Linked Order --</option>
+                  {orders.map(o => (
+                    <option key={o.id} value={o.id}>
+                      {o.customerName} - {formatDate(o.orderDate)} - {o.orderNo}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Article *
+                  </label>
+                  <select
+                    required
+                    value={editDeliveryForm.article}
+                    onChange={e => setEditDeliveryForm(prev => ({ ...prev, article: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-semibold bg-white text-slate-900"
+                  >
+                    <option value="">-- Select Article --</option>
+                    {distinctArticles.map(a => (
+                      <option key={a.articleName} value={a.articleName}>
+                        {a.articleName} ({a.availableStock} in stock)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Size *
+                  </label>
+                  <select
+                    value={editDeliveryForm.size || 'Standard'}
+                    onChange={e => setEditDeliveryForm(prev => ({ ...prev, size: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-semibold bg-white text-slate-900"
+                  >
+                    <option value="7">Size 7</option>
+                    <option value="8">Size 8</option>
+                    <option value="9">Size 9</option>
+                    <option value="10">Size 10</option>
+                    <option value="11">Size 11</option>
+                    <option value="12">Size 12</option>
+                    <option value="Standard">Standard</option>
+                    <option value="Matrix">Matrix</option>
+                    {editDeliveryForm.size && !['7', '8', '9', '10', '11', '12', 'Standard', 'Matrix'].includes(editDeliveryForm.size) && (
+                      <option value={editDeliveryForm.size}>{editDeliveryForm.size} (Custom)</option>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1">
+                  Dispatched Quantity (Pairs) *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  value={editDeliveryForm.quantity}
+                  onChange={e => setEditDeliveryForm(prev => ({ ...prev, quantity: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-mono font-bold bg-white text-slate-900"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Original: {editingDelivery.quantity.toLocaleString()} Pairs. Decreasing quantity automatically returns pairs back to stock; increasing deducts stock.
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingDelivery(null)}
+                  disabled={isSavingDeliveryEdit}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                >
+                  Cancel / Back
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingDeliveryEdit}
+                  className="rounded-xl bg-amber-500 hover:bg-amber-600 px-5 py-2 text-xs font-bold text-white shadow-md shadow-amber-500/20 disabled:opacity-50 transition cursor-pointer"
+                >
+                  {isSavingDeliveryEdit ? 'Saving...' : 'Save Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Delete Stock Delivery Confirmation */}
+      {deletingDelivery && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDeletingDelivery(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2 text-rose-600">
+                <AlertCircle className="h-5 w-5" />
+                <h3 className="text-base font-bold">Delete Stock Delivery?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingDelivery(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                title="Close (Esc)"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mt-3 space-y-3 text-xs text-slate-600">
+              <p className="text-slate-700 font-medium leading-relaxed">
+                Delete this delivery? <strong className="text-slate-900 font-bold">{deletingDelivery.customerName}</strong> &bull; <strong className="text-slate-900 font-bold">{deletingDelivery.referenceNo || 'Direct Dispatch'}</strong> &bull; <strong className="text-rose-600 font-bold font-mono">{deletingDelivery.totalPairs.toLocaleString()} Pairs</strong>?
+              </p>
+              <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 text-emerald-900 font-medium text-xs">
+                ✅ <strong>Stock Return:</strong> This action will return <span className="font-bold font-mono text-emerald-700">+{deletingDelivery.totalPairs.toLocaleString()} Pairs</span> back into available stock and reduce Dispatched in {deletingDelivery.referenceNo || 'the customer order'}.
+              </div>
+
+              {(() => {
+                const linkedInvoice = invoices.find(inv => 
+                  (deletingDelivery?.referenceNo && inv.invoiceNo && inv.invoiceNo.toLowerCase().includes(deletingDelivery.referenceNo.toLowerCase())) ||
+                  (deletingDelivery?.customerName && inv.customerName?.toLowerCase() === deletingDelivery.customerName.toLowerCase())
+                );
+                if (!linkedInvoice) return null;
+                return (
+                  <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-amber-900 text-xs font-semibold">
+                    ⚠️ <strong>Warning:</strong> This delivery is billed in Invoice #{linkedInvoice.invoiceNo || linkedInvoice.id}. Deleting will affect invoice accounting!
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2.5 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => setDeletingDelivery(null)}
+                disabled={isDeletingDeliveryGroup}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Cancel / Back
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingDeliveryGroup}
+                onClick={handleConfirmDeleteDelivery}
+                className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white shadow-md shadow-rose-600/20 disabled:opacity-50 transition cursor-pointer"
+              >
+                {isDeletingDeliveryGroup ? 'Deleting...' : `Delete & Return ${deletingDelivery.totalPairs.toLocaleString()} Pairs`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Clear All Stock Out Data Confirmation */}
+      {isClearAllStockOutOpen && (
+        <div
+          className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 backdrop-blur-xs overflow-y-auto"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isClearingAllStockOut) setIsClearAllStockOutOpen(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="flex items-center gap-2 text-rose-600">
+                <AlertCircle className="h-5 w-5" />
+                <h3 className="text-base font-bold">Clear All Stock Out Data?</h3>
+              </div>
+              <button
+                type="button"
+                disabled={isClearingAllStockOut}
+                onClick={() => setIsClearAllStockOutOpen(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mt-3 space-y-2.5 text-xs text-slate-600">
+              <p className="text-slate-800 font-semibold leading-relaxed">
+                Kya aap sabhi Stock OUT Deliveries &amp; Dispatches (aur old/deleted entries) ko Firestore aur LocalStorage se permanently clear karna chahti hain?
+              </p>
+              <div className="rounded-xl bg-rose-50 border border-rose-200 p-3 text-rose-800 text-[11px] font-medium">
+                Sabhi Stock Out shipments delete ho kar delivered pairs stock balance me wapis aa jayenge aur page automatically refresh hoga.
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2.5 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                disabled={isClearingAllStockOut}
+                onClick={() => setIsClearAllStockOutOpen(false)}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isClearingAllStockOut}
+                onClick={handleConfirmClearAllStockOut}
+                className="rounded-xl bg-rose-600 hover:bg-rose-700 px-4 py-2 text-xs font-bold text-white shadow-md shadow-rose-600/20 disabled:opacity-50 transition cursor-pointer"
+              >
+                {isClearingAllStockOut ? 'Clearing...' : 'Yes, Clear All Stock Out'}
               </button>
             </div>
           </div>

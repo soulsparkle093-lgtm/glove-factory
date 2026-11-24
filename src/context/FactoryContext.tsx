@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Party, 
   Staff, 
@@ -53,7 +53,10 @@ import {
   isFirebaseOnline, 
   collection, 
   doc, 
+  getDoc,
   getDocs, 
+  query,
+  where,
   setDoc, 
   addDoc, 
   updateDoc, 
@@ -89,7 +92,55 @@ const STORAGE_KEYS = {
   STITCHER_KHATA: 'gferp_stitcher_khata_v1',
   STITCHING_HISTORY: 'gferp_stitching_history_v1',
   ORDER_HISTORY: 'gferp_order_dispatch_history_v3',
-  ORDER_COMPANIES: 'gferp_order_companies_v1'
+  ORDER_COMPANIES: 'gferp_order_companies_v1',
+  DELETED_CUTTING_IDS: 'gferp_deleted_cutting_ids_v1',
+  STOCK_OUT: 'gferp_stock_out_v1',
+  DELETED_DELIVERY_IDS: 'gferp_deleted_delivery_ids_v1',
+  DELETED_ORDER_IDS: 'gferp_deleted_order_ids_v1'
+};
+
+// Recursively remove `undefined` values from plain objects/arrays before writing to Firestore,
+// while leaving Firestore FieldValue sentinels (increment, arrayUnion, serverTimestamp) untouched.
+const stripUndefined = <T,>(input: T): T => {
+  if (input === null || input === undefined) return input;
+  if (Array.isArray(input)) {
+    return input
+      .filter(item => item !== undefined)
+      .map(item => stripUndefined(item)) as unknown as T;
+  }
+  if (typeof input === 'object') {
+    const proto = Object.getPrototypeOf(input);
+    const isPlainObject = proto === Object.prototype || proto === null;
+    if (!isPlainObject) return input;
+    const out: Record<string, unknown> = {};
+    Object.entries(input as Record<string, unknown>).forEach(([k, v]) => {
+      if (v !== undefined) {
+        out[k] = stripUndefined(v);
+      }
+    });
+    return out as T;
+  }
+  return input;
+};
+
+const dedupeCuttersList = (rawList: Cutter[]): Cutter[] => {
+  const map = new Map<string, Cutter>();
+  (rawList || []).forEach(c => {
+    if (!c || !c.id) return;
+    if (['cutter-1', 'cutter-2', 'cutter-3', 'cutter-4', 'cutter-5', 'cutter-6', 'cutter-7'].includes(c.id)) return;
+    const safeName = String(c.name || c.khataName || c.id || 'Cutting Master').trim() || 'Cutting Master';
+    const normalized: Cutter = {
+      ...c,
+      id: String(c.id),
+      name: safeName,
+      khataName: String(c.khataName || `${safeName} Ledger`).trim(),
+      cutterType: c.cutterType || 'cutting_man',
+      isActive: c.isActive !== false,
+      status: c.status || (c.isActive === false ? 'deactive' : 'active')
+    };
+    map.set(normalized.id, normalized);
+  });
+  return Array.from(map.values());
 };
 
 function loadLocal<T>(key: string, fallback: T): T {
@@ -134,6 +185,8 @@ interface FactoryContextType {
   setSelectedOrderId: (id: string | null) => void;
   selectedInvoiceId: string | null;
   setSelectedInvoiceId: (id: string | null) => void;
+  selectedCompanyName: string | null;
+  setSelectedCompanyName: (name: string | null) => void;
 
   // Collections
   parties: Party[];
@@ -199,10 +252,12 @@ interface FactoryContextType {
     billNo?: string;
     factoryName?: string;
     addToStock?: boolean;
+    isExtraCutting?: boolean;
+    extraCuttingQty?: number;
     notes?: string;
   }) => Promise<CuttingTransaction>;
   deleteCuttingTransaction: (id: string) => Promise<void>;
-  updateCuttingEntry: (id: string, updates: Pick<CuttingEntry, 'date' | 'customerName' | 'article' | 'size' | 'average' | 'remarks' | 'pairs' | 'rate' | 'billNo'>) => Promise<void>;
+  updateCuttingEntry: (id: string, updates: Partial<CuttingEntry>) => Promise<void>;
   deleteCuttingEntry: (id: string) => Promise<void>;
   updateCuttingReturn: (id: string, updates: Pick<CuttingEntry, 'date' | 'remarks' | 'pairs' | 'rate'>) => Promise<void>;
   deleteCuttingReturn: (id: string) => Promise<void>;
@@ -243,7 +298,8 @@ interface FactoryContextType {
   }) => Promise<void>;
   deleteFactoryStock: (id: string) => Promise<void>;
   updateStockDelivery: (id: string, updates: Partial<DeliveryHistoryEntry>) => Promise<void>;
-  deleteStockDelivery: (id: string) => Promise<void>;
+  deleteStockDelivery: (id: string, fallbackMeta?: { article?: string; quantity?: number; orderId?: string }) => Promise<void>;
+  clearAllStockOutData: () => Promise<void>;
   deleteStockInEntry: (id: string) => Promise<void>;
   updateArticleName: (oldName: string, newName: string) => Promise<void>;
   deleteWholeArticle: (articleName: string) => Promise<void>;
@@ -421,6 +477,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   );
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
+  const [selectedCompanyName, setSelectedCompanyName] = useState<string | null>(null);
 
   const [parties, setParties] = useState<Party[]>(() => {
     const local = loadLocal<Party[]>(STORAGE_KEYS.PARTIES, []);
@@ -435,9 +492,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [staff, setStaff] = useState<Staff[]>(() => loadLocal(STORAGE_KEYS.STAFF, []));
   const [products, setProducts] = useState<Product[]>(() => loadLocal(STORAGE_KEYS.PRODUCTS, []));
   const [orders, setOrders] = useState<CustomerOrder[]>(() => {
-    const local = loadLocal<CustomerOrder[]>(STORAGE_KEYS.ORDERS, []);
+    const deletedOrds = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []));
+    const local = loadLocal<CustomerOrder[]>(STORAGE_KEYS.ORDERS, []).filter(o => !deletedOrds.has(o.id));
     let list = [...local];
     initialOrders.forEach(io => {
+      if (deletedOrds.has(io.id)) return;
       const idx = list.findIndex(o => o.orderNo === io.orderNo || o.id === io.id);
       if (idx === -1) {
         list.push(io);
@@ -455,9 +514,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return list;
   });
   const [cuttings, setCuttings] = useState<Cutting[]>(() => {
-    const local = loadLocal<Cutting[]>(STORAGE_KEYS.CUTTINGS, []);
+    const deletedCuts = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, []));
+    const deletedOrds = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []));
+    const local = loadLocal<Cutting[]>(STORAGE_KEYS.CUTTINGS, []).filter(
+      c => !deletedCuts.has(c.id) && !deletedOrds.has(c.orderId)
+    );
     let list = [...local];
     initialCuttings.forEach(ic => {
+      if (deletedCuts.has(ic.id) || deletedOrds.has(ic.orderId)) return;
       if (!list.some(c => c.id === ic.id)) {
         list.push(ic);
       }
@@ -466,7 +530,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   });
   const [cutters, setCutters] = useState<Cutter[]>(() => {
     const local = loadLocal<Cutter[]>(STORAGE_KEYS.CUTTERS, []);
-    return local.filter(c => !['cutter-1', 'cutter-2', 'cutter-3', 'cutter-4', 'cutter-5', 'cutter-6', 'cutter-7'].includes(c.id));
+    return dedupeCuttersList(local);
   });
   const [cuttingTransactions, setCuttingTransactions] = useState<CuttingTransaction[]>(() => loadLocal(STORAGE_KEYS.CUTTING_TXS, []));
   const [cuttingEntries, setCuttingEntries] = useState<CuttingEntry[]>([]);
@@ -478,7 +542,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [stockLedger, setStockLedger] = useState<StockLedgerEntry[]>(() => loadLocal(STORAGE_KEYS.STOCK_LEDGER, []));
   const [stockManagement, setStockManagement] = useState<FactoryStockItem[]>([]);
   const [articleStock, setArticleStock] = useState<ArticleStockItem[]>([]);
-  const [deliveryHistory, setDeliveryHistory] = useState<DeliveryHistoryEntry[]>([]);
+  const [deliveryHistory, setDeliveryHistory] = useState<DeliveryHistoryEntry[]>(() => {
+    const deletedDels = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, []));
+    const deletedOrds = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []));
+    return loadLocal<DeliveryHistoryEntry[]>(STORAGE_KEYS.STOCK_OUT, []).filter(
+      d => !deletedDels.has(d.id) && !deletedOrds.has(d.orderId || '') && !deletedOrds.has(d.customerOrderId || '')
+    );
+  });
   const [articlesMaster, setArticlesMaster] = useState<FactoryArticleMaster[]>([]);
   const [articleCatalog, setArticleCatalog] = useState<FactoryArticleMaster[]>([]);
   const [legacyArticleMaster, setLegacyArticleMaster] = useState<FactoryArticleMaster[]>([]);
@@ -494,6 +564,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [deletedProductsList, setDeletedProductsList] = useState<DeletedProductItem[]>(() =>
     loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', [])
   );
+  const [deletedCuttingIdsList, setDeletedCuttingIdsList] = useState<string[]>(() =>
+    loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, [])
+  );
+  const [deletedOrderIdsList, setDeletedOrderIdsList] = useState<string[]>(() =>
+    loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, [])
+  );
+  const [deletedDeliveryIdsList, setDeletedDeliveryIdsList] = useState<string[]>(() =>
+    loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, [])
+  );
   const [orderCompanies, setOrderCompanies] = useState<OrderCompany[]>(() =>
     loadLocal<OrderCompany[]>(STORAGE_KEYS.ORDER_COMPANIES, [])
   );
@@ -505,6 +584,132 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
     return s;
   }, [deletedProductsList]);
+
+  const deletedProductNamesRef = useRef<Set<string>>(deletedProductNames);
+  deletedProductNamesRef.current = deletedProductNames;
+
+  const deletedCuttingIdSet = useMemo(() => new Set(deletedCuttingIdsList), [deletedCuttingIdsList]);
+  const deletedCuttingIdsRef = useRef<Set<string>>(deletedCuttingIdSet);
+  deletedCuttingIdsRef.current = deletedCuttingIdSet;
+
+  const deletedOrderIdSet = useMemo(() => new Set(deletedOrderIdsList), [deletedOrderIdsList]);
+  const deletedOrderIdsRef = useRef<Set<string>>(deletedOrderIdSet);
+  deletedOrderIdsRef.current = deletedOrderIdSet;
+
+  const deletedDeliveryIdSet = useMemo(() => new Set(deletedDeliveryIdsList), [deletedDeliveryIdsList]);
+  const deletedDeliveryIdsRef = useRef<Set<string>>(deletedDeliveryIdSet);
+  deletedDeliveryIdsRef.current = deletedDeliveryIdSet;
+
+  const snapshotReadyRef = useRef({
+    cuttingEntries: false,
+    cuttingTxs: false,
+    stockManagement: false,
+    articleStock: false
+  });
+  const [snapshotsReadyTick, setSnapshotsReadyTick] = useState(0);
+  const backfilledCuttingIdsRef = useRef<Set<string>>(new Set());
+  const isBackfillingCuttingStockRef = useRef(false);
+
+  const getCuttingSignature = (item: {
+    cutterId?: string;
+    date?: string;
+    article?: string;
+    articleTitle?: string;
+    size?: string;
+    sizeName?: string;
+    pairs?: number;
+    quantity?: number;
+    totalQty?: number;
+    qty?: number;
+    type?: string;
+    orderId?: string;
+    orderNo?: string;
+    customerName?: string;
+  }): string => {
+    const artKey = (item.articleTitle || item.article || '').trim().toLowerCase();
+    const sizeKey = (item.sizeName || item.size || '').trim().toLowerCase();
+    const cutterKey = (item.cutterId || '').trim();
+    const dateKey = (item.date || '').slice(0, 10);
+    const pairsKey = Math.abs(Number(item.pairs ?? item.totalQty ?? item.quantity ?? item.qty ?? 0));
+    const typeKey = item.type || 'RECEIVE';
+    const orderKey = (item.orderId || item.orderNo || (item.customerName || '').toLowerCase().trim());
+    return `${cutterKey}__${dateKey}__${artKey}__${sizeKey}__${pairsKey}__${typeKey}__${orderKey}`;
+  };
+
+  const unmarkDeletedArticle = async (articleName: string): Promise<void> => {
+    const norm = (articleName || '').trim().toLowerCase();
+    if (!norm) return;
+    if (deletedProductNamesRef.current.has(norm)) {
+      const next = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).filter(
+        d => (d.name || '').trim().toLowerCase() !== norm
+      );
+      saveLocal('gferp_deleted_products_v1', next);
+      setDeletedProductsList(next);
+      const nextSet = new Set(deletedProductNamesRef.current);
+      nextSet.delete(norm);
+      deletedProductNamesRef.current = nextSet;
+    }
+    if (db) {
+      await deleteDoc(doc(db, 'deleted_products', norm)).catch(() => {});
+    }
+  };
+
+  const markCuttingIdsDeleted = async (ids: Iterable<string>): Promise<void> => {
+    const idList = Array.from(new Set(Array.from(ids).map(i => (i || '').trim()).filter(Boolean)));
+    if (idList.length === 0) return;
+
+    const currentLocal = loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, []);
+    const mergedSet = new Set<string>([...currentLocal, ...deletedCuttingIdsRef.current, ...idList]);
+    const mergedArr = Array.from(mergedSet);
+    deletedCuttingIdsRef.current = mergedSet;
+    saveLocal(STORAGE_KEYS.DELETED_CUTTING_IDS, mergedArr);
+    setDeletedCuttingIdsList(mergedArr);
+
+    if (db) {
+      const now = new Date().toISOString();
+      await Promise.allSettled(
+        idList.map(delId => setDoc(doc(db!, 'deleted_cutting_ids', delId), { id: delId, deletedAt: now }, { merge: true }))
+      );
+    }
+  };
+
+  const markOrdersDeleted = async (ids: Iterable<string>): Promise<void> => {
+    const idList = Array.from(new Set(Array.from(ids).map(i => (i || '').trim()).filter(Boolean)));
+    if (idList.length === 0) return;
+
+    const currentLocal = loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []);
+    const mergedSet = new Set<string>([...currentLocal, ...deletedOrderIdsRef.current, ...idList]);
+    const mergedArr = Array.from(mergedSet);
+    deletedOrderIdsRef.current = mergedSet;
+    saveLocal(STORAGE_KEYS.DELETED_ORDER_IDS, mergedArr);
+    setDeletedOrderIdsList(mergedArr);
+
+    if (db) {
+      const now = new Date().toISOString();
+      await Promise.allSettled(
+        idList.map(delId => setDoc(doc(db!, 'deleted_order_ids', delId), { id: delId, deletedAt: now }, { merge: true }))
+      );
+    }
+  };
+
+  const markDeliveriesDeleted = async (ids: Iterable<string>): Promise<void> => {
+    const idList = Array.from(new Set(Array.from(ids).map(i => (i || '').trim()).filter(Boolean)));
+    if (idList.length === 0) return;
+
+    const currentLocal = loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, []);
+    const mergedSet = new Set<string>([...currentLocal, ...deletedDeliveryIdsRef.current, ...idList]);
+    const mergedArr = Array.from(mergedSet);
+    deletedDeliveryIdsRef.current = mergedSet;
+    saveLocal(STORAGE_KEYS.DELETED_DELIVERY_IDS, mergedArr);
+    setDeletedDeliveryIdsList(mergedArr);
+
+    if (db) {
+      const now = new Date().toISOString();
+      await Promise.allSettled(
+        idList.map(delId => setDoc(doc(db!, 'deleted_delivery_ids', delId), { id: delId, deletedAt: now }, { merge: true }))
+      );
+    }
+  };
 
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -538,7 +743,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       // 1. customer_orders: Live sync across Mobile & Laptop
       unsubs.push(onSnapshot(collection(db, 'customer_orders'), snap => {
-        let list = snap.docs.map(d => {
+        let list = snap.docs
+          .filter(d => !deletedOrderIdsRef.current.has(d.id) && !d.data()?.isDeleted)
+          .map(d => {
           const data = d.data();
           const items = (data.items || []).map((itm: any, idx: number) => {
             const sizes = itm.sizes || {
@@ -635,8 +842,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } as CustomerOrder;
         });
 
-        // Ensure both ORD-003 and ORD-004 exist
+        // Ensure initialOrders exist only if not explicitly deleted by user
         initialOrders.forEach(initOrder => {
+          if (deletedOrderIdsRef.current.has(initOrder.id)) return;
           if (!list.some(o => o.orderNo === initOrder.orderNo || o.id === initOrder.id)) {
             list.push(initOrder);
           }
@@ -687,13 +895,51 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         saveLocal('gferp_deleted_products_v1', merged);
       }, err => console.error('Firestore onSnapshot error (deleted_products):', err)));
 
+      // 3c. deleted_cutting_ids blocklist (prevents deleted rows from resurrecting after Ctrl+R or snapshot races)
+      unsubs.push(onSnapshot(collection(db, 'deleted_cutting_ids'), snap => {
+        const localIds = loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, []);
+        const merged = new Set<string>([...localIds, ...deletedCuttingIdsRef.current]);
+        snap.docs.forEach(d => merged.add(d.id));
+        const mergedArr = Array.from(merged);
+        deletedCuttingIdsRef.current = merged;
+        saveLocal(STORAGE_KEYS.DELETED_CUTTING_IDS, mergedArr);
+        setDeletedCuttingIdsList(mergedArr);
+      }, err => console.error('Firestore onSnapshot error (deleted_cutting_ids):', err)));
+
+      // 3d. deleted_order_ids & deleted_delivery_ids blocklists
+      unsubs.push(onSnapshot(collection(db, 'deleted_order_ids'), snap => {
+        const localIds = loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []);
+        const merged = new Set<string>([...localIds, ...deletedOrderIdsRef.current]);
+        snap.docs.forEach(d => merged.add(d.id));
+        const mergedArr = Array.from(merged);
+        deletedOrderIdsRef.current = merged;
+        saveLocal(STORAGE_KEYS.DELETED_ORDER_IDS, mergedArr);
+        setDeletedOrderIdsList(mergedArr);
+      }, err => console.error('Firestore onSnapshot error (deleted_order_ids):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'deleted_delivery_ids'), snap => {
+        const localIds = loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, []);
+        const merged = new Set<string>([...localIds, ...deletedDeliveryIdsRef.current]);
+        snap.docs.forEach(d => merged.add(d.id));
+        const mergedArr = Array.from(merged);
+        deletedDeliveryIdsRef.current = merged;
+        saveLocal(STORAGE_KEYS.DELETED_DELIVERY_IDS, mergedArr);
+        setDeletedDeliveryIdsList(mergedArr);
+      }, err => console.error('Firestore onSnapshot error (deleted_delivery_ids):', err)));
+
       // 4. cuttings
       unsubs.push(onSnapshot(collection(db, 'cuttings'), snap => {
-        let list = snap.docs.map(d => ({ ...d.data(), id: d.id } as Cutting));
+        let list = snap.docs
+          .filter(d => !deletedCuttingIdsRef.current.has(d.id) && !deletedOrderIdsRef.current.has(String(d.data()?.orderId || '')) && !d.data()?.isDeleted)
+          .map(d => ({ ...d.data(), id: d.id } as Cutting));
         if (list.length === 0) {
-          list = [...initialCuttings];
-        } else if (!list.some(c => c.orderNo === 'ORD-003')) {
-          list = [...list, ...initialCuttings];
+          list = initialCuttings.filter(ic => !deletedCuttingIdsRef.current.has(ic.id) && !deletedOrderIdsRef.current.has(ic.orderId));
+        } else if (!list.some(c => c.orderNo === 'ORD-003') && !deletedOrderIdsRef.current.has('ord-003-bestway')) {
+          initialCuttings.forEach(ic => {
+            if (!deletedCuttingIdsRef.current.has(ic.id) && !deletedOrderIdsRef.current.has(ic.orderId) && !list.some(existing => existing.id === ic.id)) {
+              list.push(ic);
+            }
+          });
         }
         setCuttings(list);
         saveLocal(STORAGE_KEYS.CUTTINGS, list);
@@ -703,15 +949,22 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       unsubs.push(onSnapshot(collection(db, 'cutters'), snap => {
         const list = snap.docs.map(d => {
           const data = d.data();
+          const safeName = String(data.name || data.khataName || d.id || 'Cutting Master').trim() || 'Cutting Master';
           return {
             ...data,
             id: d.id,
+            name: safeName,
+            khataName: String(data.khataName || `${safeName} Ledger`).trim(),
+            cutterType: data.cutterType || 'cutting_man',
             isActive: data.isActive !== false,
             status: data.status || (data.isActive === false ? 'deactive' : 'active')
           } as Cutter;
         });
-        const cleanList = list.filter(c => !['cutter-1', 'cutter-2', 'cutter-3', 'cutter-4', 'cutter-5', 'cutter-6', 'cutter-7'].includes(c.id));
-        if (!cleanList.some(c => c.name === 'Tariq Mehmood')) {
+        const cleanList = dedupeCuttersList(list);
+        const hasTariq = cleanList.some(
+          c => c.id === 'cutter-tariq' || (c.name || '').trim().toLowerCase() === 'tariq mehmood'
+        );
+        if (!hasTariq) {
           cleanList.push({
             id: 'cutter-tariq',
             name: 'Tariq Mehmood',
@@ -764,23 +1017,51 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // 6. cutting_transactions
       unsubs.push(onSnapshot(collection(db, 'cutting_transactions'), snap => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as CuttingTransaction));
+        const list = snap.docs
+          .filter(d => !deletedCuttingIdsRef.current.has(d.id) && !deletedOrderIdsRef.current.has(String(d.data()?.orderId || '')) && !d.data()?.isDeleted)
+          .map(d => ({ ...d.data(), id: d.id } as CuttingTransaction));
         list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setCuttingTransactions(list);
         saveLocal(STORAGE_KEYS.CUTTING_TXS, list);
+        if (!snapshotReadyRef.current.cuttingTxs) {
+          snapshotReadyRef.current.cuttingTxs = true;
+          setSnapshotsReadyTick(t => t + 1);
+        }
       }, err => console.error('Firestore onSnapshot error (cutting_transactions):', err)));
 
-      // 7. cuttingEntries: editable notebook ledger
+      // 7. cuttingEntries: editable notebook ledger - Single Source of Truth
       unsubs.push(onSnapshot(collection(db, 'cuttingEntries'), snap => {
-        const list = snap.docs.map(d => {
+        const rawList: CuttingEntry[] = [];
+        snap.docs.forEach(d => {
           const data = d.data();
+          if (data.isDeleted || deletedCuttingIdsRef.current.has(d.id) || deletedOrderIdsRef.current.has(String(data.orderId || ''))) return;
           const pairs = Number(data.pairs) || Number(data.quantity) || Number(data.totalQty) || Number(data.qty) || 0;
+          if (data.type !== 'RETURN' && pairs <= 0) return;
           const rate = Number(data.rate) || Number(data.boxRate) || 0;
           const totalBalance = Number(data.totalBalance) || Number(data.lotTotal) || pairs * rate;
-          return {
+
+          let orderId = data.orderId || '';
+          let orderNo = data.orderNo || '';
+          let customerName = data.customerName || data.customerOrder || '';
+
+          // Auto-link legacy entries without orderNo if matching customer order exists
+          if (!orderNo) {
+            const custMatch = orders.find(o => 
+              customerName && o.customerName && 
+              o.customerName.trim().toLowerCase() === customerName.trim().toLowerCase()
+            );
+            if (custMatch) {
+              orderId = orderId || custMatch.id;
+              orderNo = custMatch.orderNo;
+            }
+          }
+
+          rawList.push({
             ...data,
             id: d.id,
-            customerName: data.customerName || data.customerOrder || 'Direct',
+            customerName: customerName || 'Direct',
+            orderId,
+            orderNo,
             article: data.article || data.articleTitle || '',
             size: data.size || data.sizeName || '',
             pairs,
@@ -792,16 +1073,43 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             totalBalance,
             average: data.average || '',
             runningBalance: Number(data.runningBalance) || 0,
+            isExtraCutting: Boolean(data.isExtraCutting),
+            extraCuttingQty: data.extraCuttingQty !== undefined ? Number(data.extraCuttingQty) : (data.isExtraCutting ? -Math.abs(pairs) : 0),
             createdAt: toComparableString(data.createdAt) || new Date().toISOString()
-          } as CuttingEntry;
+          } as CuttingEntry);
         });
-        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
-        setCuttingEntries(list);
+
+        // Deduplicate entries created close together with identical parameters
+        const seenSignatures = new Set<string>();
+        const dedupedList: CuttingEntry[] = [];
+        rawList.forEach(entry => {
+          const signature = getCuttingSignature(entry);
+          if (seenSignatures.has(signature)) return;
+          seenSignatures.add(signature);
+          dedupedList.push(entry);
+        });
+
+        dedupedList.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
+        setCuttingEntries(dedupedList);
+        if (!snapshotReadyRef.current.cuttingEntries) {
+          snapshotReadyRef.current.cuttingEntries = true;
+          setSnapshotsReadyTick(t => t + 1);
+        }
       }, err => console.error('Firestore onSnapshot error (cuttingEntries):', err)));
 
       // 8. order_dispatch_history
       unsubs.push(onSnapshot(collection(db, 'order_dispatch_history'), snap => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as OrderDispatchHistory));
+        const list = snap.docs
+          .filter(d => {
+            const data = d.data();
+            return (
+              !deletedCuttingIdsRef.current.has(d.id) &&
+              !deletedCuttingIdsRef.current.has(String(data?.cuttingId || '')) &&
+              !deletedOrderIdsRef.current.has(String(data?.orderId || '')) &&
+              !deletedDeliveryIdsRef.current.has(d.id)
+            );
+          })
+          .map(d => ({ ...d.data(), id: d.id } as OrderDispatchHistory));
         list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setOrderDispatchHistory(list);
         saveLocal(STORAGE_KEYS.ORDER_HISTORY, list);
@@ -809,7 +1117,17 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // 9. stock_ledger
       unsubs.push(onSnapshot(collection(db, 'stock_ledger'), snap => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StockLedgerEntry));
+        const list = snap.docs
+          .filter(d => {
+            const data = d.data();
+            const refId = String(data?.referenceId || '');
+            const ordId = String(data?.orderId || '');
+            return !deletedCuttingIdsRef.current.has(d.id) &&
+              !deletedCuttingIdsRef.current.has(d.id.replace(/^stk-/, '')) &&
+              (!refId || (!deletedCuttingIdsRef.current.has(refId) && !deletedDeliveryIdsRef.current.has(refId))) &&
+              (!ordId || !deletedOrderIdsRef.current.has(ordId));
+          })
+          .map(d => ({ ...d.data(), id: d.id } as StockLedgerEntry));
         setStockLedger(list);
         saveLocal(STORAGE_KEYS.STOCK_LEDGER, list);
       }, err => console.error('Firestore onSnapshot error (stock_ledger):', err)));
@@ -820,6 +1138,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const data = d.data();
           const art = String(data.article || data.articleName || '').trim().toLowerCase();
           if (currentDeleted.includes(art)) return [];
+          const receiveIds = Array.isArray(data.receiveIds)
+            ? data.receiveIds.filter((rId: string) => !deletedCuttingIdsRef.current.has(rId))
+            : [];
+          const deliveryIds = Array.isArray(data.deliveryIds)
+            ? data.deliveryIds.filter((dId: string) => !deletedDeliveryIdsRef.current.has(dId))
+            : [];
           return [{
             ...data,
             id: d.id,
@@ -832,12 +1156,16 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             totalDelivered: Number(data.totalDelivered) || 0,
             balance: Number(data.balance) || 0,
             rate: Number(data.rate) || 0,
-            receiveIds: Array.isArray(data.receiveIds) ? data.receiveIds : [],
-            deliveryIds: Array.isArray(data.deliveryIds) ? data.deliveryIds : []
+            receiveIds,
+            deliveryIds
           } as FactoryStockItem];
         });
         list.sort((a, b) => a.article.localeCompare(b.article) || a.size.localeCompare(b.size));
         setStockManagement(list);
+        if (!snapshotReadyRef.current.stockManagement) {
+          snapshotReadyRef.current.stockManagement = true;
+          setSnapshotsReadyTick(t => t + 1);
+        }
       }, err => console.error('Firestore onSnapshot error (stock_management):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'article_stock'), snap => {
@@ -846,6 +1174,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const data = d.data();
           const art = String(data.articleName || '').trim().toLowerCase();
           if (currentDeleted.includes(art)) return [];
+          const cuttingHistory = (Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [])
+            .filter((h: any) => !deletedCuttingIdsRef.current.has(h?.receiveId || '') && !deletedOrderIdsRef.current.has(h?.orderId || ''));
+          const deliveryHistFiltered = (Array.isArray(data.deliveryHistory) ? data.deliveryHistory : [])
+            .filter((h: any) => !deletedDeliveryIdsRef.current.has(h?.deliveryId || '') && !deletedOrderIdsRef.current.has(h?.orderId || ''));
           return [{
             ...data,
             id: d.id,
@@ -853,18 +1185,25 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             totalReceived: Number(data.totalReceived) || 0,
             totalAvailable: Number(data.totalAvailable) || 0,
             totalDelivered: Number(data.totalDelivered) || 0,
-            cuttingHistory: Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [],
-            deliveryHistory: Array.isArray(data.deliveryHistory) ? data.deliveryHistory : []
+            cuttingHistory,
+            deliveryHistory: deliveryHistFiltered
           } as ArticleStockItem];
         });
         list.sort((a, b) => a.articleName.localeCompare(b.articleName));
         setArticleStock(list);
+        if (!snapshotReadyRef.current.articleStock) {
+          snapshotReadyRef.current.articleStock = true;
+          setSnapshotsReadyTick(t => t + 1);
+        }
       }, err => console.error('Firestore onSnapshot error (article_stock):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stock_delivery_history'), snap => {
         const list = snap.docs
           .map(d => ({ ...d.data(), id: d.id } as DeliveryHistoryEntry))
           .filter(d => {
+            if (deletedDeliveryIdsRef.current.has(d.id)) return false;
+            if (d.orderId && deletedOrderIdsRef.current.has(d.orderId)) return false;
+            if (d.customerOrderId && deletedOrderIdsRef.current.has(d.customerOrderId)) return false;
             // Strip corrupted combined-string articles like "mg, pride"
             if (d.article && d.article.includes(',')) return false;
             // Pride was never delivered for ORD-004 / traders
@@ -876,6 +1215,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           });
         list.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.createdAt, a.createdAt));
         setDeliveryHistory(list);
+        saveLocal(STORAGE_KEYS.STOCK_OUT, list);
       }, err => console.error('Firestore onSnapshot error (stock_delivery_history):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'articles_master'), snap => {
@@ -954,6 +1294,181 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       unsubs.forEach(unsub => unsub());
     };
   }, []);
+
+  // Idempotent one-time backfill: ensure any existing Cutting RECEIVE entry that shows in
+  // Order Detail / Cutting History but is missing in Stock Management is synced cleanly once.
+  useEffect(() => {
+    if (!isFirebaseOnline || !db) return;
+    const ready = snapshotReadyRef.current;
+    if (!ready.cuttingEntries || !ready.cuttingTxs || !ready.stockManagement || !ready.articleStock) return;
+    if (isBackfillingCuttingStockRef.current) return;
+
+    const candidatesMap = new Map<string, {
+      id: string;
+      date: string;
+      article: string;
+      size: string;
+      qty: number;
+      cutterName: string;
+      customerName: string;
+      orderId: string;
+      orderNo: string;
+    }>();
+
+    cuttingEntries.forEach(e => {
+      if (e.isDeleted || deletedCuttingIdsRef.current.has(e.id)) return;
+      if (e.type !== 'RECEIVE') return;
+      const qty = Math.abs(Number(e.pairs ?? e.totalQty ?? 0));
+      const article = (e.articleTitle || e.article || '').trim();
+      if (!article || qty <= 0) return;
+      if (deletedProductNamesRef.current.has(article.toLowerCase())) return;
+      const linkedOrder = e.orderId ? orders.find(o => o.id === e.orderId) : undefined;
+      candidatesMap.set(e.id, {
+        id: e.id,
+        date: e.date,
+        article,
+        size: (e.sizeName || e.size || 'Standard').trim() || 'Standard',
+        qty,
+        cutterName: e.cutterName || 'Cutting Master',
+        customerName: e.customerName?.trim() || linkedOrder?.customerName || 'Stock - No Order',
+        orderId: e.orderId || '',
+        orderNo: e.orderNo?.trim() || linkedOrder?.orderNo || ''
+      });
+    });
+
+    cuttingTransactions.forEach(tx => {
+      if (tx.isDeleted || deletedCuttingIdsRef.current.has(tx.id) || candidatesMap.has(tx.id)) return;
+      if (tx.type !== 'RECEIVE') return;
+      const qty = Math.abs(Number(tx.qty ?? tx.totalQty ?? 0));
+      const article = (tx.articleTitle || tx.article || '').trim();
+      if (!article || qty <= 0) return;
+      if (deletedProductNamesRef.current.has(article.toLowerCase())) return;
+      const linkedOrder = tx.orderId ? orders.find(o => o.id === tx.orderId) : undefined;
+      candidatesMap.set(tx.id, {
+        id: tx.id,
+        date: tx.date,
+        article,
+        size: (tx.sizeName || tx.size || 'Standard').trim() || 'Standard',
+        qty,
+        cutterName: tx.cutterName || 'Cutting Master',
+        customerName: tx.customerName?.trim() || linkedOrder?.customerName || 'Stock - No Order',
+        orderId: tx.orderId || '',
+        orderNo: tx.orderNo?.trim() || linkedOrder?.orderNo || ''
+      });
+    });
+
+    const knownStockMgmtIds = new Set<string>();
+    stockManagement.forEach(s => {
+      (s.receiveIds || []).forEach(rId => { if (rId) knownStockMgmtIds.add(rId); });
+    });
+
+    const knownArticleHistoryIds = new Set<string>();
+    articleStock.forEach(a => {
+      (a.cuttingHistory || []).forEach(h => { if (h.receiveId) knownArticleHistoryIds.add(h.receiveId); });
+    });
+
+    const toBackfill = Array.from(candidatesMap.values()).filter(c =>
+      !backfilledCuttingIdsRef.current.has(c.id) &&
+      (!knownStockMgmtIds.has(c.id) || !knownArticleHistoryIds.has(c.id))
+    );
+
+    if (toBackfill.length === 0) return;
+
+    isBackfillingCuttingStockRef.current = true;
+    (async () => {
+      try {
+        const now = new Date().toISOString();
+        for (const item of toBackfill) {
+          backfilledCuttingIdsRef.current.add(item.id);
+          if (deletedCuttingIdsRef.current.has(item.id)) continue;
+
+          const articleId = normalizeStockDocumentId(item.article);
+          const stockItemId = `${articleId}__${normalizeStockDocumentId(item.size)}`;
+          const stockRef = doc(db!, 'stock_management', stockItemId);
+          const articleRef = doc(db!, 'article_stock', articleId);
+          const stkLedgerId = `stk-${item.id}`;
+          const stkLedgerRef = doc(db!, 'stock_ledger', stkLedgerId);
+
+          const [stockSnap, articleSnap, stkLedgerSnap] = await Promise.all([
+            getDoc(stockRef),
+            getDoc(articleRef),
+            getDoc(stkLedgerRef)
+          ]);
+
+          const existingReceiveIds: string[] = stockSnap.exists() && Array.isArray(stockSnap.data().receiveIds)
+            ? stockSnap.data().receiveIds
+            : [];
+          const existingCuttingHistory: any[] = articleSnap.exists() && Array.isArray(articleSnap.data().cuttingHistory)
+            ? articleSnap.data().cuttingHistory
+            : [];
+
+          const batch = writeBatch(db!);
+          let hasWrites = false;
+
+          if (!existingReceiveIds.includes(item.id)) {
+            hasWrites = true;
+            batch.set(stockRef, {
+              article: item.article,
+              articleName: item.article,
+              size: item.size,
+              qty: increment(item.qty),
+              totalStock: increment(item.qty),
+              totalCuttingReceived: increment(item.qty),
+              balance: increment(item.qty),
+              rate: stockSnap.exists() ? (Number(stockSnap.data().rate) || 0) : 0,
+              receiveIds: arrayUnion(item.id),
+              updatedAt: now
+            }, { merge: true });
+          }
+
+          if (!existingCuttingHistory.some((h: any) => h?.receiveId === item.id)) {
+            hasWrites = true;
+            batch.set(articleRef, {
+              articleName: item.article,
+              totalReceived: increment(item.qty),
+              totalAvailable: increment(item.qty),
+              cuttingHistory: arrayUnion({
+                date: item.date,
+                pairs: item.qty,
+                receiveId: item.id,
+                source: item.cutterName,
+                cutterName: item.cutterName,
+                customerName: item.customerName || 'Stock - No Order',
+                orderNo: item.orderNo || '',
+                orderId: item.orderId || '',
+                size: item.size
+              })
+            }, { merge: true });
+          }
+
+          if (!stkLedgerSnap.exists()) {
+            hasWrites = true;
+            batch.set(stkLedgerRef, {
+              id: stkLedgerId,
+              productId: 'prod-' + item.article.toLowerCase().replace(/\s+/g, '-'),
+              productName: item.article,
+              orderId: item.orderId || '',
+              orderNo: item.orderNo || '',
+              type: 'in',
+              qty: item.qty,
+              date: item.date,
+              referenceId: item.id,
+              notes: `Cutting received from ${item.cutterName}`,
+              createdAt: now
+            });
+          }
+
+          if (hasWrites) {
+            await batch.commit();
+          }
+        }
+      } catch (err) {
+        console.warn('Cutting-to-Stock backfill notice:', err);
+      } finally {
+        isBackfillingCuttingStockRef.current = false;
+      }
+    })();
+  }, [snapshotsReadyTick, cuttingEntries, cuttingTransactions, stockManagement, articleStock, orders]);
 
   // --- Recalculate Product Stock from Stock Ledger (sum(in) - sum(out)) ---
   const recalculateStockForProduct = (prodId: string, currentLedger: StockLedgerEntry[]): number => {
@@ -1406,19 +1921,372 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const deleteCustomerOrder = async (orderId: string): Promise<void> => {
+    const targetOrder = orders.find(o => o.id === orderId);
+    const targetOrderNo = (targetOrder?.orderNo || '').trim();
+
+    const matchesOrder = (record: any): boolean => {
+      if (!record) return false;
+      if (record.orderId === orderId || record.customerOrderId === orderId) return true;
+      if (targetOrderNo && record.orderNo && String(record.orderNo).trim() === targetOrderNo) return true;
+      return false;
+    };
+
+    // Persist blocklist so seed orders or offline snapshots never resurrect this order
+    await markOrdersDeleted([orderId]);
+
+    const cuttingIdsToDelete = new Set<string>();
+    const deliveryIdsToDelete = new Set<string>();
+    const dispatchHistoryIdsToDelete = new Set<string>();
+    const stitchingOrderIdsToDelete = new Set<string>();
+    const stitchingHistoryIdsToDelete = new Set<string>();
+    const khataIdsToDelete = new Set<string>();
+    const invoiceIdsToDelete = new Set<string>();
+    const stockLedgerIdsToDelete = new Set<string>();
+    const legacyCuttingIdsToDelete = new Set<string>();
+
+    // Gather matching IDs from local state first
+    cuttingEntries.filter(matchesOrder).forEach(e => cuttingIdsToDelete.add(e.id));
+    cuttingTransactions.filter(matchesOrder).forEach(t => cuttingIdsToDelete.add(t.id));
+    cuttings.filter(matchesOrder).forEach(c => legacyCuttingIdsToDelete.add(c.id));
+    deliveryHistory.filter(matchesOrder).forEach(d => {
+      deliveryIdsToDelete.add(d.id);
+      if (d.dispatchHistoryId) dispatchHistoryIdsToDelete.add(d.dispatchHistoryId);
+    });
+    orderDispatchHistory.filter(matchesOrder).forEach(h => dispatchHistoryIdsToDelete.add(h.id));
+    stitchingOrders.filter(matchesOrder).forEach(so => stitchingOrderIdsToDelete.add(so.id));
+    stitchingHistory
+      .filter(h => matchesOrder(h) || (h.stitchingOrderId && stitchingOrderIdsToDelete.has(h.stitchingOrderId)))
+      .forEach(h => stitchingHistoryIdsToDelete.add(h.id));
+    stitcherKhataTransactions
+      .filter(k => matchesOrder(k) || (k.stitchingOrderId && stitchingOrderIdsToDelete.has(k.stitchingOrderId)))
+      .forEach(k => khataIdsToDelete.add(k.id));
+    invoices.filter(matchesOrder).forEach(inv => invoiceIdsToDelete.add(inv.id));
+
     if (db) {
       try {
-        await deleteDoc(doc(db, 'customer_orders', orderId));
+        const [
+          entriesSnap,
+          txSnap,
+          cuttingsSnap,
+          deliveriesSnap,
+          dispatchSnap,
+          stitchOrdersSnap,
+          stitchHistorySnap,
+          khataSnap,
+          stockLedgerSnap,
+          invoicesSnap,
+          articleStockSnap,
+          stockMgmtSnap,
+          orderHistSubSnap
+        ] = await Promise.all([
+          getDocs(collection(db, 'cuttingEntries')),
+          getDocs(collection(db, 'cutting_transactions')),
+          getDocs(collection(db, 'cuttings')),
+          getDocs(collection(db, 'stock_delivery_history')),
+          getDocs(collection(db, 'order_dispatch_history')),
+          getDocs(collection(db, 'stitching_orders')),
+          getDocs(collection(db, 'stitching_history')),
+          getDocs(collection(db, 'stitcher_khata_transactions')),
+          getDocs(collection(db, 'stock_ledger')),
+          getDocs(collection(db, 'sales_invoices')),
+          getDocs(collection(db, 'article_stock')),
+          getDocs(collection(db, 'stock_management')),
+          getDocs(collection(db, 'customer_orders', orderId, 'order_history'))
+        ]);
+
+        entriesSnap.docs.forEach(d => { if (matchesOrder(d.data())) cuttingIdsToDelete.add(d.id); });
+        txSnap.docs.forEach(d => { if (matchesOrder(d.data())) cuttingIdsToDelete.add(d.id); });
+        cuttingsSnap.docs.forEach(d => { if (matchesOrder(d.data())) legacyCuttingIdsToDelete.add(d.id); });
+        deliveriesSnap.docs.forEach(d => {
+          const data = d.data();
+          if (matchesOrder(data)) {
+            deliveryIdsToDelete.add(d.id);
+            if (data.dispatchHistoryId) dispatchHistoryIdsToDelete.add(String(data.dispatchHistoryId));
+          }
+        });
+        dispatchSnap.docs.forEach(d => {
+          const data = d.data();
+          if (matchesOrder(data)) {
+            dispatchHistoryIdsToDelete.add(d.id);
+            if (data.actionType === 'dispatched_to_customer') deliveryIdsToDelete.add(d.id);
+          }
+        });
+        stitchOrdersSnap.docs.forEach(d => { if (matchesOrder(d.data())) stitchingOrderIdsToDelete.add(d.id); });
+        stitchHistorySnap.docs.forEach(d => {
+          const data = d.data();
+          if (matchesOrder(data) || (data.stitchingOrderId && stitchingOrderIdsToDelete.has(String(data.stitchingOrderId)))) {
+            stitchingHistoryIdsToDelete.add(d.id);
+          }
+        });
+        khataSnap.docs.forEach(d => {
+          const data = d.data();
+          if (matchesOrder(data) || (data.stitchingOrderId && stitchingOrderIdsToDelete.has(String(data.stitchingOrderId)))) {
+            khataIdsToDelete.add(d.id);
+          }
+        });
+        invoicesSnap.docs.forEach(d => { if (matchesOrder(d.data())) invoiceIdsToDelete.add(d.id); });
+        stockLedgerSnap.docs.forEach(d => {
+          const data = d.data();
+          const refId = String(data.referenceId || '');
+          if (
+            matchesOrder(data) ||
+            (refId && (cuttingIdsToDelete.has(refId) || deliveryIdsToDelete.has(refId) || invoiceIdsToDelete.has(refId))) ||
+            cuttingIdsToDelete.has(d.id.replace(/^stk-/, ''))
+          ) {
+            stockLedgerIdsToDelete.add(d.id);
+          }
+        });
+
+        await Promise.all([
+          markCuttingIdsDeleted([...cuttingIdsToDelete, ...legacyCuttingIdsToDelete]),
+          markDeliveriesDeleted([...deliveryIdsToDelete])
+        ]);
+
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+
+        cuttingIdsToDelete.forEach(cId => {
+          ops.push(b => b.delete(doc(db!, 'cuttingEntries', cId)));
+          ops.push(b => b.delete(doc(db!, 'cutting_transactions', cId)));
+        });
+        legacyCuttingIdsToDelete.forEach(cId => {
+          ops.push(b => b.delete(doc(db!, 'cuttings', cId)));
+        });
+        deliveryIdsToDelete.forEach(delId => {
+          ops.push(b => b.delete(doc(db!, 'stock_delivery_history', delId)));
+        });
+        dispatchHistoryIdsToDelete.forEach(dhId => {
+          ops.push(b => b.delete(doc(db!, 'order_dispatch_history', dhId)));
+        });
+        stitchingOrderIdsToDelete.forEach(soId => {
+          ops.push(b => b.delete(doc(db!, 'stitching_orders', soId)));
+        });
+        stitchingHistoryIdsToDelete.forEach(shId => {
+          ops.push(b => b.delete(doc(db!, 'stitching_history', shId)));
+        });
+        khataIdsToDelete.forEach(kId => {
+          ops.push(b => b.delete(doc(db!, 'stitcher_khata_transactions', kId)));
+        });
+        invoiceIdsToDelete.forEach(invId => {
+          ops.push(b => b.delete(doc(db!, 'sales_invoices', invId)));
+        });
+        stockLedgerIdsToDelete.forEach(slId => {
+          ops.push(b => b.delete(doc(db!, 'stock_ledger', slId)));
+        });
+        orderHistSubSnap.docs.forEach(subDoc => {
+          ops.push(b => b.delete(doc(db!, 'customer_orders', orderId, 'order_history', subDoc.id)));
+        });
+
+        // Clean matching entries from article_stock
+        articleStockSnap.docs.forEach(aDoc => {
+          const data = aDoc.data();
+          const cutHist: any[] = Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [];
+          const delHist: any[] = Array.isArray(data.deliveryHistory) ? data.deliveryHistory : [];
+
+          const nextCutHist = cutHist.filter(h => !matchesOrder(h) && !cuttingIdsToDelete.has(String(h?.receiveId || '')));
+          const nextDelHist = delHist.filter(h => !matchesOrder(h) && !deliveryIdsToDelete.has(String(h?.deliveryId || '')));
+
+          if (nextCutHist.length !== cutHist.length || nextDelHist.length !== delHist.length) {
+            const removedCutPairs = cutHist
+              .filter(h => matchesOrder(h) || cuttingIdsToDelete.has(String(h?.receiveId || '')))
+              .reduce((s, h) => s + (Number(h?.pairs) || 0), 0);
+            const removedDelPairs = delHist
+              .filter(h => matchesOrder(h) || deliveryIdsToDelete.has(String(h?.deliveryId || '')))
+              .reduce((s, h) => s + (Number(h?.pairs) || 0), 0);
+
+            const nextReceived = Math.max(0, (Number(data.totalReceived) || 0) - removedCutPairs);
+            const nextDelivered = Math.max(0, (Number(data.totalDelivered) || 0) - removedDelPairs);
+            const nextAvailable = nextReceived - nextDelivered;
+
+            ops.push(b => b.update(doc(db!, 'article_stock', aDoc.id), {
+              cuttingHistory: nextCutHist,
+              deliveryHistory: nextDelHist,
+              totalReceived: nextReceived,
+              totalDelivered: nextDelivered,
+              totalAvailable: nextAvailable,
+              lastUpdated: new Date().toISOString()
+            }));
+          }
+        });
+
+        // Clean matching cutting receiveIds and deliveryIds from stock_management
+        stockMgmtSnap.docs.forEach(sDoc => {
+          const data = sDoc.data();
+          const recIds: string[] = Array.isArray(data.receiveIds) ? data.receiveIds : [];
+          const delIds: string[] = Array.isArray(data.deliveryIds) ? data.deliveryIds : [];
+
+          const removedRecIds = recIds.filter(rId => cuttingIdsToDelete.has(rId));
+          const removedDelIds = delIds.filter(dId => deliveryIdsToDelete.has(dId));
+
+          if (removedRecIds.length > 0 || removedDelIds.length > 0) {
+            const removedRecQty = removedRecIds.reduce((sum, rId) => {
+              const eDoc = entriesSnap.docs.find(d => d.id === rId);
+              const tDoc = txSnap.docs.find(d => d.id === rId);
+              const raw = eDoc?.data() || tDoc?.data();
+              return sum + Math.abs(Number(raw?.pairs ?? raw?.totalQty ?? raw?.qty ?? 0));
+            }, 0);
+            const removedDelQty = removedDelIds.reduce((sum, dId) => {
+              const dDoc = deliveriesSnap.docs.find(d => d.id === dId);
+              const localD = deliveryHistory.find(d => d.id === dId);
+              const raw = dDoc?.data() || localD;
+              return sum + Math.abs(Number(raw?.quantity ?? 0));
+            }, 0);
+
+            const nextRecIds = recIds.filter(rId => !cuttingIdsToDelete.has(rId));
+            const nextDelIds = delIds.filter(dId => !deliveryIdsToDelete.has(dId));
+            const nextCuttingReceived = Math.max(0, (Number(data.totalCuttingReceived) || 0) - removedRecQty);
+            const nextDelivered = Math.max(0, (Number(data.totalDelivered) || 0) - removedDelQty);
+            const nextBalance = nextCuttingReceived - nextDelivered;
+
+            if (nextRecIds.length === 0 && nextDelIds.length === 0 && nextCuttingReceived === 0 && nextDelivered === 0) {
+              ops.push(b => b.delete(doc(db!, 'stock_management', sDoc.id)));
+            } else {
+              ops.push(b => b.update(doc(db!, 'stock_management', sDoc.id), {
+                receiveIds: nextRecIds,
+                deliveryIds: nextDelIds,
+                totalCuttingReceived: nextCuttingReceived,
+                totalStock: nextCuttingReceived,
+                qty: nextCuttingReceived,
+                totalDelivered: nextDelivered,
+                balance: nextBalance,
+                updatedAt: new Date().toISOString()
+              }));
+            }
+          }
+        });
+
+        // Recalculate affected cutters' balances from remaining cutting entries
+        const remainingEntriesForCutters = entriesSnap.docs
+          .filter(d => !cuttingIdsToDelete.has(d.id) && !d.data()?.isDeleted)
+          .map(d => d.data());
+        const affectedCutterIds = new Set<string>();
+        entriesSnap.docs.forEach(d => {
+          if (cuttingIdsToDelete.has(d.id) && d.data()?.cutterId) {
+            affectedCutterIds.add(String(d.data().cutterId));
+          }
+        });
+        txSnap.docs.forEach(d => {
+          if (cuttingIdsToDelete.has(d.id) && d.data()?.cutterId) {
+            affectedCutterIds.add(String(d.data().cutterId));
+          }
+        });
+        affectedCutterIds.forEach(cutterId => {
+          const cutterRows = remainingEntriesForCutters.filter(e => e.cutterId === cutterId);
+          const totalGiven = cutterRows
+            .filter(e => e.type === 'GIVE')
+            .reduce((s, e) => s + Math.abs(Number(e.pairs ?? e.totalQty ?? e.qty ?? 0)), 0);
+          const totalReceived = cutterRows
+            .filter(e => e.type === 'RECEIVE')
+            .reduce((s, e) => s + Math.abs(Number(e.pairs ?? e.totalQty ?? e.qty ?? 0)), 0);
+          const totalReturned = cutterRows
+            .filter(e => e.type === 'RETURN')
+            .reduce((s, e) => s + Math.abs(Number(e.pairs ?? e.totalQty ?? e.qty ?? 0)), 0);
+          ops.push(b => b.update(doc(db!, 'cutters', cutterId), {
+            totalGiven,
+            totalReceived: Math.max(0, totalReceived - totalReturned),
+            pendingBalance: Math.max(0, totalGiven - Math.max(0, totalReceived - totalReturned)),
+            updatedAt: new Date().toISOString()
+          }));
+        });
+
+        // Finally delete the customer_orders document itself
+        ops.push(b => b.delete(doc(db!, 'customer_orders', orderId)));
+
+        // Commit in chunks of 450 operations to stay safely under Firestore 500-op batch limit
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
       } catch (e) {
-        console.error('Error deleting customer order from Firestore:', e);
+        console.error('Error cascade deleting customer order from Firestore:', e);
       }
+    } else {
+      await Promise.all([
+        markCuttingIdsDeleted([...cuttingIdsToDelete, ...legacyCuttingIdsToDelete]),
+        markDeliveriesDeleted([...deliveryIdsToDelete])
+      ]);
     }
 
-    const next = orders.filter(o => o.id !== orderId);
-    setOrders(next);
-    saveLocal(STORAGE_KEYS.ORDERS, next);
+    // Update all React state & localStorage immediately so UI updates without refresh
+    const nextOrders = orders.filter(o => o.id !== orderId);
+    setOrders(nextOrders);
+    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
+
+    const nextCuttingEntries = cuttingEntries.filter(e => !matchesOrder(e) && !cuttingIdsToDelete.has(e.id));
+    setCuttingEntries(nextCuttingEntries);
+
+    const nextCuttingTxs = cuttingTransactions.filter(t => !matchesOrder(t) && !cuttingIdsToDelete.has(t.id));
+    setCuttingTransactions(nextCuttingTxs);
+    saveLocal(STORAGE_KEYS.CUTTING_TXS, nextCuttingTxs);
+
+    const nextCuttings = cuttings.filter(c => !matchesOrder(c) && !legacyCuttingIdsToDelete.has(c.id));
+    setCuttings(nextCuttings);
+    saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
+
+    const nextDeliveries = deliveryHistory.filter(d => !matchesOrder(d) && !deliveryIdsToDelete.has(d.id));
+    setDeliveryHistory(nextDeliveries);
+    saveLocal(STORAGE_KEYS.STOCK_OUT, nextDeliveries);
+
+    const nextDispatchHistory = orderDispatchHistory.filter(h => !matchesOrder(h) && !dispatchHistoryIdsToDelete.has(h.id));
+    setOrderDispatchHistory(nextDispatchHistory);
+    saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextDispatchHistory);
+
+    const nextStitchOrders = stitchingOrders.filter(so => !matchesOrder(so) && !stitchingOrderIdsToDelete.has(so.id));
+    setStitchingOrders(nextStitchOrders);
+    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextStitchOrders);
+
+    const nextStitchHist = stitchingHistory.filter(h => !matchesOrder(h) && !stitchingHistoryIdsToDelete.has(h.id));
+    setStitchingHistory(nextStitchHist);
+    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextStitchHist);
+
+    const nextKhata = stitcherKhataTransactions.filter(k => !matchesOrder(k) && !khataIdsToDelete.has(k.id));
+    setStitcherKhataTransactions(nextKhata);
+    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextKhata);
+
+    const nextInvoices = invoices.filter(inv => !matchesOrder(inv) && !invoiceIdsToDelete.has(inv.id));
+    setInvoices(nextInvoices);
+    saveLocal(STORAGE_KEYS.INVOICES, nextInvoices);
+
+    const nextStockLedger = stockLedger.filter(sl =>
+      !matchesOrder(sl) &&
+      !stockLedgerIdsToDelete.has(sl.id) &&
+      !cuttingIdsToDelete.has(sl.referenceId || '') &&
+      !deliveryIdsToDelete.has(sl.referenceId || '') &&
+      !invoiceIdsToDelete.has(sl.referenceId || '')
+    );
+    setStockLedger(nextStockLedger);
+    saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextStockLedger);
+
+    setArticleStock(prev => prev.map(a => {
+      const nextCut = (a.cuttingHistory || []).filter(h => !matchesOrder(h) && !cuttingIdsToDelete.has(h.receiveId || ''));
+      const nextDel = (a.deliveryHistory || []).filter(h => !matchesOrder(h) && !deliveryIdsToDelete.has(h.deliveryId || ''));
+      if (nextCut.length === (a.cuttingHistory || []).length && nextDel.length === (a.deliveryHistory || []).length) {
+        return a;
+      }
+      const nextRec = nextCut.reduce((s, h) => s + (Number(h.pairs) || 0), 0);
+      const nextOut = nextDel.reduce((s, h) => s + (Number(h.pairs) || 0), 0);
+      return {
+        ...a,
+        cuttingHistory: nextCut,
+        deliveryHistory: nextDel,
+        totalReceived: nextRec,
+        totalDelivered: nextOut,
+        totalAvailable: nextRec - nextOut
+      };
+    }));
+
+    setStockManagement(prev => prev.map(s => ({
+      ...s,
+      receiveIds: (s.receiveIds || []).filter(rId => !cuttingIdsToDelete.has(rId)),
+      deliveryIds: (s.deliveryIds || []).filter(dId => !deliveryIdsToDelete.has(dId))
+    })));
+
+    const totalCuttingRemoved = cuttingIdsToDelete.size + legacyCuttingIdsToDelete.size;
+    const totalStockOutRemoved = deliveryIdsToDelete.size + dispatchHistoryIdsToDelete.size;
+    console.log(`Deleted Order ID: ${orderId}, Deleted related: Cutting: ${totalCuttingRemoved}, Stock Out: ${totalStockOutRemoved}`);
+
     if (selectedOrderId === orderId) setSelectedOrderId(null);
-    showToast('Order Deleted Successfully', 'info');
+    showToast(`Order & all related records deleted (Cutting: ${totalCuttingRemoved}, Stock Out: ${totalStockOutRemoved})`, 'info');
   };
 
   // --- CUTTERS & DUAL ENTRY BATCH TRANSACTIONS ---
@@ -1539,89 +2407,104 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     billNo?: string;
     factoryName?: string;
     addToStock?: boolean;
+    isExtraCutting?: boolean;
+    extraCuttingQty?: number;
     notes?: string;
   }): Promise<CuttingTransaction> => {
     const now = new Date().toISOString();
-    const txId = 'ctx-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6);
+    const txId = 'CUT-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6);
+    const targetCutter = cutters.find(c => c.id === data.cutterId);
+    const safeCutterName = String(data.cutterName || targetCutter?.name || targetCutter?.khataName || 'Cutting Master').trim() || 'Cutting Master';
+    const safeCutterType: CutterCategory = data.cutterType || targetCutter?.cutterType || 'cutting_man';
+    const safeArticle = String(data.article || data.articleTitle || '').trim();
+    const safeArticleTitle = String(data.articleTitle || safeArticle).trim();
+    const resolvedCustomerName = data.customerName?.trim() || (data.type === 'RECEIVE' && !data.orderId ? 'Stock - No Order' : '');
+    const resolvedCustomerOrder = data.customerOrder?.trim() || (data.orderId ? data.orderNo || '' : (data.type === 'RECEIVE' ? 'Stock - No Order' : 'Direct Cutting'));
+    const isExtraCutting = Boolean(data.isExtraCutting && data.type === 'RECEIVE');
+    const extraCuttingQty = isExtraCutting ? -Math.abs(data.qty) : 0;
 
-    const txDoc: CuttingTransaction = {
+    const txDoc: CuttingTransaction = stripUndefined({
       id: txId,
       cutterId: data.cutterId,
-      cutterName: data.cutterName,
-      cutterType: data.cutterType,
+      cutterName: safeCutterName,
+      cutterType: safeCutterType,
       type: data.type,
-      date: data.date,
-      qty: data.qty,
+      date: data.date || now.slice(0, 10),
+      qty: Number(data.qty) || 0,
       totalQty: data.totalQty ?? data.qty,
       rate: Number(data.rate) || 0,
       lotTotal: data.qty * (Number(data.rate) || 0),
-      article: data.article,
-      articleTitle: data.articleTitle || data.article,
+      article: safeArticle,
+      articleTitle: safeArticleTitle,
       size: data.size || '',
       sizeName: data.sizeName || data.size || '',
       average: data.average || '',
       remarks: data.remarks || '',
       totalBalance: data.totalBalance ?? data.qty * (Number(data.rate) || 0),
-      customerOrder: data.customerOrder || (data.orderId ? data.orderNo || '' : 'Direct Cutting'),
+      customerOrder: resolvedCustomerOrder,
       orderId: data.orderId || '',
       orderNo: data.orderNo || '',
-      customerName: data.customerName || '',
+      customerName: resolvedCustomerName,
       sizes: data.sizes || { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 },
       billNo: data.billNo || '',
       factoryName: data.factoryName || '',
-      addToStock: !!data.addToStock,
+      addToStock: data.type === 'RECEIVE' ? true : !!data.addToStock,
+      isExtraCutting,
+      extraCuttingQty,
       notes: data.notes || '',
       createdAt: now
-    };
-    const entry: CuttingEntry = {
+    });
+    const entry: CuttingEntry = stripUndefined({
       id: txId,
       cutterId: data.cutterId,
-      cutterName: data.cutterName,
+      cutterName: safeCutterName,
       type: data.type,
-      date: data.date,
-      customerName: data.customerName || '',
-      article: data.article,
-      articleTitle: data.articleTitle || data.article,
+      date: data.date || now.slice(0, 10),
+      customerName: resolvedCustomerName,
+      article: safeArticle,
+      articleTitle: safeArticleTitle,
       size: data.size || '',
       sizeName: data.sizeName || data.size || '',
       average: data.average || '',
       remarks: data.remarks || '',
-      pairs: data.qty,
+      pairs: Number(data.qty) || 0,
       totalQty: data.totalQty ?? data.qty,
       rate: Number(data.rate) || 0,
       lotTotal: data.qty * (Number(data.rate) || 0),
       totalBalance: data.totalBalance ?? data.qty * (Number(data.rate) || 0),
-      customerOrder: data.customerOrder || (data.orderId ? data.orderNo || '' : 'Direct Cutting'),
+      customerOrder: resolvedCustomerOrder,
       orderId: data.orderId || '',
       orderNo: data.orderNo || '',
       runningBalance: 0,
       billNo: data.billNo || '',
+      isExtraCutting,
+      extraCuttingQty,
       createdAt: now
-    };
+    });
     const legacyEntries = cuttingTransactions
       .filter(tx => tx.cutterId === data.cutterId && tx.id !== entry.id && !cuttingEntries.some(saved => saved.id === tx.id))
-      .map(tx => ({
+      .map(tx => stripUndefined({
         id: tx.id,
         cutterId: tx.cutterId,
-        cutterName: tx.cutterName,
+        cutterName: String(tx.cutterName || safeCutterName).trim() || 'Cutting Master',
         type: tx.type,
-        date: tx.date,
+        date: tx.date || now.slice(0, 10),
         customerName: tx.customerName || '',
-        article: tx.article,
-        articleTitle: tx.articleTitle || tx.article,
+        article: tx.article || tx.articleTitle || '',
+        articleTitle: tx.articleTitle || tx.article || '',
         size: tx.size || '',
         sizeName: tx.sizeName || tx.size || '',
         average: tx.average || '',
         remarks: tx.remarks || tx.notes || '',
-        pairs: tx.totalQty || tx.qty,
-        totalQty: tx.totalQty || tx.qty,
+        pairs: tx.totalQty || tx.qty || 0,
+        totalQty: tx.totalQty || tx.qty || 0,
         rate: tx.rate || 0,
-        lotTotal: tx.lotTotal || tx.qty * (tx.rate || 0),
-        totalBalance: tx.totalBalance || tx.lotTotal || tx.qty * (tx.rate || 0),
+        lotTotal: tx.lotTotal || (tx.qty || 0) * (tx.rate || 0),
+        totalBalance: tx.totalBalance || tx.lotTotal || (tx.qty || 0) * (tx.rate || 0),
         customerOrder: tx.customerOrder || tx.orderNo || 'Direct Cutting',
         runningBalance: 0,
         billNo: tx.billNo || '',
-        createdAt: tx.createdAt
+        createdAt: tx.createdAt || now
       } satisfies CuttingEntry));
     const nextEntries = [...cuttingEntries.filter(item => item.id !== entry.id), ...legacyEntries, entry]
       .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
@@ -1632,9 +2515,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return { ...item, runningBalance: balance };
     });
 
-    const targetCutter = cutters.find(c => c.id === data.cutterId);
     const targetOrder = data.orderId ? orders.find(order => order.id === data.orderId) : undefined;
-    const directDelivery = data.type === 'RECEIVE' && !!data.orderId && !data.addToStock;
+    // GOLDEN RULE: Every Receive Cutting ALWAYS goes into Stock IN History (never auto-deduct as directDelivery)
+    const directDelivery = false;
     if (data.orderId && !targetOrder) throw new Error('The selected customer order no longer exists.');
     const currentGiven = targetCutter?.totalGiven || 0;
     const currentReceived = targetCutter?.totalReceived || 0;
@@ -1643,134 +2526,195 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const newReceived = data.type === 'RECEIVE' ? currentReceived + data.qty : currentReceived;
     const newPending = Math.max(0, newGiven - newReceived);
 
+    // GOLDEN RULE: Receiving Cutting for an article unblocks it from deleted_products so Stock Management ALWAYS shows it
+    if (data.type === 'RECEIVE') {
+      await unmarkDeletedArticle(data.article);
+    }
+
     // Dual Entry Batched Write
     if (!db) throw new Error('Firestore is not available. The cutting entry was not saved.');
-    const directDispatchHistoryRef = directDelivery ? doc(collection(db, 'order_dispatch_history')) : null;
+    const directDispatchHistoryRef = directDelivery ? doc(db, 'order_dispatch_history', `disp-${txId}`) : null;
     const directOrderHistoryRef = directDelivery && data.orderId
-      ? doc(collection(db, 'customer_orders', data.orderId, 'order_history'))
+      ? doc(db, 'customer_orders', data.orderId, 'order_history', `disp-${txId}`)
       : null;
+
+    const articleName = safeArticle;
+    const articleId = normalizeStockDocumentId(articleName);
+    const sizeName = (data.sizeName || data.size || 'Standard').trim() || 'Standard';
+    const stockItemId = `${articleId}__${normalizeStockDocumentId(sizeName)}`;
+    const deliveredQty = directDelivery ? data.qty : 0;
+    const stkId = `stk-${txId}`;
+    const receivedHistoryEntry = stripUndefined({
+      date: data.date,
+      pairs: data.qty,
+      receiveId: txId,
+      source: safeCutterName,
+      cutterName: safeCutterName,
+      customerName: targetOrder?.customerName || resolvedCustomerName || 'Stock - No Order',
+      orderNo: data.orderNo || targetOrder?.orderNo || '',
+      orderId: data.orderId || '',
+      size: sizeName,
+      article: articleName,
+      isExtraCutting,
+      extraCuttingQty
+    });
+    const nextOrderItems = targetOrder
+      ? targetOrder.items.map(itm => {
+          if (itm.title.toLowerCase() === articleName.toLowerCase() || itm.gloveType.toLowerCase() === articleName.toLowerCase()) {
+            return {
+              ...itm,
+              cuttingGivenQty: data.type === 'GIVE' ? itm.cuttingGivenQty + data.qty : itm.cuttingGivenQty,
+              stockReceivedQty: data.type === 'RECEIVE' ? itm.stockReceivedQty + data.qty : itm.stockReceivedQty
+            };
+          }
+          return itm;
+        })
+      : null;
+
     {
       try {
         const batch = writeBatch(db);
 
         // 1. Write cutting_transactions doc
         const txRef = doc(db, 'cutting_transactions', txId);
-        batch.set(txRef, txDoc);
+        batch.set(txRef, stripUndefined(txDoc));
 
         // 2. Write the editable notebook entry and refresh its running balances.
         const savedEntryIds = new Set(cuttingEntries.map(saved => saved.id));
         balancedEntries.forEach(item => {
           const entryRef = doc(db, 'cuttingEntries', item.id);
-          if (item.id === txId) batch.set(entryRef, item);
-          else if (savedEntryIds.has(item.id)) batch.update(entryRef, { runningBalance: item.runningBalance });
-          else batch.set(entryRef, item);
+          if (item.id === txId) batch.set(entryRef, stripUndefined(item));
+          else if (savedEntryIds.has(item.id)) batch.set(entryRef, { runningBalance: Number(item.runningBalance) || 0 }, { merge: true });
+          else batch.set(entryRef, stripUndefined(item));
         });
 
-        // 3. Update the cutter ledger summary.
+        // 3. Update the cutter ledger summary safely with merge (prevents NOT_FOUND on preset cutters).
         const cutterRef = doc(db, 'cutters', data.cutterId);
-        batch.update(cutterRef, {
+        batch.set(cutterRef, stripUndefined({
+          ...(targetCutter ? {} : {
+            id: data.cutterId,
+            name: safeCutterName,
+            khataName: `${safeCutterName} Ledger`,
+            cutterType: safeCutterType,
+            isActive: true,
+            status: 'active',
+            createdAt: now
+          }),
           totalGiven: newGiven,
           totalReceived: newReceived,
           pendingBalance: newPending,
           lastTransactionDate: data.date,
           updatedAt: now
-        });
+        }), { merge: true });
 
-        // 4. Customer order history & live progress tracking
+        // 4. Customer order history & live progress tracking (deterministic txId for clean 1-click delete)
         if (data.orderId) {
-          // Sub-collection customer_orders/{orderId}/order_history
-          const subHistoryRef = doc(collection(db, 'customer_orders', data.orderId, 'order_history'));
-          batch.set(subHistoryRef, {
+          const subHistoryRef = doc(db, 'customer_orders', data.orderId, 'order_history', txId);
+          batch.set(subHistoryRef, stripUndefined({
+            id: txId,
+            cuttingId: txId,
             date: data.date,
             actionType: data.type === 'GIVE' ? 'cutting_given' : 'stock_received',
             quantity: data.qty,
-            personName: data.cutterName,
-            article: data.article,
-            notes: data.notes || (data.type === 'GIVE' ? 'Cutting Assigned' : 'Cutting Received'),
+            personName: safeCutterName,
+            article: articleName,
+            size: sizeName,
+            isExtraCutting,
+            extraCuttingQty,
+            notes: data.notes || (isExtraCutting ? 'Extra Cutting (-' + data.qty + ' pcs)' : (data.type === 'GIVE' ? 'Cutting Assigned' : 'Cutting Received')),
             createdAt: now
-          });
+          }));
 
-          // Top-level order_dispatch_history
-          const topHistoryRef = doc(collection(db, 'order_dispatch_history'));
-          batch.set(topHistoryRef, {
+          const topHistoryRef = doc(db, 'order_dispatch_history', txId);
+          batch.set(topHistoryRef, stripUndefined({
+            id: txId,
+            cuttingId: txId,
             orderId: data.orderId,
-            orderNo: data.orderNo || '',
+            orderNo: data.orderNo || targetOrder?.orderNo || '',
             date: data.date,
             actionType: data.type === 'GIVE' ? 'cutting_given' : 'stock_received',
             quantity: data.qty,
-            personName: data.cutterName,
-            article: data.article,
-            notes: data.notes || '',
+            personName: safeCutterName,
+            article: articleName,
+            isExtraCutting,
+            extraCuttingQty,
+            notes: data.notes || (isExtraCutting ? `Extra Cutting (-${data.qty} pcs)` : ''),
             createdAt: now
-          });
+          }));
+
+          if (targetOrder && nextOrderItems) {
+            batch.set(doc(db, 'customer_orders', data.orderId), stripUndefined({
+              items: nextOrderItems,
+              status: targetOrder.status === 'Pending' ? 'Cutting-Given' : targetOrder.status,
+              updatedAt: now
+            }), { merge: true });
+          }
+
           if (directDispatchHistoryRef && directOrderHistoryRef) {
-            batch.set(directDispatchHistoryRef, {
+            batch.set(directDispatchHistoryRef, stripUndefined({
               orderId: data.orderId,
               orderNo: data.orderNo || targetOrder?.orderNo || '',
               date: data.date,
               actionType: 'dispatched_to_customer',
               quantity: data.qty,
-              personName: data.cutterName,
-              article: data.article,
+              personName: safeCutterName,
+              article: articleName,
               sizes: { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 },
-              notes: `Direct cutting delivery · ${data.sizeName || data.size || ''}`,
+              notes: `Direct cutting delivery · ${sizeName}`,
               createdAt: now
-            });
-            batch.set(directOrderHistoryRef, {
+            }));
+            batch.set(directOrderHistoryRef, stripUndefined({
               date: data.date,
               actionType: 'dispatched_to_customer',
               quantity: data.qty,
-              personName: data.cutterName,
-              article: data.article,
-              size: data.sizeName || data.size || '',
+              personName: safeCutterName,
+              article: articleName,
+              size: sizeName,
               notes: 'Directly delivered from cutting receive',
               createdAt: now
-            });
+            }));
           }
 
           // Mirror in cuttings collection
           const cuttingRef = doc(db, 'cuttings', txId);
-          batch.set(cuttingRef, {
+          batch.set(cuttingRef, stripUndefined({
             id: txId,
             orderId: data.orderId,
-            orderNo: data.orderNo || '',
+            orderNo: data.orderNo || targetOrder?.orderNo || '',
             orderItemId: '',
-            gloveType: data.article,
-            size: 'Matrix',
+            gloveType: articleName,
+            size: sizeName,
             color: '',
             date: data.date,
-            cuttingType: data.cutterType === 'cutting_man' ? 'cutting_man' : 'cutter_maker',
+            cuttingType: safeCutterType === 'cutting_man' ? 'cutting_man' : 'cutter_maker',
             personId: data.cutterId,
-            personName: data.cutterName,
+            personName: safeCutterName,
             qty: data.qty,
-            rate: 0,
-            totalAmount: 0,
+            rate: Number(data.rate) || 0,
+            totalAmount: data.qty * (Number(data.rate) || 0),
             status: data.type === 'GIVE' ? 'Given' : 'Received',
             receivedDate: data.type === 'RECEIVE' ? data.date : '',
+            isExtraCutting,
+            extraCuttingQty,
             notes: data.notes || '',
             createdAt: now
-          });
+          }));
         }
 
         if (data.type === 'RECEIVE') {
-          const articleName = data.article.trim();
-          const articleId = normalizeStockDocumentId(articleName);
-          const sizeName = (data.sizeName || data.size || 'Unspecified').trim();
-          const stockItemId = `${articleId}__${normalizeStockDocumentId(sizeName)}`;
-          const deliveredQty = directDelivery ? data.qty : 0;
           const articleAvailable = articleStock.find(item =>
             item.articleName.trim().toLocaleLowerCase() === articleName.toLocaleLowerCase()
           )?.totalAvailable || 0;
           const deliveryHistoryRef = directDelivery ? doc(collection(db, 'stock_delivery_history')) : null;
-          const deliveryRecord: DeliveryHistoryEntry | null = directDelivery && deliveryHistoryRef ? {
+          const deliveryRecord: DeliveryHistoryEntry | null = directDelivery && deliveryHistoryRef ? stripUndefined({
             id: deliveryHistoryRef.id,
-            orderId: data.orderId,
-            customerOrderId: data.orderId,
+            orderId: data.orderId || '',
+            customerOrderId: data.orderId || '',
             orderNo: data.orderNo || targetOrder?.orderNo || '',
             linkedStockId: stockItemId,
             stockId: stockItemId,
-            dispatchHistoryId: directDispatchHistoryRef?.id,
-            orderHistoryId: directOrderHistoryRef?.id,
+            dispatchHistoryId: directDispatchHistoryRef?.id || '',
+            orderHistoryId: directOrderHistoryRef?.id || '',
             date: data.date,
             deliveryDate: data.date,
             customerName: targetOrder?.customerName || data.customerName || '',
@@ -1779,13 +2723,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             size: sizeName,
             quantity: deliveredQty,
             createdAt: now
-          } : null;
-          const receivedHistory = {
-            date: data.date,
-            pairs: data.qty,
-            receiveId: txId,
-            source: 'Nasim Cutting'
-          };
+          }) : null;
+
           const stockRef = doc(db, 'stock_management', stockItemId);
           batch.set(stockRef, {
             article: articleName,
@@ -1803,58 +2742,41 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }, { merge: true });
 
           const articleRef = doc(db, 'article_stock', articleId);
-          const articleDelivery = deliveryRecord ? {
+          const articleDelivery = deliveryRecord ? stripUndefined({
             date: data.date,
             orderNo: deliveryRecord.orderNo || '',
             customerName: deliveryRecord.customerName,
             pairs: deliveredQty,
             remainingAfter: articleAvailable + data.qty - deliveredQty,
             deliveryId: deliveryRecord.id
-          } : null;
+          }) : null;
           batch.set(articleRef, {
             articleName,
             totalReceived: increment(data.qty),
             totalAvailable: increment(data.qty - deliveredQty),
             totalDelivered: increment(deliveredQty),
-            cuttingHistory: arrayUnion(receivedHistory),
+            cuttingHistory: arrayUnion(receivedHistoryEntry),
             ...(articleDelivery ? { deliveryHistory: arrayUnion(articleDelivery) } : {})
           }, { merge: true });
-          if (deliveryRecord && deliveryHistoryRef) batch.set(deliveryHistoryRef, deliveryRecord);
-        }
+          if (deliveryRecord && deliveryHistoryRef) batch.set(deliveryHistoryRef, stripUndefined(deliveryRecord));
 
-        // Every cutting receive is tracked as incoming stock, including direct order deliveries.
-        if (data.type === 'RECEIVE') {
-          const stkId = 'stk-' + Date.now();
+          // Deterministic stk-${txId} so Stock Ledger and Deletes stay 100% synced by 1 ID
           const stkRef = doc(db, 'stock_ledger', stkId);
-          batch.set(stkRef, {
+          batch.set(stkRef, stripUndefined({
             id: stkId,
-            productId: 'prod-' + data.article.toLowerCase().replace(/\s+/g, '-'),
-            productName: data.article,
+            productId: 'prod-' + articleName.toLowerCase().replace(/\s+/g, '-'),
+            productName: articleName,
             orderId: data.orderId || '',
-            orderNo: data.orderNo || '',
+            orderNo: data.orderNo || targetOrder?.orderNo || '',
             type: 'in',
             qty: data.qty,
             date: data.date,
             referenceId: txId,
-            notes: `Cutting received from ${data.cutterName}${data.billNo ? ` (Bill #${data.billNo})` : ''}`,
+            isExtraCutting,
+            extraCuttingQty,
+            notes: `Cutting received from ${safeCutterName}${isExtraCutting ? ' [Extra Cutting]' : ''}${data.billNo ? ` (Bill #${data.billNo})` : ''}`,
             createdAt: now
-          });
-          if (directDelivery) {
-            const deliveryStkId = `${stkId}-delivery`;
-            batch.set(doc(db, 'stock_ledger', deliveryStkId), {
-              id: deliveryStkId,
-              productId: 'prod-' + data.article.toLowerCase().replace(/\s+/g, '-'),
-              productName: data.article,
-              orderId: data.orderId || '',
-              orderNo: data.orderNo || '',
-              type: 'out',
-              qty: data.qty,
-              date: data.date,
-              referenceId: txId,
-              notes: `Direct cutting delivery to ${targetOrder?.orderNo || data.orderNo || 'customer order'}`,
-              createdAt: now
-            });
-          }
+          }));
         }
 
         await batch.commit();
@@ -1864,7 +2786,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    // Local state updates
+    // Immediate Local state & localStorage updates (no manual refresh required)
     const nextCutters = cutters.map(c => c.id === data.cutterId ? {
       ...c,
       totalGiven: newGiven,
@@ -1881,24 +2803,135 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     saveLocal(STORAGE_KEYS.CUTTING_TXS, nextTxs);
     setCuttingEntries([...balancedEntries].sort((a, b) => safeStringCompare(b.date, a.date)));
 
-    // Update local order tracking WITHOUT reducing originalQty
+    if (data.type === 'RECEIVE') {
+      setStockManagement(prev => {
+        const idx = prev.findIndex(s => s.id === stockItemId);
+        if (idx >= 0) {
+          const existing = prev[idx];
+          if ((existing.receiveIds || []).includes(txId)) return prev;
+          const updated: FactoryStockItem = {
+            ...existing,
+            qty: (Number(existing.qty) || 0) + data.qty,
+            totalStock: (Number(existing.totalStock) || 0) + data.qty,
+            totalCuttingReceived: (Number(existing.totalCuttingReceived) || 0) + data.qty,
+            balance: (Number(existing.balance) || 0) + data.qty,
+            receiveIds: [...(existing.receiveIds || []), txId],
+            updatedAt: now
+          };
+          return prev.map((s, i) => i === idx ? updated : s);
+        }
+        return [...prev, {
+          id: stockItemId,
+          article: articleName,
+          articleName,
+          size: sizeName,
+          qty: data.qty,
+          totalStock: data.qty,
+          totalCuttingReceived: data.qty,
+          totalDelivered: 0,
+          balance: data.qty,
+          rate: 0,
+          receiveIds: [txId],
+          deliveryIds: [],
+          updatedAt: now
+        } as FactoryStockItem].sort((a, b) => a.article.localeCompare(b.article) || a.size.localeCompare(b.size));
+      });
+
+      setArticleStock(prev => {
+        const idx = prev.findIndex(a => normalizeStockDocumentId(a.articleName) === articleId || a.id === articleId);
+        if (idx >= 0) {
+          const existing = prev[idx];
+          if ((existing.cuttingHistory || []).some(h => h.receiveId === txId)) return prev;
+          const updated: ArticleStockItem = {
+            ...existing,
+            totalReceived: (Number(existing.totalReceived) || 0) + data.qty,
+            totalAvailable: (Number(existing.totalAvailable) || 0) + data.qty,
+            cuttingHistory: [...(existing.cuttingHistory || []), receivedHistoryEntry]
+          };
+          return prev.map((a, i) => i === idx ? updated : a);
+        }
+        return [...prev, {
+          id: articleId,
+          articleName,
+          totalReceived: data.qty,
+          totalAvailable: data.qty,
+          totalDelivered: 0,
+          cuttingHistory: [receivedHistoryEntry],
+          deliveryHistory: []
+        } as ArticleStockItem].sort((a, b) => a.articleName.localeCompare(b.articleName));
+      });
+
+      setStockLedger(prev => {
+        if (prev.some(l => l.id === stkId || l.referenceId === txId)) return prev;
+        const nextLedger: StockLedgerEntry[] = [{
+          id: stkId,
+          productId: 'prod-' + articleName.toLowerCase().replace(/\s+/g, '-'),
+          productName: articleName,
+          orderId: data.orderId || '',
+          orderNo: data.orderNo || targetOrder?.orderNo || '',
+          type: 'in',
+          qty: data.qty,
+          date: data.date,
+          referenceId: txId,
+          notes: `Cutting received from ${data.cutterName}${data.billNo ? ` (Bill #${data.billNo})` : ''}`,
+          createdAt: now
+        }, ...prev];
+        saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextLedger);
+        return nextLedger;
+      });
+    }
+
     if (data.orderId) {
+      setCuttings(prev => {
+        if (prev.some(c => c.id === txId)) return prev;
+        const nextCuttings: Cutting[] = [{
+          id: txId,
+          orderId: data.orderId!,
+          orderNo: data.orderNo || targetOrder?.orderNo || '',
+          orderItemId: '',
+          gloveType: articleName,
+          size: sizeName,
+          color: '',
+          date: data.date,
+          cuttingType: data.cutterType === 'cutting_man' ? 'cutting_man' : 'cutter_maker',
+          personId: data.cutterId,
+          personName: data.cutterName,
+          qty: data.qty,
+          rate: Number(data.rate) || 0,
+          totalAmount: data.qty * (Number(data.rate) || 0),
+          status: data.type === 'GIVE' ? 'Given' : 'Received',
+          receivedDate: data.type === 'RECEIVE' ? data.date : '',
+          notes: data.notes || '',
+          createdAt: now
+        }, ...prev];
+        saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
+        return nextCuttings;
+      });
+
+      setOrderDispatchHistory(prev => {
+        if (prev.some(h => h.id === txId)) return prev;
+        const nextHist: OrderDispatchHistory[] = [{
+          id: txId,
+          orderId: data.orderId!,
+          orderNo: data.orderNo || targetOrder?.orderNo || '',
+          date: data.date,
+          actionType: data.type === 'GIVE' ? 'cutting_given' : 'stock_received',
+          quantity: data.qty,
+          personName: data.cutterName,
+          article: articleName,
+          notes: data.notes || '',
+          createdAt: now
+        }, ...prev];
+        saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextHist);
+        return nextHist;
+      });
+
       const nextOrders = orders.map(ord => {
-        if (ord.id === data.orderId) {
-          const updatedItems = ord.items.map(itm => {
-            if (itm.title.toLowerCase() === data.article.toLowerCase() || itm.gloveType.toLowerCase() === data.article.toLowerCase()) {
-              return {
-                ...itm,
-                cuttingGivenQty: data.type === 'GIVE' ? itm.cuttingGivenQty + data.qty : itm.cuttingGivenQty,
-                stockReceivedQty: data.type === 'RECEIVE' ? itm.stockReceivedQty + data.qty : itm.stockReceivedQty
-              };
-            }
-            return itm;
-          });
+        if (ord.id === data.orderId && nextOrderItems) {
           return {
             ...ord,
             status: ord.status === 'Pending' ? 'Cutting-Given' : ord.status,
-            items: updatedItems,
+            items: nextOrderItems,
             updatedAt: now
           };
         }
@@ -2173,21 +3206,26 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       });
     });
 
+    await markCuttingIdsDeleted([id]);
     setCuttingEntries(previous => [
       ...previous.filter(entry => entry.cutterId !== current.cutterId),
       ...balancedEntries
     ].sort((a, b) => safeStringCompare(b.date, a.date)));
-    setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
-      ...cutter,
-      totalGiven,
-      totalReceived,
-      pendingBalance: Math.max(0, totalGiven - totalReceived)
-    } : cutter));
+    setCutters(previous => {
+      const next = previous.map(cutter => cutter.id === current.cutterId ? {
+        ...cutter,
+        totalGiven,
+        totalReceived,
+        pendingBalance: Math.max(0, totalGiven - totalReceived)
+      } : cutter);
+      saveLocal(STORAGE_KEYS.CUTTERS, next);
+      return next;
+    });
   };
 
   const updateCuttingEntry = async (
     id: string,
-    updates: Pick<CuttingEntry, 'date' | 'customerName' | 'article' | 'size' | 'average' | 'remarks' | 'pairs' | 'rate' | 'billNo'>
+    updates: Partial<CuttingEntry>
   ): Promise<void> => {
     const currentEntry = cuttingEntries.find(entry => entry.id === id);
     const legacyTx = cuttingTransactions.find(tx => tx.id === id);
@@ -2212,246 +3250,595 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!current) throw new Error('Cutting entry no longer exists.');
     if (current.type === 'RETURN') {
       await updateCuttingReturn(id, {
-        date: updates.date,
-        remarks: updates.remarks,
-        pairs: updates.pairs,
-        rate: updates.rate
+        date: updates.date || current.date,
+        remarks: updates.remarks || current.remarks || '',
+        pairs: Number(updates.pairs) || Number(current.pairs),
+        rate: Number(updates.rate) || Number(current.rate)
       });
       return;
     }
+
+    if (!db) throw new Error('Firestore is not available. The entry was not updated.');
+
+    const oldPairs = Math.abs(Number(current.pairs ?? (current as any).totalQty ?? (current as any).qty ?? 0));
+    const newPairs = updates.pairs !== undefined ? Math.abs(Number(updates.pairs)) : oldPairs;
+    const oldRate = Number(current.rate) || 0;
+    const newRate = updates.rate !== undefined ? Number(updates.rate) : oldRate;
+    const oldArticle = (current.articleTitle || current.article || '').trim();
+    const newArticle = (updates.articleTitle || updates.article || oldArticle).trim();
+    const oldSize = (current.sizeName || current.size || 'Standard').trim();
+    const newSize = (updates.sizeName || updates.size || oldSize).trim();
+    const oldOrderId = current.orderId || '';
+    const newOrderId = updates.orderId !== undefined ? (updates.orderId || '') : oldOrderId;
+    const oldCutterId = current.cutterId;
+    const newCutterId = updates.cutterId || oldCutterId;
+    const targetOrder = newOrderId ? orders.find(o => o.id === newOrderId) : undefined;
+    const newOrderNo = newOrderId
+      ? (updates.orderNo || targetOrder?.orderNo || current.orderNo || '')
+      : '';
+    const newCustomerName = newOrderId
+      ? (updates.customerName || targetOrder?.customerName || current.customerName || 'Stock - No Order')
+      : (updates.customerName || 'Stock - No Order');
 
     const updated: CuttingEntry = {
       ...current,
       ...updates,
-      articleTitle: updates.article,
-      sizeName: updates.size,
-      average: updates.average,
-      remarks: updates.remarks,
-      rate: Number(updates.rate),
-      pairs: Number(updates.pairs),
-      totalQty: Number(updates.pairs),
-      lotTotal: Number(updates.pairs) * Number(updates.rate),
-      totalBalance: Number(updates.pairs) * Number(updates.rate)
-    };
-    const legacyEntries = cuttingTransactions
-      .filter(tx => tx.cutterId === current.cutterId && tx.id !== id && !cuttingEntries.some(entry => entry.id === tx.id))
-      .map(tx => ({
-        id: tx.id,
-        cutterId: tx.cutterId,
-        cutterName: tx.cutterName,
-        type: tx.type,
-        date: tx.date,
-        customerName: tx.customerName || '',
-        article: tx.article,
-        size: tx.size || '',
-        pairs: tx.qty,
-        rate: tx.rate || 0,
-        lotTotal: tx.lotTotal || tx.qty * (tx.rate || 0),
-        runningBalance: 0,
-        billNo: tx.billNo || '',
-        createdAt: tx.createdAt
-      } satisfies CuttingEntry));
-    const ordered = [
-      ...cuttingEntries.filter(entry => entry.id !== id),
-      ...legacyEntries,
-      updated
-    ]
-      .filter(entry => entry.cutterId === current.cutterId)
-      .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
-    let balance = 0;
-    const balanced = ordered.map(entry => {
-      balance += entry.lotTotal;
-      return { ...entry, runningBalance: balance };
-    });
-    const balancedById = new Map(balanced.map(entry => [entry.id, entry]));
-    const totalGiven = balanced.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
-    const totalReceived = balanced
-      .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
-      .reduce((sum, entry) => sum + entry.pairs, 0);
-
-    if (!db) throw new Error('Firestore is not available. The entry was not updated.');
-    if (!currentEntry) await setDoc(doc(db, 'cuttingEntries', id), current);
-    await updateDoc(doc(db, 'cuttingEntries', id), {
-      ...updated,
-      runningBalance: balancedById.get(id)?.runningBalance || 0,
-      editedAt: serverTimestamp(),
+      id,
+      cutterId: newCutterId,
+      cutterName: updates.cutterName || (cutters.find(c => c.id === newCutterId)?.name || current.cutterName || ''),
+      orderId: newOrderId,
+      orderNo: newOrderNo,
+      customerName: newCustomerName,
+      customerOrder: newOrderNo ? `${newCustomerName} - ${newOrderNo}` : newCustomerName,
+      article: newArticle,
+      articleTitle: newArticle,
+      size: newSize,
+      sizeName: newSize,
+      date: updates.date || current.date,
+      average: updates.average !== undefined ? updates.average : (current.average || ''),
+      remarks: updates.remarks !== undefined ? updates.remarks : (current.remarks || ''),
+      billNo: updates.billNo !== undefined ? updates.billNo : (current.billNo || ''),
+      pairs: newPairs,
+      totalQty: newPairs,
+      rate: newRate,
+      lotTotal: newPairs * newRate,
+      totalBalance: newPairs * newRate,
+      editedAt: new Date().toISOString(),
       editedBy: 'User'
-    });
+    };
+
     const batch = writeBatch(db);
-    const savedEntryIds = new Set(cuttingEntries.map(entry => entry.id));
-    balanced.filter(entry => entry.id !== id).forEach(entry => {
-      const ref = doc(db, 'cuttingEntries', entry.id);
-      if (savedEntryIds.has(entry.id)) {
-        batch.update(ref, { runningBalance: entry.runningBalance });
+
+    // 1. Stock Move Logic (if RECEIVE entry)
+    if (current.type === 'RECEIVE') {
+      const oldStockId = `${normalizeStockDocumentId(oldArticle)}__${normalizeStockDocumentId(oldSize)}`;
+      const newStockId = `${normalizeStockDocumentId(newArticle)}__${normalizeStockDocumentId(newSize)}`;
+      const oldArticleId = normalizeStockDocumentId(oldArticle);
+      const newArticleId = normalizeStockDocumentId(newArticle);
+
+      if (oldStockId === newStockId) {
+        const delta = newPairs - oldPairs;
+        if (delta !== 0) {
+          if (stockManagement.some(s => s.id === oldStockId)) {
+            batch.update(doc(db, 'stock_management', oldStockId), {
+              qty: increment(delta),
+              totalStock: increment(delta),
+              totalCuttingReceived: increment(delta),
+              balance: increment(delta),
+              updatedAt: new Date().toISOString()
+            });
+          } else {
+            batch.set(doc(db, 'stock_management', oldStockId), {
+              article: newArticle,
+              articleName: newArticle,
+              size: newSize,
+              qty: increment(delta),
+              totalStock: increment(delta),
+              totalCuttingReceived: increment(delta),
+              balance: increment(delta),
+              receiveIds: arrayUnion(id),
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
+          }
+          const existingOldArt = articleStock.find(a => normalizeStockDocumentId(a.articleName) === oldArticleId);
+          if (existingOldArt) {
+            const nextHist = (existingOldArt.cuttingHistory || []).map(h =>
+              h.receiveId === id
+                ? {
+                    ...h,
+                    date: updated.date,
+                    pairs: newPairs,
+                    source: updated.cutterName || h.source,
+                    customerName: newCustomerName,
+                    orderNo: newOrderNo,
+                    orderId: newOrderId,
+                    size: newSize
+                  }
+                : h
+            );
+            batch.update(doc(db, 'article_stock', oldArticleId), {
+              totalReceived: increment(delta),
+              totalAvailable: increment(delta),
+              cuttingHistory: nextHist
+            });
+          }
+        }
       } else {
-        batch.set(ref, entry);
+        if (stockManagement.some(s => s.id === oldStockId)) {
+          batch.update(doc(db, 'stock_management', oldStockId), {
+            qty: increment(-oldPairs),
+            totalStock: increment(-oldPairs),
+            totalCuttingReceived: increment(-oldPairs),
+            balance: increment(-oldPairs),
+            receiveIds: (stockManagement.find(s => s.id === oldStockId)?.receiveIds || []).filter(rId => rId !== id),
+            updatedAt: new Date().toISOString()
+          });
+        }
+        const existingOldArt = articleStock.find(a => normalizeStockDocumentId(a.articleName) === oldArticleId);
+        if (existingOldArt) {
+          batch.update(doc(db, 'article_stock', oldArticleId), {
+            totalReceived: increment(-oldPairs),
+            totalAvailable: increment(-oldPairs),
+            cuttingHistory: (existingOldArt.cuttingHistory || []).filter(h => h.receiveId !== id)
+          });
+        }
+
+        batch.set(doc(db, 'stock_management', newStockId), {
+          article: newArticle,
+          articleName: newArticle,
+          size: newSize,
+          qty: increment(newPairs),
+          totalStock: increment(newPairs),
+          totalCuttingReceived: increment(newPairs),
+          balance: increment(newPairs),
+          receiveIds: arrayUnion(id),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+        batch.set(doc(db, 'article_stock', newArticleId), {
+          articleName: newArticle,
+          totalReceived: increment(newPairs),
+          totalAvailable: increment(newPairs),
+          cuttingHistory: arrayUnion({
+            date: updated.date,
+            pairs: newPairs,
+            receiveId: id,
+            source: updated.cutterName || 'Cutting Master',
+            customerName: newCustomerName,
+            orderNo: newOrderNo,
+            orderId: newOrderId,
+            size: newSize
+          })
+        }, { merge: true });
       }
-    });
-    batch.update(doc(db, 'cutters', current.cutterId), {
+    }
+
+    // 2. Order Move & Sync Logic (if Order, Article, Quantity, or Date changed)
+    if (oldOrderId !== newOrderId || oldPairs !== newPairs || oldArticle !== newArticle || updated.date !== current.date) {
+      if (oldOrderId && oldOrderId !== newOrderId) {
+        const oldOrd = orders.find(o => o.id === oldOrderId);
+        if (oldOrd) {
+          const updatedItems = oldOrd.items.map(itm => {
+            if (itm.title.toLowerCase() === oldArticle.toLowerCase() || itm.gloveType.toLowerCase() === oldArticle.toLowerCase()) {
+              return {
+                ...itm,
+                cuttingGivenQty: current.type === 'GIVE' ? Math.max(0, itm.cuttingGivenQty - oldPairs) : itm.cuttingGivenQty,
+                stockReceivedQty: current.type === 'RECEIVE' ? Math.max(0, itm.stockReceivedQty - oldPairs) : itm.stockReceivedQty
+              };
+            }
+            return itm;
+          });
+          batch.update(doc(db, 'customer_orders', oldOrderId), { items: updatedItems, updatedAt: new Date().toISOString() });
+          batch.delete(doc(db, 'customer_orders', oldOrderId, 'order_history', id));
+          batch.delete(doc(db, 'order_dispatch_history', id));
+        }
+      }
+      if (newOrderId && targetOrder) {
+        const isSameOrder = oldOrderId === newOrderId;
+        const qtyDelta = isSameOrder ? (newPairs - oldPairs) : newPairs;
+        const updatedItems = targetOrder.items.map(itm => {
+          const matchesNew = itm.title.toLowerCase() === newArticle.toLowerCase() || itm.gloveType.toLowerCase() === newArticle.toLowerCase();
+          const matchesOld = isSameOrder && (itm.title.toLowerCase() === oldArticle.toLowerCase() || itm.gloveType.toLowerCase() === oldArticle.toLowerCase());
+          if (isSameOrder && oldArticle.toLowerCase() !== newArticle.toLowerCase()) {
+            let nextGiven = itm.cuttingGivenQty;
+            let nextRcvd = itm.stockReceivedQty;
+            if (matchesOld) {
+              if (current.type === 'GIVE') nextGiven = Math.max(0, nextGiven - oldPairs);
+              if (current.type === 'RECEIVE') nextRcvd = Math.max(0, nextRcvd - oldPairs);
+            }
+            if (matchesNew) {
+              if (current.type === 'GIVE') nextGiven += newPairs;
+              if (current.type === 'RECEIVE') nextRcvd += newPairs;
+            }
+            return { ...itm, cuttingGivenQty: nextGiven, stockReceivedQty: nextRcvd };
+          }
+          if (matchesNew) {
+            return {
+              ...itm,
+              cuttingGivenQty: current.type === 'GIVE' ? Math.max(0, itm.cuttingGivenQty + qtyDelta) : itm.cuttingGivenQty,
+              stockReceivedQty: current.type === 'RECEIVE' ? Math.max(0, itm.stockReceivedQty + qtyDelta) : itm.stockReceivedQty
+            };
+          }
+          return itm;
+        });
+        batch.update(doc(db, 'customer_orders', newOrderId), { items: updatedItems, updatedAt: new Date().toISOString() });
+        batch.set(doc(db, 'customer_orders', newOrderId, 'order_history', id), stripUndefined({
+          date: updated.date,
+          actionType: current.type === 'GIVE' ? 'cutting_given' : 'stock_received',
+          quantity: newPairs,
+          personName: updated.cutterName || 'Cutting Master',
+          article: newArticle,
+          notes: updated.remarks || '',
+          createdAt: new Date().toISOString()
+        }), { merge: true });
+      }
+    }
+
+    // 3. Cutter Ledger Balances Recalculation
+    const cuttersToBalance = new Set([oldCutterId, newCutterId]);
+    for (const cId of cuttersToBalance) {
+      const cutterEntriesList = [
+        ...cuttingEntries.filter(e => e.id !== id && e.cutterId === cId),
+        ...(newCutterId === cId ? [updated] : [])
+      ].sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
+
+      let cBal = 0;
+      cutterEntriesList.forEach(e => {
+        cBal += e.lotTotal;
+        const eRef = doc(db, 'cuttingEntries', e.id);
+        batch.set(eRef, stripUndefined({ ...e, runningBalance: cBal }), { merge: true });
+      });
+
+      const totalGiven = cutterEntriesList.filter(e => e.type === 'GIVE').reduce((s, e) => s + e.pairs, 0);
+      const totalReceived = cutterEntriesList.filter(e => e.type === 'RECEIVE' || e.type === 'RETURN').reduce((s, e) => s + e.pairs, 0);
+      batch.set(doc(db, 'cutters', cId), {
         totalGiven,
         totalReceived,
-        pendingBalance: Math.max(0, totalGiven - totalReceived)
-    });
-    if (legacyTx) {
-      const txRef = doc(db, 'cutting_transactions', id);
-      batch.update(txRef, {
-        date: updated.date,
-        customerName: updated.customerName,
-        article: updated.article,
-        articleTitle: updated.articleTitle,
-        size: updated.size,
-        sizeName: updated.sizeName,
-        average: updated.average,
-        remarks: updated.remarks,
-        qty: updated.pairs,
-        totalQty: updated.totalQty,
-        rate: updated.rate,
-        lotTotal: updated.lotTotal,
-        totalBalance: updated.totalBalance,
-        customerOrder: updated.customerOrder,
-        billNo: updated.billNo
-      });
+        pendingBalance: Math.max(0, totalGiven - totalReceived),
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
     }
+
+    // 4. Update cuttingEntries and cutting_transactions
+    batch.set(doc(db, 'cuttingEntries', id), stripUndefined(updated), { merge: true });
+    batch.set(doc(db, 'cutting_transactions', id), stripUndefined({
+      ...updated,
+      qty: newPairs,
+      totalQty: newPairs
+    }), { merge: true });
+
     await batch.commit();
 
-    setCuttingEntries(previous => [
-      ...previous.filter(entry => entry.cutterId !== current.cutterId),
-      ...balanced
-    ].sort((a, b) => safeStringCompare(b.date, a.date)));
-    setCuttingTransactions(previous => previous.map(tx => tx.id === id ? {
-      ...tx,
-      date: updated.date,
-      customerName: updated.customerName,
-      article: updated.article,
-      articleTitle: updated.articleTitle,
-      size: updated.size,
-      sizeName: updated.sizeName,
-      average: updated.average,
-      remarks: updated.remarks,
-      qty: updated.pairs,
-      totalQty: updated.totalQty,
-      rate: updated.rate,
-      lotTotal: updated.lotTotal,
-      totalBalance: updated.totalBalance,
-      billNo: updated.billNo
-    } : tx));
-    setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
-      ...cutter,
-      totalGiven,
-      totalReceived,
-      pendingBalance: Math.max(0, totalGiven - totalReceived)
-    } : cutter));
+    // Local state updates
+    setCuttingEntries(prev => prev.map(e => e.id === id ? updated : e));
+    setCuttingTransactions(prev => prev.map(t => t.id === id ? ({ ...t, ...updated, type: t.type, qty: newPairs, totalQty: newPairs } as any) : t));
+    
+    if (oldArticle !== newArticle || oldOrderId !== newOrderId) {
+      showToast(`Entry moved from ${current.customerName || 'Direct'} / ${oldArticle} to ${newCustomerName} / ${newArticle}`);
+    } else {
+      showToast('Cutting entry updated successfully.');
+    }
   };
 
   const deleteCuttingEntry = async (id: string): Promise<void> => {
-    const current = cuttingEntries.find(entry => entry.id === id);
-    const legacyTx = cuttingTransactions.find(tx => tx.id === id);
-    const entry = current || (legacyTx ? {
-      id: legacyTx.id,
-      cutterId: legacyTx.cutterId,
-      cutterName: legacyTx.cutterName,
-      type: legacyTx.type,
-      date: legacyTx.date,
-      customerName: legacyTx.customerName || '',
-      article: legacyTx.article,
-      size: legacyTx.size || '',
-      pairs: legacyTx.qty,
-      rate: legacyTx.rate || 0,
-      lotTotal: legacyTx.lotTotal || legacyTx.qty * (legacyTx.rate || 0),
-      runningBalance: 0,
-      billNo: legacyTx.billNo || '',
-      createdAt: legacyTx.createdAt
-    } satisfies CuttingEntry : undefined);
-    if (!entry) {
-      console.warn(`Cutting entry ${id} not found in state, removing from any collections.`);
-      if (db) {
-        await deleteDoc(doc(db, 'cuttingEntries', id)).catch(() => {});
-        await deleteDoc(doc(db, 'cutting_transactions', id)).catch(() => {});
+    if (!id || !id.trim()) throw new Error('Invalid cutting entry ID.');
+    if (!db) throw new Error('Firestore is not available. The entry was not deleted.');
+
+    let current: any =
+      cuttingEntries.find(entry => entry.id === id) ||
+      cuttingTransactions.find(tx => tx.id === id);
+
+    if (!current) {
+      const [entrySnap, txSnap] = await Promise.all([
+        getDoc(doc(db, 'cuttingEntries', id)),
+        getDoc(doc(db, 'cutting_transactions', id))
+      ]);
+      if (entrySnap.exists()) {
+        current = { ...entrySnap.data(), id: entrySnap.id };
+      } else if (txSnap.exists()) {
+        current = { ...txSnap.data(), id: txSnap.id };
       }
-      setCuttingEntries(previous => previous.filter(e => e.id !== id));
-      setCuttingTransactions(previous => previous.filter(t => t.id !== id));
-      return;
     }
-    if (entry.type === 'RETURN') {
+
+    if (current?.type === 'RETURN') {
       await deleteCuttingReturn(id);
       return;
     }
-    if (cuttingEntries.some(saved => saved.type === 'RETURN' && saved.returnReferenceId === entry.id)) {
-      throw new Error('This cutting entry has recorded returns and cannot be deleted.');
-    }
-    if (!db) throw new Error('Firestore is not available. The entry was not deleted.');
 
-    // Cascade delete any child entries (e.g. size matrix children linked via parentCuttingId)
-    const childEntryIds = cuttingEntries.filter(e => e.parentCuttingId === id).map(e => e.id);
-    const childTxIds = cuttingTransactions.filter(t => (t as any).parentCuttingId === id).map(t => t.id);
-    const allIdsToDelete = new Set([id, ...childEntryIds, ...childTxIds]);
-
-    const remaining = cuttingEntries.filter(entry => !allIdsToDelete.has(entry.id));
-    const legacyRemaining = cuttingTransactions
-      .filter(tx => !allIdsToDelete.has(tx.id) && !remaining.some(saved => saved.id === tx.id))
-      .map(tx => ({
-        id: tx.id,
-        cutterId: tx.cutterId,
-        cutterName: tx.cutterName,
-        type: tx.type,
-        date: tx.date,
-        customerName: tx.customerName || '',
-        article: tx.article,
-        size: tx.size || '',
-        sizeName: tx.sizeName || tx.size || '',
-        average: tx.average || '',
-        remarks: tx.notes || '',
-        pairs: tx.qty,
-        rate: tx.rate || 0,
-        lotTotal: tx.lotTotal || tx.qty * (tx.rate || 0),
-        runningBalance: 0,
-        billNo: tx.billNo || '',
-        createdAt: tx.createdAt
-      } satisfies CuttingEntry));
-    const affected = [...remaining, ...legacyRemaining]
-      .filter(item => item.cutterId === entry.cutterId)
-      .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id));
-    let balance = 0;
-    const balanced = affected.map(entry => {
-      balance += entry.lotTotal;
-      return { ...entry, runningBalance: balance };
+    const allIdsToDelete = new Set<string>([id]);
+    cuttingEntries.forEach(e => {
+      if (e.parentCuttingId === id) allIdsToDelete.add(e.id);
     });
-    const totalGiven = affected.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
-    const totalReceived = affected
-      .filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN')
-      .reduce((sum, entry) => sum + entry.pairs, 0);
+    cuttingTransactions.forEach(t => {
+      if ((t as any).parentCuttingId === id) allIdsToDelete.add(t.id);
+    });
 
-    for (const deleteId of allIdsToDelete) {
-      await deleteDoc(doc(db, 'cuttingEntries', deleteId)).catch(() => {});
-      await deleteDoc(doc(db, 'cutting_transactions', deleteId)).catch(() => {});
-    }
-    const batch = writeBatch(db);
-    balanced.forEach(entry => {
-      const entryRef = doc(db, 'cuttingEntries', entry.id);
-      if (remaining.some(saved => saved.id === entry.id)) {
-        batch.update(entryRef, { runningBalance: entry.runningBalance });
-      } else {
-        batch.set(entryRef, entry);
+    const targetSignature = current ? getCuttingSignature(current) : '';
+
+    // Scan Firestore cuttingEntries & cutting_transactions to find all related/duplicate docs
+    // so deleting 1 deduped row NEVER leaves a duplicate doc behind to resurrect 1s later.
+    const [allCuttingEntriesSnap, allCuttingTxSnap] = await Promise.all([
+      getDocs(collection(db, 'cuttingEntries')),
+      getDocs(collection(db, 'cutting_transactions'))
+    ]);
+    const existingCuttingEntryDocIds = new Set<string>();
+    allCuttingEntriesSnap.docs.forEach(d => {
+      existingCuttingEntryDocIds.add(d.id);
+      const data = d.data();
+      if (data.parentCuttingId === id) allIdsToDelete.add(d.id);
+      if (targetSignature && getCuttingSignature(data) === targetSignature) {
+        allIdsToDelete.add(d.id);
       }
     });
-    batch.update(doc(db, 'cutters', entry.cutterId), {
-      totalGiven,
-      totalReceived,
-      pendingBalance: Math.max(0, totalGiven - totalReceived)
+    allCuttingTxSnap.docs.forEach(d => {
+      const data = d.data();
+      if (data.parentCuttingId === id) allIdsToDelete.add(d.id);
+      if (targetSignature && getCuttingSignature(data) === targetSignature) {
+        allIdsToDelete.add(d.id);
+      }
     });
+
+    // Persist deleted IDs blocklist immediately in Firestore + localStorage
+    await markCuttingIdsDeleted(allIdsToDelete);
+
+    const articleName = (current?.articleTitle || current?.article || '').trim();
+    const sizeName = (current?.sizeName || current?.size || 'Standard').trim();
+    const pairs = Math.abs(Number(current?.pairs ?? current?.totalQty ?? current?.qty ?? 0));
+    const entryType = current?.type || 'RECEIVE';
+    const orderIdToClean = current?.orderId || orders.find(o =>
+      (current?.orderNo && o.orderNo === current.orderNo) ||
+      (o.customerName && current?.customerName && o.customerName.toLowerCase().trim() === current.customerName.toLowerCase().trim())
+    )?.id || '';
+
+    const batch = writeBatch(db);
+    const now = new Date().toISOString();
+
+    // 1. Stock Reversal (Hard delete from stock_management, article_stock & stock_ledger — no negative rows)
+    const removedStockIds = new Set<string>();
+    const updatedStockMgmtMap = new Map<string, Partial<FactoryStockItem>>();
+    const updatedArticleStockMap = new Map<string, Partial<ArticleStockItem>>();
+    const deletedLedgerIds = new Set<string>();
+
+    if (entryType === 'RECEIVE') {
+      const stockDocId = articleName ? `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(sizeName)}` : '';
+      const articleDocId = articleName ? normalizeStockDocumentId(articleName) : '';
+
+      const [stockSnap, articleSnap, ledgerSnap] = await Promise.all([
+        getDocs(collection(db, 'stock_management')),
+        getDocs(collection(db, 'article_stock')),
+        getDocs(collection(db, 'stock_ledger'))
+      ]);
+
+      stockSnap.docs.forEach(d => {
+        const data = d.data();
+        const existingReceiveIds: string[] = Array.isArray(data.receiveIds) ? data.receiveIds : [];
+        const hasAnyId = existingReceiveIds.some(rId => allIdsToDelete.has(rId));
+        const matchesIdFallback = !hasAnyId && stockDocId && d.id === stockDocId && existingReceiveIds.length === 0;
+        if (hasAnyId || matchesIdFallback) {
+          const nextReceiveIds = existingReceiveIds.filter(rId => !allIdsToDelete.has(rId));
+          const decQty = pairs;
+          const nextQty = Math.max(0, (Number(data.qty) || 0) - decQty);
+          const nextTotalStock = Math.max(0, (Number(data.totalStock) || 0) - decQty);
+          const nextCuttingReceived = Math.max(0, (Number(data.totalCuttingReceived) || 0) - decQty);
+          const nextDelivered = Number(data.totalDelivered) || 0;
+          const nextBalance = Math.max(0, (Number(data.balance) || 0) - decQty);
+          if (nextReceiveIds.length === 0 && nextDelivered === 0 && nextCuttingReceived === 0) {
+            batch.delete(doc(db, 'stock_management', d.id));
+            removedStockIds.add(d.id);
+          } else {
+            const patch = {
+              qty: nextQty,
+              totalStock: nextTotalStock,
+              totalCuttingReceived: nextCuttingReceived,
+              balance: nextBalance,
+              receiveIds: nextReceiveIds,
+              updatedAt: now
+            };
+            batch.update(doc(db, 'stock_management', d.id), patch);
+            updatedStockMgmtMap.set(d.id, patch);
+          }
+        }
+      });
+
+      articleSnap.docs.forEach(d => {
+        const data = d.data();
+        const hist: any[] = Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [];
+        const matchedHist = hist.filter(h => allIdsToDelete.has(h?.receiveId || ''));
+        const matchesDocFallback = matchedHist.length === 0 && articleDocId && d.id === articleDocId;
+        if (matchedHist.length > 0 || (matchesDocFallback && hist.length === 0 && Number(data.totalReceived) > 0)) {
+          const removedHistPairs = matchedHist.reduce((sum, h) => sum + Math.abs(Number(h?.pairs) || 0), 0);
+          const decQty = removedHistPairs > 0 ? removedHistPairs : pairs;
+          const nextHist = hist.filter(h => !allIdsToDelete.has(h?.receiveId || ''));
+          const nextReceived = Math.max(0, (Number(data.totalReceived) || 0) - decQty);
+          const nextAvailable = Math.max(0, (Number(data.totalAvailable) || 0) - decQty);
+          const patch = {
+            totalReceived: nextReceived,
+            totalAvailable: nextAvailable,
+            cuttingHistory: nextHist
+          };
+          batch.update(doc(db, 'article_stock', d.id), patch);
+          updatedArticleStockMap.set(d.id, patch);
+        }
+      });
+
+      ledgerSnap.docs.forEach(d => {
+        const data = d.data();
+        const refId = String(data?.referenceId || '');
+        const strippedId = d.id.replace(/^stk-/, '');
+        if (allIdsToDelete.has(d.id) || allIdsToDelete.has(strippedId) || (refId && allIdsToDelete.has(refId))) {
+          batch.delete(doc(db, 'stock_ledger', d.id));
+          deletedLedgerIds.add(d.id);
+        }
+      });
+    }
+
+    // 2. Customer Order Progress & History Cleanup (with doc existence checks)
+    const deletedDispatchHistoryIds = new Set<string>(allIdsToDelete);
+    const dispatchSnap = await getDocs(collection(db, 'order_dispatch_history'));
+    dispatchSnap.docs.forEach(d => {
+      const data = d.data();
+      const cuttingId = String(data?.cuttingId || '');
+      const legacyMatch = !cuttingId && orderIdToClean && data.orderId === orderIdToClean &&
+        data.date === current?.date &&
+        Number(data.quantity) === pairs &&
+        String(data.article || '').trim().toLowerCase() === articleName.toLowerCase() &&
+        String(data.personName || '').trim().toLowerCase() === String(current?.cutterName || '').trim().toLowerCase();
+      if (allIdsToDelete.has(d.id) || (cuttingId && allIdsToDelete.has(cuttingId)) || legacyMatch) {
+        batch.delete(doc(db, 'order_dispatch_history', d.id));
+        deletedDispatchHistoryIds.add(d.id);
+      }
+    });
+
+    if (orderIdToClean) {
+      const [orderDocSnap, subHistorySnap] = await Promise.all([
+        getDoc(doc(db, 'customer_orders', orderIdToClean)),
+        getDocs(collection(db, 'customer_orders', orderIdToClean, 'order_history'))
+      ]);
+      subHistorySnap.docs.forEach(d => {
+        const data = d.data();
+        const cuttingId = String(data?.cuttingId || '');
+        const legacyMatch = !cuttingId && current &&
+          data.date === current.date &&
+          Number(data.quantity) === pairs &&
+          String(data.article || '').trim().toLowerCase() === articleName.toLowerCase() &&
+          String(data.personName || '').trim().toLowerCase() === String(current.cutterName || '').trim().toLowerCase();
+        if (allIdsToDelete.has(d.id) || (cuttingId && allIdsToDelete.has(cuttingId)) || legacyMatch) {
+          batch.delete(doc(db, 'customer_orders', orderIdToClean, 'order_history', d.id));
+        }
+      });
+
+      if (orderDocSnap.exists()) {
+        const remoteItems: OrderItem[] = Array.isArray(orderDocSnap.data().items) ? orderDocSnap.data().items : [];
+        const updatedItems = remoteItems.map(itm => {
+          if (
+            (itm.title || '').toLowerCase() === articleName.toLowerCase() ||
+            (itm.gloveType || '').toLowerCase() === articleName.toLowerCase() ||
+            (itm.article || '').toLowerCase() === articleName.toLowerCase()
+          ) {
+            return {
+              ...itm,
+              cuttingGivenQty: entryType === 'GIVE' ? Math.max(0, (Number(itm.cuttingGivenQty) || 0) - pairs) : (Number(itm.cuttingGivenQty) || 0),
+              stockReceivedQty: entryType === 'RECEIVE' ? Math.max(0, (Number(itm.stockReceivedQty) || 0) - pairs) : (Number(itm.stockReceivedQty) || 0)
+            };
+          }
+          return itm;
+        });
+        batch.update(doc(db, 'customer_orders', orderIdToClean), { items: updatedItems, updatedAt: now });
+      }
+    }
+
+    // 3. Delete from cuttings, cuttingEntries, and cutting_transactions
+    for (const delId of allIdsToDelete) {
+      batch.delete(doc(db, 'cuttings', delId));
+      batch.delete(doc(db, 'cuttingEntries', delId));
+      batch.delete(doc(db, 'cutting_transactions', delId));
+    }
+
+    // 4. Recalculate cutter ledger running balances safely (only update existing docs!)
+    const targetCutterId = current?.cutterId || '';
+    const remaining = cuttingEntries.filter(entry => !allIdsToDelete.has(entry.id) && (!targetCutterId || entry.cutterId === targetCutterId));
+    let balance = 0;
+    const balanced = remaining
+      .filter(entry => targetCutterId && entry.cutterId === targetCutterId)
+      .sort((a, b) => safeStringCompare(a.date, b.date) || safeStringCompare(a.createdAt, b.createdAt) || safeStringCompare(a.id, b.id))
+      .map(entry => {
+        balance += entry.lotTotal;
+        return { ...entry, runningBalance: balance };
+      });
+    balanced.forEach(entry => {
+      if (existingCuttingEntryDocIds.has(entry.id)) {
+        batch.update(doc(db, 'cuttingEntries', entry.id), { runningBalance: entry.runningBalance });
+      }
+    });
+
+    const totalGiven = balanced.filter(entry => entry.type === 'GIVE').reduce((sum, entry) => sum + entry.pairs, 0);
+    const totalReceived = balanced.filter(entry => entry.type === 'RECEIVE' || entry.type === 'RETURN').reduce((sum, entry) => sum + entry.pairs, 0);
+    if (targetCutterId) {
+      const cutterSnap = await getDoc(doc(db, 'cutters', targetCutterId));
+      if (cutterSnap.exists()) {
+        batch.update(doc(db, 'cutters', targetCutterId), {
+          totalGiven,
+          totalReceived,
+          pendingBalance: Math.max(0, totalGiven - totalReceived),
+          updatedAt: now
+        });
+      }
+    }
+
     await batch.commit();
 
-    setCuttingEntries(previous => [
-      ...previous.filter(saved => saved.cutterId !== entry.cutterId),
-      ...balanced
-    ].sort((a, b) => safeStringCompare(b.date, a.date)));
-    setCuttingTransactions(previous => previous.filter(tx => !allIdsToDelete.has(tx.id)));
-    setCutters(previous => previous.map(cutter => cutter.id === entry.cutterId ? {
-      ...cutter,
-      totalGiven,
-      totalReceived,
-      pendingBalance: Math.max(0, totalGiven - totalReceived)
-    } : cutter));
+    // 5. Immediately update ALL React states AND localStorage caches so Ctrl+R never resurrects deleted rows
+    setCuttingEntries(prev => prev.filter(e => !allIdsToDelete.has(e.id)));
+    setCuttingTransactions(prev => {
+      const next = prev.filter(t => !allIdsToDelete.has(t.id));
+      saveLocal(STORAGE_KEYS.CUTTING_TXS, next);
+      return next;
+    });
+    setCuttings(prev => {
+      const next = prev.filter(c => !allIdsToDelete.has(c.id));
+      saveLocal(STORAGE_KEYS.CUTTINGS, next);
+      return next;
+    });
+    setOrderDispatchHistory(prev => {
+      const next = prev.filter(h => !deletedDispatchHistoryIds.has(h.id) && !allIdsToDelete.has((h as any).cuttingId || ''));
+      saveLocal(STORAGE_KEYS.ORDER_HISTORY, next);
+      return next;
+    });
+    if (entryType === 'RECEIVE') {
+      setStockLedger(prev => {
+        const next = prev.filter(l =>
+          !deletedLedgerIds.has(l.id) &&
+          !allIdsToDelete.has(l.id) &&
+          !allIdsToDelete.has(l.id.replace(/^stk-/, '')) &&
+          !allIdsToDelete.has(l.referenceId || '')
+        );
+        saveLocal(STORAGE_KEYS.STOCK_LEDGER, next);
+        return next;
+      });
+      setStockManagement(prev =>
+        prev
+          .filter(s => !removedStockIds.has(s.id))
+          .map(s => updatedStockMgmtMap.has(s.id) ? { ...s, ...updatedStockMgmtMap.get(s.id)! } : s)
+      );
+      setArticleStock(prev =>
+        prev.map(a => updatedArticleStockMap.has(a.id) ? { ...a, ...updatedArticleStockMap.get(a.id)! } : a)
+      );
+    }
+    if (orderIdToClean) {
+      setOrders(prev => {
+        const next = prev.map(ord => {
+          if (ord.id !== orderIdToClean) return ord;
+          const updatedItems = ord.items.map(itm => {
+            if (
+              (itm.title || '').toLowerCase() === articleName.toLowerCase() ||
+              (itm.gloveType || '').toLowerCase() === articleName.toLowerCase() ||
+              (itm.article || '').toLowerCase() === articleName.toLowerCase()
+            ) {
+              return {
+                ...itm,
+                cuttingGivenQty: entryType === 'GIVE' ? Math.max(0, (Number(itm.cuttingGivenQty) || 0) - pairs) : (Number(itm.cuttingGivenQty) || 0),
+                stockReceivedQty: entryType === 'RECEIVE' ? Math.max(0, (Number(itm.stockReceivedQty) || 0) - pairs) : (Number(itm.stockReceivedQty) || 0)
+              };
+            }
+            return itm;
+          });
+          return { ...ord, items: updatedItems, updatedAt: now };
+        });
+        saveLocal(STORAGE_KEYS.ORDERS, next);
+        return next;
+      });
+    }
+    if (targetCutterId) {
+      setCutters(prev => {
+        const next = prev.map(c => c.id === targetCutterId ? {
+          ...c,
+          totalGiven,
+          totalReceived,
+          pendingBalance: Math.max(0, totalGiven - totalReceived)
+        } : c);
+        saveLocal(STORAGE_KEYS.CUTTERS, next);
+        return next;
+      });
+    }
   };
 
   const returnCutting = async (data: {
@@ -2846,7 +4233,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    setDeliveryHistory(prev => [delivery, ...prev.filter(d => d.id !== delivery.id)]);
+    const nextDeliveries = [delivery, ...deliveryHistory.filter(d => d.id !== delivery.id)];
+    setDeliveryHistory(nextDeliveries);
+    saveLocal(STORAGE_KEYS.STOCK_OUT, nextDeliveries);
     setOrderDispatchHistory(prev => [{
       id: dispatchHistoryId,
       orderId: order.id,
@@ -2901,6 +4290,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       throw new Error('Enter an article, date, and a valid positive pair quantity.');
     }
     if (!db) throw new Error('Firestore is not available. The stock receipt was not saved.');
+
+    await unmarkDeletedArticle(articleName);
 
     const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(articleName));
     const stockRef = doc(db, 'stock_management', `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(size)}`);
@@ -3021,18 +4412,24 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }).catch(() => {});
     }
 
-    setDeliveryHistory(prev => prev.map(d => d.id === id ? updatedDelivery : d));
+    if (current.orderId && qtyDelta !== 0) {
+      await updateDoc(doc(db, 'customer_orders', current.orderId), {
+        dispatchedPairs: increment(qtyDelta),
+        updatedAt: now
+      }).catch(e => console.warn('customer_orders dispatch update:', e));
+    }
+
+    const nextUpdatedDeliveries = deliveryHistory.map(d => d.id === id ? updatedDelivery : d);
+    setDeliveryHistory(nextUpdatedDeliveries);
+    saveLocal(STORAGE_KEYS.STOCK_OUT, nextUpdatedDeliveries);
   };
 
   const deleteStockInEntry = async (id: string): Promise<void> => {
+    await markCuttingIdsDeleted([id]);
     // 1. Delete or unlink from cuttingEntries / cutting_transactions if exists
-    try {
-      await deleteCuttingEntry(id);
-    } catch (err) {
-      console.warn('Could not delete cutting entry during stock IN delete:', err);
-    }
+    await deleteCuttingEntry(id);
 
-    // 2. Remove from article_stock collections
+    // 2. Remove any leftover entry from article_stock collections if it came only from direct stock receipt
     if (db) {
       try {
         const articleDocs = await getDocs(collection(db, 'article_stock'));
@@ -3058,7 +4455,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // 3. Update local states
     setCuttingEntries(prev => prev.filter(e => e.id !== id));
-    setCuttingTransactions(prev => prev.filter(t => t.id !== id));
+    setCuttingTransactions(prev => {
+      const next = prev.filter(t => t.id !== id);
+      saveLocal(STORAGE_KEYS.CUTTING_TXS, next);
+      return next;
+    });
     setArticleStock(prev => prev.map(stock => ({
       ...stock,
       cuttingHistory: (stock.cuttingHistory || []).filter((h, i) => h.receiveId !== id && `art-hist-${i}-${h.date}` !== id && (h as any).id !== id)
@@ -3300,48 +4701,280 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     showToast(`Article "${rawTrimmed}" restored successfully.`);
   };
 
-  const deleteStockDelivery = async (id: string): Promise<void> => {
+  const deleteStockDelivery = async (
+    id: string,
+    fallbackMeta?: { article?: string; quantity?: number; orderId?: string }
+  ): Promise<void> => {
     const current = deliveryHistory.find(entry => entry.id === id);
-    if (!current?.linkedStockId) throw new Error('The stock delivery no longer exists.');
-    if (!db) throw new Error('Firestore is not available. The delivery was not deleted.');
 
-    const stockRef = doc(db, 'stock_management', current.linkedStockId);
-    const articleRef = doc(db, 'article_stock', normalizeStockDocumentId(current.article));
-    const deliveryRef = doc(db, 'stock_delivery_history', id);
+    // Always record ID in blocklist so deleted/orphaned rows never reappear after Ctrl+R
+    await markDeliveriesDeleted([id]);
+
+    // Resolve article/size/quantity either from deliveryHistory, articleStock.deliveryHistory, or fallbackMeta
+    let articleName = (current?.article || fallbackMeta?.article || '').trim();
+    let sizeName = (current?.size || 'Standard').trim();
+    let quantity = Number(current?.quantity ?? fallbackMeta?.quantity ?? 0) || 0;
+    const orderId = current?.orderId || fallbackMeta?.orderId || '';
+    const dispatchHistoryId = current?.dispatchHistoryId;
+    const orderHistoryId = current?.orderHistoryId;
+
+    if (!current && articleStock.length > 0) {
+      for (const artItem of articleStock) {
+        const matchedHist = (artItem.deliveryHistory || []).find((h, idx) =>
+          h.deliveryId === id || `art-del-${idx}-${h.date}` === id
+        );
+        if (matchedHist) {
+          articleName = articleName || artItem.articleName;
+          quantity = quantity || Number(matchedHist.pairs) || 0;
+          break;
+        }
+      }
+    }
+
+    const linkedStockId = current?.linkedStockId || (
+      articleName ? `${normalizeStockDocumentId(articleName)}__${normalizeStockDocumentId(sizeName)}` : ''
+    );
     const now = new Date().toISOString();
-    await runTransaction(db, async transaction => {
-      const [stockSnapshot, articleSnapshot, deliverySnapshot] = await Promise.all([
-        transaction.get(stockRef),
-        transaction.get(articleRef),
-        transaction.get(deliveryRef)
-      ]);
-      if (!stockSnapshot.exists() || !articleSnapshot.exists() || !deliverySnapshot.exists()) {
-        throw new Error('Stock delivery records are unavailable. Refresh and try again.');
+
+    if (db) {
+      try {
+        const stockRef = linkedStockId ? doc(db, 'stock_management', linkedStockId) : null;
+        const articleRef = articleName ? doc(db, 'article_stock', normalizeStockDocumentId(articleName)) : null;
+        const deliveryRef = doc(db, 'stock_delivery_history', id);
+        const orderRef = orderId ? doc(db, 'customer_orders', orderId) : null;
+
+        await runTransaction(db, async transaction => {
+          // Execute ALL reads BEFORE any writes, and check exists() before updating!
+          const [stockSnapshot, articleSnapshot, orderSnapshot] = await Promise.all([
+            stockRef ? transaction.get(stockRef) : Promise.resolve(null),
+            articleRef ? transaction.get(articleRef) : Promise.resolve(null),
+            orderRef ? transaction.get(orderRef) : Promise.resolve(null)
+          ]);
+
+          if (stockSnapshot && stockSnapshot.exists() && stockRef) {
+            const stockData = stockSnapshot.data();
+            transaction.update(stockRef, {
+              totalDelivered: increment(-quantity),
+              balance: increment(quantity),
+              deliveryIds: (Array.isArray(stockData.deliveryIds) ? stockData.deliveryIds : [])
+                .filter((deliveryId: string) => deliveryId !== id),
+              updatedAt: now
+            });
+          }
+
+          if (articleSnapshot && articleSnapshot.exists() && articleRef) {
+            const articleData = articleSnapshot.data();
+            transaction.update(articleRef, {
+              totalAvailable: increment(quantity),
+              totalDelivered: increment(-quantity),
+              deliveryHistory: (Array.isArray(articleData.deliveryHistory) ? articleData.deliveryHistory : [])
+                .filter((entry: { deliveryId?: string; date?: string }, idx: number) =>
+                  entry.deliveryId !== id && `art-del-${idx}-${entry.date}` !== id
+                )
+            });
+          }
+
+          transaction.delete(deliveryRef);
+
+          if (dispatchHistoryId) {
+            transaction.delete(doc(db!, 'order_dispatch_history', dispatchHistoryId));
+          }
+          if (orderHistoryId && orderId) {
+            transaction.delete(doc(db!, 'customer_orders', orderId, 'order_history', orderHistoryId));
+          }
+          // CRITICAL: Only update parent customer order if it STILL exists (handles orphaned deliveries!)
+          if (orderSnapshot && orderSnapshot.exists() && orderRef && quantity > 0) {
+            transaction.update(orderRef, {
+              dispatchedPairs: increment(-quantity),
+              totalDelivered: increment(-quantity),
+              updatedAt: now
+            });
+          }
+        });
+
+        // Also clean up any stray article_stock/stock_ledger references if articleName wasn't exact
+        const [stockLedgerSnap, dispatchSnap] = await Promise.all([
+          getDocs(collection(db, 'stock_ledger')),
+          getDocs(collection(db, 'order_dispatch_history'))
+        ]);
+        const extraBatch = writeBatch(db);
+        let hasExtraDeletes = false;
+        stockLedgerSnap.docs.forEach(sl => {
+          if (sl.data()?.referenceId === id || sl.id === id) {
+            extraBatch.delete(doc(db!, 'stock_ledger', sl.id));
+            hasExtraDeletes = true;
+          }
+        });
+        dispatchSnap.docs.forEach(dh => {
+          if (dh.id === id || dh.id === dispatchHistoryId) {
+            extraBatch.delete(doc(db!, 'order_dispatch_history', dh.id));
+            hasExtraDeletes = true;
+          }
+        });
+        if (hasExtraDeletes) await extraBatch.commit();
+      } catch (err) {
+        console.error('Firestore deleteStockDelivery transaction notice:', err);
       }
-      const quantity = Number(deliverySnapshot.data().quantity) || 0;
-      const savedDelivery = deliverySnapshot.data() as DeliveryHistoryEntry;
-      const articleData = articleSnapshot.data();
-      transaction.update(stockRef, {
-        totalDelivered: increment(-quantity),
-        balance: increment(quantity),
-        deliveryIds: (Array.isArray(stockSnapshot.data().deliveryIds) ? stockSnapshot.data().deliveryIds : [])
-          .filter((deliveryId: string) => deliveryId !== id),
-        updatedAt: now
-      });
-      transaction.update(articleRef, {
-        totalAvailable: increment(quantity),
-        totalDelivered: increment(-quantity),
-        deliveryHistory: (Array.isArray(articleData.deliveryHistory) ? articleData.deliveryHistory : [])
-          .filter((entry: { deliveryId?: string }) => entry.deliveryId !== id)
-      });
-      transaction.delete(deliveryRef);
-      if (savedDelivery.dispatchHistoryId) {
-        transaction.delete(doc(db, 'order_dispatch_history', savedDelivery.dispatchHistoryId));
-      }
-      if (savedDelivery.orderHistoryId && savedDelivery.orderId) {
-        transaction.delete(doc(db, 'customer_orders', savedDelivery.orderId, 'order_history', savedDelivery.orderHistoryId));
-      }
+    }
+
+    const nextDeliveries = deliveryHistory.filter(d => d.id !== id);
+    setDeliveryHistory(nextDeliveries);
+    saveLocal(STORAGE_KEYS.STOCK_OUT, nextDeliveries);
+
+    if (dispatchHistoryId) {
+      const nextDispatch = orderDispatchHistory.filter(h => h.id !== dispatchHistoryId && h.id !== id);
+      setOrderDispatchHistory(nextDispatch);
+      saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextDispatch);
+    }
+
+    setArticleStock(prev => prev.map(art => {
+      const hasMatch = (art.deliveryHistory || []).some((h, idx) =>
+        h.deliveryId === id || `art-del-${idx}-${h.date}` === id
+      );
+      if (!hasMatch) return art;
+      const filteredHist = (art.deliveryHistory || []).filter((h, idx) =>
+        h.deliveryId !== id && `art-del-${idx}-${h.date}` !== id
+      );
+      return {
+        ...art,
+        totalAvailable: (Number(art.totalAvailable) || 0) + quantity,
+        totalDelivered: Math.max(0, (Number(art.totalDelivered) || 0) - quantity),
+        deliveryHistory: filteredHist
+      };
+    }));
+
+    setStockManagement(prev => prev.map(s => {
+      if (s.id !== linkedStockId && !(s.deliveryIds || []).includes(id)) return s;
+      return {
+        ...s,
+        totalDelivered: Math.max(0, (Number(s.totalDelivered) || 0) - quantity),
+        balance: (Number(s.balance) || 0) + quantity,
+        deliveryIds: (s.deliveryIds || []).filter(dId => dId !== id)
+      };
+    }));
+
+    console.log(`Deleted Stock Out delivery ID: ${id}, returned ${quantity} pairs for ${articleName || 'article'}`);
+    showToast('Delivery deleted, Stock returned', 'success');
+  };
+
+  const clearAllStockOutData = async (): Promise<void> => {
+    const allDelIds = new Set<string>(deliveryHistory.map(d => d.id));
+    articleStock.forEach(a => {
+      (a.deliveryHistory || []).forEach(h => { if (h.deliveryId) allDelIds.add(h.deliveryId); });
     });
+
+    if (db) {
+      try {
+        const [deliveriesSnap, dispatchSnap, stockMgmtSnap, articleStockSnap, ordersSnap, stockLedgerSnap] = await Promise.all([
+          getDocs(collection(db, 'stock_delivery_history')),
+          getDocs(collection(db, 'order_dispatch_history')),
+          getDocs(collection(db, 'stock_management')),
+          getDocs(collection(db, 'article_stock')),
+          getDocs(collection(db, 'customer_orders')),
+          getDocs(collection(db, 'stock_ledger'))
+        ]);
+
+        deliveriesSnap.docs.forEach(d => allDelIds.add(d.id));
+        await markDeliveriesDeleted(allDelIds);
+
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        const now = new Date().toISOString();
+
+        deliveriesSnap.docs.forEach(d => {
+          ops.push(b => b.delete(doc(db!, 'stock_delivery_history', d.id)));
+        });
+
+        dispatchSnap.docs.forEach(d => {
+          if (d.data()?.actionType === 'dispatched_to_customer') {
+            ops.push(b => b.delete(doc(db!, 'order_dispatch_history', d.id)));
+          }
+        });
+
+        stockLedgerSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data?.type === 'sale' || data?.type === 'out' || allDelIds.has(String(data?.referenceId || ''))) {
+            ops.push(b => b.delete(doc(db!, 'stock_ledger', d.id)));
+          }
+        });
+
+        articleStockSnap.docs.forEach(d => {
+          const data = d.data();
+          const totalReceived = Number(data.totalReceived) || 0;
+          ops.push(b => b.update(doc(db!, 'article_stock', d.id), {
+            deliveryHistory: [],
+            totalDelivered: 0,
+            totalAvailable: totalReceived,
+            lastUpdated: now
+          }));
+        });
+
+        stockMgmtSnap.docs.forEach(d => {
+          const data = d.data();
+          const baseStock = Number(data.totalCuttingReceived ?? data.qty ?? data.totalStock ?? 0) || 0;
+          ops.push(b => b.update(doc(db!, 'stock_management', d.id), {
+            deliveryIds: [],
+            totalDelivered: 0,
+            balance: baseStock,
+            updatedAt: now
+          }));
+        });
+
+        for (const oDoc of ordersSnap.docs) {
+          ops.push(b => b.update(doc(db!, 'customer_orders', oDoc.id), {
+            dispatchedPairs: 0,
+            totalDelivered: 0,
+            updatedAt: now
+          }));
+          const subSnap = await getDocs(collection(db, 'customer_orders', oDoc.id, 'order_history'));
+          subSnap.docs.forEach(sub => {
+            if (sub.data()?.actionType === 'dispatched_to_customer') {
+              ops.push(b => b.delete(doc(db!, 'customer_orders', oDoc.id, 'order_history', sub.id)));
+            }
+          });
+        }
+
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
+      } catch (err) {
+        console.error('Error clearing all stock out data:', err);
+      }
+    } else {
+      await markDeliveriesDeleted(allDelIds);
+    }
+
+    // Clear all Stock Out keys from localStorage
+    localStorage.removeItem(STORAGE_KEYS.STOCK_OUT);
+    saveLocal(STORAGE_KEYS.STOCK_OUT, []);
+    const remainingDispatch = orderDispatchHistory.filter(h => h.actionType !== 'dispatched_to_customer');
+    saveLocal(STORAGE_KEYS.ORDER_HISTORY, remainingDispatch);
+    const remainingLedger = stockLedger.filter(s => s.type !== 'sale' && s.type !== 'out' && !allDelIds.has(s.referenceId || ''));
+    saveLocal(STORAGE_KEYS.STOCK_LEDGER, remainingLedger);
+
+    setDeliveryHistory([]);
+    setOrderDispatchHistory(remainingDispatch);
+    setStockLedger(remainingLedger);
+    setArticleStock(prev => prev.map(a => ({
+      ...a,
+      deliveryHistory: [],
+      totalDelivered: 0,
+      totalAvailable: Number(a.totalReceived) || 0
+    })));
+    setStockManagement(prev => prev.map(s => ({
+      ...s,
+      deliveryIds: [],
+      totalDelivered: 0,
+      balance: Number(s.totalCuttingReceived ?? s.qty ?? s.totalStock ?? 0) || 0
+    })));
+    setOrders(prev => prev.map(o => ({ ...o, totalDelivered: 0 })));
+
+    console.log(`Cleared all Stock Out data (${allDelIds.size} records removed).`);
+    showToast('All Stock Out data cleared. Refreshing...', 'info');
+    if (typeof window !== 'undefined') {
+      setTimeout(() => window.location.reload(), 250);
+    }
   };
 
   const deleteFactoryStock = async (id: string): Promise<void> => {
@@ -3387,10 +5020,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return [];
     }
     try {
-      const entries = (cuttingEntries || []).filter(entry => entry && entry.cutterId === cutterId);
+      const entries = (cuttingEntries || []).filter(entry =>
+        entry && entry.cutterId === cutterId && !entry.isDeleted && !deletedCuttingIdSet.has(entry.id)
+      );
       const savedIds = new Set(entries.map(entry => entry.id));
       const legacyEntries = (cuttingTransactions || [])
-        .filter(tx => tx && tx.cutterId === cutterId && !savedIds.has(tx.id))
+        .filter(tx => tx && tx.cutterId === cutterId && !tx.isDeleted && !deletedCuttingIdSet.has(tx.id) && !savedIds.has(tx.id))
         .map(tx => ({
           id: tx.id,
           cutterId: tx.cutterId,
@@ -3412,6 +5047,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           customerOrder: tx.customerOrder || tx.orderNo || 'Direct Cutting',
           runningBalance: 0,
           billNo: tx.billNo || '',
+          isExtraCutting: Boolean(tx.isExtraCutting),
+          extraCuttingQty: tx.extraCuttingQty !== undefined ? Number(tx.extraCuttingQty) : (tx.isExtraCutting ? -Math.abs(tx.qty) : 0),
           createdAt: tx.createdAt
         } satisfies CuttingEntry));
 
@@ -3430,7 +5067,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return { ...entry, pairs, rate, lotTotal, totalBalance: lotTotal, runningBalance };
       });
 
-      console.log('Cutting ledger data for cutter:', cutterId, result);
       return result || [];
     } catch (err) {
       console.error('Error in getCuttingLedgerByCutter:', err);
@@ -3444,23 +5080,33 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const items: StockInHistoryItem[] = [];
     const seenIds = new Set<string>();
 
-    // 1. From cuttingEntries (every entry in Receive Cutting)
+    // 1. From cuttingEntries (Single Source of Truth - deduplicated by cuttingId)
     (cuttingEntries || []).forEach(entry => {
+      if (entry.isDeleted || deletedCuttingIdSet.has(entry.id)) return;
       const art = (entry.article || entry.articleTitle || '').trim().toLowerCase();
-      if (art === target && (entry.type === 'RECEIVE' || (!entry.type && Number(entry.pairs || 0) > 0))) {
+      const pairsVal = Number(entry.pairs ?? entry.totalQty ?? 0);
+      if (art === target && pairsVal > 0 && (entry.type === 'RECEIVE' || !entry.type)) {
         if (!seenIds.has(entry.id)) {
           seenIds.add(entry.id);
           const { timeFormatted, fullFormatted } = formatStockInDateTime(entry.date, entry.createdAt);
           const cutter = entry.cutterName ? `From Cutting Master (${entry.cutterName})` : 'From Cutting Master';
+          const linkedOrder = entry.orderId ? orders.find(o => o.id === entry.orderId) : undefined;
+          const resolvedCustomer = entry.customerName?.trim() || linkedOrder?.customerName || 'Stock - No Order';
+          const resolvedOrderNo = entry.orderNo?.trim() || linkedOrder?.orderNo || '-';
           items.push({
             id: entry.id,
             date: entry.date,
             time: timeFormatted,
             formattedDateTime: fullFormatted,
             source: cutter,
-            quantity: Math.abs(Number(entry.pairs ?? entry.totalQty ?? 0)),
+            cutterName: entry.cutterName || 'Cutting Master',
+            customerName: resolvedCustomer,
+            orderNo: resolvedOrderNo,
+            orderId: entry.orderId || '',
+            article: entry.articleTitle || entry.article || articleName,
+            quantity: Math.abs(pairsVal),
             rate: Number(entry.rate) || 0,
-            size: entry.size || entry.sizeName || '',
+            size: entry.sizeName || entry.size || 'Standard',
             billNo: entry.billNo || '',
             notes: entry.remarks || '',
             rawEntry: entry
@@ -3469,23 +5115,33 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     });
 
-    // 2. From legacy cutting transactions
+    // 2. From legacy cutting transactions (only if id not already seen)
     (cuttingTransactions || []).forEach(tx => {
+      if (tx.isDeleted || deletedCuttingIdSet.has(tx.id)) return;
       const art = (tx.article || tx.articleTitle || '').trim().toLowerCase();
-      if (art === target && tx.type === 'RECEIVE') {
+      const qtyVal = Number(tx.qty ?? tx.totalQty ?? 0);
+      if (art === target && tx.type === 'RECEIVE' && qtyVal > 0) {
         if (!seenIds.has(tx.id)) {
           seenIds.add(tx.id);
           const { timeFormatted, fullFormatted } = formatStockInDateTime(tx.date, tx.createdAt);
           const cutter = tx.cutterName ? `From Cutting Master (${tx.cutterName})` : 'From Cutting Master';
+          const linkedOrder = tx.orderId ? orders.find(o => o.id === tx.orderId) : undefined;
+          const resolvedCustomer = tx.customerName?.trim() || linkedOrder?.customerName || 'Stock - No Order';
+          const resolvedOrderNo = tx.orderNo?.trim() || linkedOrder?.orderNo || '-';
           items.push({
             id: tx.id,
             date: tx.date,
             time: timeFormatted,
             formattedDateTime: fullFormatted,
             source: cutter,
-            quantity: Math.abs(Number(tx.qty ?? tx.totalQty ?? 0)),
+            cutterName: tx.cutterName || 'Cutting Master',
+            customerName: resolvedCustomer,
+            orderNo: resolvedOrderNo,
+            orderId: tx.orderId || '',
+            article: tx.articleTitle || tx.article || articleName,
+            quantity: Math.abs(qtyVal),
             rate: Number(tx.rate) || 0,
-            size: tx.size || tx.sizeName || '',
+            size: tx.sizeName || tx.size || 'Standard',
             billNo: tx.billNo || '',
             notes: tx.remarks || tx.notes || '',
             rawEntry: tx
@@ -3494,26 +5150,35 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     });
 
-    // 3. From articleStock.cuttingHistory
+    // 3. From articleStock.cuttingHistory (only if receiveId not already seen)
     (articleStock || []).forEach(stock => {
       if ((stock.articleName || '').trim().toLowerCase() === target) {
         (stock.cuttingHistory || []).forEach((hist, index) => {
           const recId = hist.receiveId || `art-hist-${index}-${hist.date}`;
-          if (!seenIds.has(recId)) {
+          if (deletedCuttingIdSet.has(recId)) return;
+          if (!seenIds.has(recId) && Number(hist.pairs || 0) > 0) {
             seenIds.add(recId);
             const { timeFormatted, fullFormatted } = formatStockInDateTime(hist.date);
             const sourceName = hist.source?.toLowerCase().includes('cutting')
               ? hist.source
               : `From Cutting Master (${hist.source || 'General'})`;
+            const rawCutter = hist.cutterName || hist.source || 'Stock Entry';
+            const cleanCutter = rawCutter.replace(/^From Cutting Master\s*\(/i, '').replace(/\)$/, '').trim() || 'Stock Entry';
+            const linkedOrder = hist.orderId ? orders.find(o => o.id === hist.orderId) : undefined;
             items.push({
               id: recId,
               date: hist.date,
               time: timeFormatted,
               formattedDateTime: fullFormatted,
               source: sourceName,
+              cutterName: cleanCutter,
+              customerName: hist.customerName?.trim() || linkedOrder?.customerName || 'Stock - No Order',
+              orderNo: hist.orderNo?.trim() || linkedOrder?.orderNo || '-',
+              orderId: hist.orderId || '',
+              article: hist.article || stock.articleName || articleName,
               quantity: Math.abs(Number(hist.pairs || 0)),
               rate: 0,
-              size: '',
+              size: hist.size || 'Standard',
               rawEntry: hist
             });
           }
@@ -3533,6 +5198,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // 1. From deliveryHistory
     (deliveryHistory || []).forEach(entry => {
+      if (deletedDeliveryIdSet.has(entry.id)) return;
+      if (entry.orderId && deletedOrderIdSet.has(entry.orderId)) return;
+      if (entry.customerOrderId && deletedOrderIdSet.has(entry.customerOrderId)) return;
       const art = (entry.article || '').trim().toLowerCase();
       if (art === target) {
         if (!seenIds.has(entry.id)) {
@@ -3560,6 +5228,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if ((stock.articleName || '').trim().toLowerCase() === target) {
         (stock.deliveryHistory || []).forEach((hist, index) => {
           const delId = hist.deliveryId || `art-del-${index}-${hist.date}`;
+          if (deletedDeliveryIdSet.has(delId)) return;
+          if ((hist as any).orderId && deletedOrderIdSet.has((hist as any).orderId)) return;
           if (!seenIds.has(delId)) {
             seenIds.add(delId);
             const orderLabel = hist.orderNo
@@ -3586,43 +5256,224 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const getDistinctArticles = (): DistinctArticleStock[] => {
-    const articleMap = new Map<string, { displayName: string; sizes: Set<string>; sampleRate: number }>();
+    interface ArticleTracker {
+      displayName: string;
+      sizes: Set<string>;
+      sampleRate: number;
+      lastUsedDate: string;
+      lastOrderNo: string;
+      lastCustomerName: string;
+      lastUsedSource: string;
+    }
 
-    const recordArticle = (rawName?: string, rawSize?: string, rate?: number) => {
-      if (!rawName) return;
-      const clean = rawName.trim();
-      if (!clean) return;
-      const key = clean.toLowerCase();
-      if (deletedProductNames.has(key)) return;
-      if (!articleMap.has(key)) {
-        articleMap.set(key, { displayName: clean, sizes: new Set(), sampleRate: rate || 0 });
-      }
-      const entry = articleMap.get(key)!;
-      if (rawSize) entry.sizes.add(rawSize.trim());
-      if (rate && !entry.sampleRate) entry.sampleRate = rate;
+    const articleMap = new Map<string, ArticleTracker>();
+
+    const cleanArticleCandidate = (rawName?: string): string => {
+      if (!rawName) return '';
+      const trimmed = String(rawName).trim();
+      if (!trimmed) return '';
+      // Skip comma-joined legacy display strings or UI placeholders
+      if (trimmed.includes(',') || /^size matrix$/i.test(trimmed)) return '';
+      return trimmed;
     };
 
-    // ONLY record from active non-deleted stock items and master directory
+    const recordArticle = (
+      rawName?: string,
+      rawSize?: string,
+      rate?: number,
+      usage?: { date?: string; orderNo?: string; customerName?: string; source?: string },
+      bypassDeletedCheck = false
+    ) => {
+      const clean = cleanArticleCandidate(rawName);
+      if (!clean) return;
+      const key = clean.toLowerCase();
+      if (!bypassDeletedCheck && deletedProductNames.has(key)) return;
+      if (!articleMap.has(key)) {
+        articleMap.set(key, {
+          displayName: clean,
+          sizes: new Set(),
+          sampleRate: rate || 0,
+          lastUsedDate: '',
+          lastOrderNo: '',
+          lastCustomerName: '',
+          lastUsedSource: ''
+        });
+      }
+      const entry = articleMap.get(key)!;
+      if (rawSize && String(rawSize).trim()) entry.sizes.add(String(rawSize).trim());
+      if (rate && !entry.sampleRate) entry.sampleRate = rate;
+
+      if (usage && (usage.orderNo || usage.customerName || usage.date)) {
+        const candidateDate = String(usage.date || '');
+        const hasMoreDetails = Boolean(usage.orderNo || usage.customerName);
+        const existingHasDetails = Boolean(entry.lastOrderNo || entry.lastCustomerName);
+        if (
+          (candidateDate && candidateDate > entry.lastUsedDate && (hasMoreDetails || !existingHasDetails)) ||
+          (!entry.lastUsedDate && hasMoreDetails) ||
+          (candidateDate === entry.lastUsedDate && hasMoreDetails && !existingHasDetails)
+        ) {
+          entry.lastUsedDate = candidateDate || entry.lastUsedDate;
+          if (usage.orderNo) entry.lastOrderNo = usage.orderNo;
+          if (usage.customerName) entry.lastCustomerName = usage.customerName;
+          if (usage.source) entry.lastUsedSource = usage.source;
+        }
+      }
+    };
+
+    // Build Article Master Directory from ALL sources ever used/created (never filtering out stock === 0)
+    // 1. Master catalogs & Products
+    [...(articlesMaster || []), ...(articleCatalog || []), ...(legacyArticleMaster || [])].forEach(a => {
+      recordArticle(a.articleName, undefined, undefined, { date: a.createdAt, source: 'Master Catalog' });
+    });
+    (products || []).forEach(p => {
+      recordArticle(p.gloveName, p.size, Number(p.salePrice || p.purchasePrice) || 0, {
+        date: p.updatedAt || p.createdAt,
+        source: 'Product Catalog'
+      });
+    });
+
+    // 2. Customer Orders (all items + cuttingArticleSizes)
+    (orders || []).forEach(order => {
+      if (deletedOrderIdSet.has(order.id)) return;
+      const ordDate = order.orderDate || order.createdAt || '';
+      (order.items || []).forEach(item => {
+        const art = item.title || item.gloveType || item.article;
+        const sizeLabel = item.customSizes && item.customSizes.length > 0
+          ? item.customSizes.map(cs => cs.size).filter(Boolean).join('/')
+          : item.size;
+        recordArticle(art, sizeLabel, Number(item.rate) || 0, {
+          date: ordDate,
+          orderNo: order.orderNo || '',
+          customerName: order.customerName || '',
+          source: 'Customer Order'
+        });
+      });
+      (order.cuttingArticleSizes || []).forEach(cas => {
+        recordArticle(cas.article, cas.size, undefined, {
+          date: ordDate,
+          orderNo: order.orderNo || '',
+          customerName: order.customerName || '',
+          source: 'Customer Order'
+        });
+      });
+    });
+
+    // 3. Finished Goods Stock & Article Stock (including zero-balance and delivery history entries)
     (stockManagement || []).forEach(s => {
       const art = s.articleName || s.article;
-      if (art && !deletedProductNames.has(art.trim().toLowerCase())) {
-        recordArticle(art, s.size, Number(s.rate) || 0);
-      }
+      recordArticle(art, s.size, Number(s.rate) || 0, {
+        date: s.updatedAt,
+        source: 'Stock Management'
+      });
     });
     (articleStock || []).forEach(a => {
-      if (a.articleName && !deletedProductNames.has(a.articleName.trim().toLowerCase())) {
-        recordArticle(a.articleName);
-      }
+      recordArticle(a.articleName);
+      (a.cuttingHistory || []).forEach(h => {
+        if (h.receiveId && deletedCuttingIdSet.has(h.receiveId)) return;
+        const linkedOrd = h.orderId ? orders.find(o => o.id === h.orderId) : undefined;
+        recordArticle(h.article || a.articleName, h.size, undefined, {
+          date: h.date,
+          orderNo: h.orderNo || linkedOrd?.orderNo || '',
+          customerName: h.customerName || linkedOrd?.customerName || '',
+          source: 'Stock Receipt'
+        });
+      });
+      (a.deliveryHistory || []).forEach(h => {
+        if (h.deliveryId && deletedDeliveryIdSet.has(h.deliveryId)) return;
+        recordArticle(a.articleName, undefined, undefined, {
+          date: h.date,
+          orderNo: h.orderNo || '',
+          customerName: h.customerName || '',
+          source: 'Stock Out'
+        });
+      });
     });
-    (articlesMaster || []).forEach(a => {
-      if (a.articleName && !deletedProductNames.has(a.articleName.trim().toLowerCase())) {
-        recordArticle(a.articleName);
-      }
+
+    // 4. Cutting Entries, Cutting Transactions & Cuttings (ALL types & quantities, including 0)
+    (cuttingEntries || []).forEach(e => {
+      if (e.isDeleted || deletedCuttingIdSet.has(e.id)) return;
+      if (e.orderId && deletedOrderIdSet.has(e.orderId)) return;
+      const linkedOrd = e.orderId ? orders.find(o => o.id === e.orderId) : undefined;
+      recordArticle(e.articleTitle || e.article, e.sizeName || e.size, Number(e.rate) || 0, {
+        date: e.date || e.createdAt,
+        orderNo: e.orderNo || linkedOrd?.orderNo || '',
+        customerName: e.customerName || linkedOrd?.customerName || '',
+        source: `Cutting (${e.type || 'ENTRY'})`
+      });
+    });
+    (cuttingTransactions || []).forEach(tx => {
+      if (tx.isDeleted || deletedCuttingIdSet.has(tx.id)) return;
+      if (tx.orderId && deletedOrderIdSet.has(tx.orderId)) return;
+      const linkedOrd = tx.orderId ? orders.find(o => o.id === tx.orderId) : undefined;
+      recordArticle(tx.articleTitle || tx.article, tx.sizeName || tx.size, Number(tx.rate) || 0, {
+        date: tx.date || tx.createdAt,
+        orderNo: tx.orderNo || linkedOrd?.orderNo || '',
+        customerName: tx.customerName || linkedOrd?.customerName || '',
+        source: `Cutting (${tx.type || 'TX'})`
+      });
+    });
+    (cuttings || []).forEach(c => {
+      if (deletedCuttingIdSet.has(c.id)) return;
+      if (c.orderId && deletedOrderIdSet.has(c.orderId)) return;
+      const linkedOrd = c.orderId ? orders.find(o => o.id === c.orderId) : undefined;
+      recordArticle(c.gloveType, c.size, Number(c.rate) || 0, {
+        date: c.receivedDate || c.date || c.createdAt,
+        orderNo: c.orderNo || linkedOrd?.orderNo || '',
+        customerName: linkedOrd?.customerName || '',
+        source: 'Cutting'
+      });
+    });
+
+    // 5. Stitching Orders & Stitching History
+    (stitchingOrders || []).forEach(s => {
+      if (s.orderId && deletedOrderIdSet.has(s.orderId)) return;
+      const linkedOrd = s.orderId ? orders.find(o => o.id === s.orderId) : undefined;
+      recordArticle(s.article, s.size, Number(s.rate) || 0, {
+        date: s.issueDate || s.createdAt,
+        orderNo: s.orderNo || linkedOrd?.orderNo || '',
+        customerName: s.customerName || linkedOrd?.customerName || '',
+        source: 'Stitching'
+      });
+    });
+    (stitchingHistory || []).forEach(h => {
+      recordArticle(h.article, undefined, Number((h as { rate?: number }).rate) || 0, {
+        date: h.date || h.createdAt,
+        orderNo: h.orderNo || '',
+        customerName: h.customerName || '',
+        source: 'Stitching History'
+      });
+    });
+
+    // 6. Stock Ledger & Stock Out Deliveries
+    (stockLedger || []).forEach(l => {
+      if (l.orderId && deletedOrderIdSet.has(l.orderId)) return;
+      if (l.referenceId && deletedCuttingIdSet.has(l.referenceId)) return;
+      const linkedOrd = l.orderId ? orders.find(o => o.id === l.orderId) : undefined;
+      recordArticle(l.productName, undefined, undefined, {
+        date: l.date || l.createdAt,
+        orderNo: l.orderNo || linkedOrd?.orderNo || '',
+        customerName: linkedOrd?.customerName || '',
+        source: l.type === 'out' ? 'Stock Out' : 'Stock In'
+      });
+    });
+    (deliveryHistory || []).forEach(d => {
+      if (deletedDeliveryIdSet.has(d.id)) return;
+      if (d.orderId && deletedOrderIdSet.has(d.orderId)) return;
+      if (d.customerOrderId && deletedOrderIdSet.has(d.customerOrderId)) return;
+      const linkedOrd = (d.orderId || d.customerOrderId)
+        ? orders.find(o => o.id === (d.orderId || d.customerOrderId))
+        : undefined;
+      recordArticle(d.article, d.size, Number(d.rate) || 0, {
+        date: d.deliveryDate || d.date || d.createdAt,
+        orderNo: d.orderNo || linkedOrd?.orderNo || '',
+        customerName: d.customerName || d.partyName || linkedOrd?.customerName || '',
+        source: 'Stock Out Delivery'
+      });
     });
 
     const result: DistinctArticleStock[] = [];
 
-    articleMap.forEach(({ displayName, sizes, sampleRate }) => {
+    articleMap.forEach(({ displayName, sizes, sampleRate, lastOrderNo, lastCustomerName, lastUsedSource }) => {
       const inHistory = getStockInHistory(displayName);
       const outHistory = getStockOutHistory(displayName);
 
@@ -3643,6 +5494,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       const stockValue = availableStock * unitRate;
 
+      const latestOutOrderNo = outHistory[0]?.orderNo || '';
+      const latestOutCustomer = outHistory[0]?.customerName || '';
+      const latestInOrderNo = inHistory[0]?.orderNo && inHistory[0]?.orderNo !== '-' ? inHistory[0]?.orderNo : '';
+      const latestInCustomer = inHistory[0]?.customerName && !inHistory[0]?.customerName.toLowerCase().includes('stock')
+        ? inHistory[0]?.customerName
+        : '';
+
       result.push({
         articleName: displayName,
         totalIn,
@@ -3652,11 +5510,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         stockValue,
         sizes: Array.from(sizes).filter(Boolean),
         lastReceivedDate: inHistory[0]?.date,
-        lastDeliveredDate: outHistory[0]?.date
+        lastDeliveredDate: outHistory[0]?.date,
+        lastOrderNo: lastOrderNo || latestOutOrderNo || latestInOrderNo || undefined,
+        lastCustomerName: lastCustomerName || latestOutCustomer || latestInCustomer || undefined,
+        lastUsedSource: lastUsedSource || undefined
       });
     });
 
-    return result.sort((a, b) => a.articleName.localeCompare(b.articleName));
+    // Strict alphabetical sort (A-Z) with zero-balance articles kept inline
+    return result.sort((a, b) => a.articleName.localeCompare(b.articleName, undefined, { sensitivity: 'base' }));
   };
 
   const getCompanyStats = (): CompanyOrderStats[] => {
@@ -5301,6 +7163,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setSelectedOrderId,
         selectedInvoiceId,
         setSelectedInvoiceId,
+        selectedCompanyName,
+        setSelectedCompanyName,
         parties,
         staff,
         products: products.filter(p => !deletedProductNames.has((p.gloveName || '').trim().toLowerCase())),
@@ -5359,6 +7223,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         restoreArticle,
         updateStockDelivery,
         deleteStockDelivery,
+        clearAllStockOutData,
         addStitcher,
         updateStitcher,
         deleteStitcher,

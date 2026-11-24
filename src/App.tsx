@@ -13,7 +13,6 @@ import { ToastContainer } from './components/common/ToastContainer';
 // Pages
 import { DashboardPage } from './pages/DashboardPage';
 import { OrdersPage } from './pages/OrdersPage';
-import { OrderDetailPage } from './pages/OrderDetailPage';
 import { CuttingsPage } from './pages/CuttingsPage';
 import { StitchingPage } from './pages/StitchingPage';
 import { StockPage } from './pages/StockPage';
@@ -26,8 +25,6 @@ import { ExpensePage } from './pages/ExpensePage';
 import { CashbookPage } from './pages/CashbookPage';
 import { ReportsPage } from './pages/ReportsPage';
 import { SettingsPage } from './pages/SettingsPage';
-import { OrderCompaniesPage } from './pages/OrderCompaniesPage';
-import { CompanyDetailPage } from './pages/CompanyDetailPage';
 
 // Modals
 import { CreateOrderModal } from './components/orders/CreateOrderModal';
@@ -39,12 +36,9 @@ const FactoryAppContent: React.FC = () => {
   const { 
     activeModule, 
     setActiveModule, 
-    selectedOrderId, 
-    setSelectedOrderId,
     selectedInvoiceId,
     setSelectedInvoiceId,
     selectedCompanyName,
-    setSelectedCompanyName,
     invoices
   } = useFactory();
 
@@ -113,61 +107,14 @@ const FactoryAppContent: React.FC = () => {
             />
           )}
 
-          {activeModule === 'orders' && (
+          {(activeModule === 'orders' || activeModule === 'order_companies' || activeModule === 'company_detail' || activeModule === 'order_detail') && (
             <OrdersPage
+              initialCompanyName={activeModule === 'company_detail' ? (selectedCompanyName || undefined) : undefined}
               onOpenCreateOrder={handleOpenNewOrder}
               onEditOrder={handleEditOrder}
-              onOpenCuttingForOrder={(orderId) => handleOpenCutting(orderId)}
-            />
-          )}
-
-          {activeModule === 'order_companies' && (
-            <OrderCompaniesPage
-              onBackToOrders={() => setActiveModule('orders')}
-              onSelectCompany={(name) => {
-                setSelectedCompanyName(name);
-                setActiveModule('company_detail');
-              }}
-              onOpenCreateOrderForCompany={(name) => handleOpenNewOrder(name)}
-            />
-          )}
-
-          {activeModule === 'company_detail' && (
-            <CompanyDetailPage
-              companyName={selectedCompanyName || 'traders'}
-              onBack={() => setActiveModule('order_companies')}
-              onSelectOrder={(orderId) => {
-                setSelectedOrderId(orderId);
-                setActiveModule('order_detail');
-              }}
-              onOpenCreateOrder={(name) => handleOpenNewOrder(name)}
-              onOpenCuttingForOrder={(orderId) => handleOpenCutting(orderId)}
+              onOpenCuttingForOrder={(orderId, itemId) => handleOpenCutting(orderId, itemId)}
               onOpenInvoiceForOrder={(orderId) => handleOpenSaleInvoice(orderId)}
             />
-          )}
-
-          {activeModule === 'order_detail' && (
-            selectedOrderId ? (
-              <OrderDetailPage
-                orderId={selectedOrderId}
-                onBack={() => {
-                  setSelectedOrderId(null);
-                  if (selectedCompanyName) {
-                    setActiveModule('company_detail');
-                  } else {
-                    setActiveModule('orders');
-                  }
-                }}
-                onOpenCuttingModalForOrder={(ordId, itemId) => handleOpenCutting(ordId, itemId)}
-                onOpenInvoiceModalForOrder={(ordId) => handleOpenSaleInvoice(ordId)}
-              />
-            ) : (
-              <OrdersPage
-                onOpenCreateOrder={handleOpenNewOrder}
-                onEditOrder={handleEditOrder}
-                onOpenCuttingForOrder={(orderId) => handleOpenCutting(orderId)}
-              />
-            )
           )}
 
           {activeModule === 'cuttings' && (
@@ -205,9 +152,11 @@ const FactoryAppContent: React.FC = () => {
       <CreateOrderModal
         isOpen={isOrderModalOpen}
         orderToEdit={orderToEdit}
+        initialCustomerName={orderModalInitialCustomer}
         onClose={() => {
           setIsOrderModalOpen(false);
           setOrderToEdit(null);
+          setOrderModalInitialCustomer(undefined);
         }}
         onOpenAddParty={() => {
           setIsOrderModalOpen(false);

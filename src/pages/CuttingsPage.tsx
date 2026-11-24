@@ -26,12 +26,13 @@ import {
   Pencil,
   Loader2,
   RotateCcw,
-  Minus
+  Minus,
+  AlertTriangle
 } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatDate, safeStringCompare } from '../utils/factoryFormatters';
-import { Cutter, CutterCategory, CuttingEntry, CuttingTransaction } from '../types/factory';
-import { collection, db, deleteDoc, doc, onSnapshot, runTransaction, serverTimestamp, updateDoc } from '../firebase';
+import { CustomerOrder, Cutter, CutterCategory, CuttingEntry, CuttingTransaction } from '../types/factory';
+import { collection, db, deleteDoc, doc, getDoc, onSnapshot, runTransaction, serverTimestamp, updateDoc } from '../firebase';
 import { useDragToScroll } from '../hooks/useDragToScroll';
 
 const formatConfirmationDate = (value: string): string => {
@@ -154,7 +155,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     deleteCuttingReturn,
     returnCutting,
     showToast,
-    getCuttingLedgerByCutter
+    getCuttingLedgerByCutter,
+    setSelectedOrderId,
+    setSelectedCompanyName,
+    setActiveModule
   } = useFactory();
 
   // Selected Option at top level: Cutting Man | Cutting Maker | Product
@@ -201,14 +205,18 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   // 7. Factory / Notes (e.g. "Shoaib Factory")
   const [formFactoryNotes, setFormFactoryNotes] = useState('');
   
-  // Delivery choice for Receive Cutting: Checkboxes
-  // 1. Add to Stock - Stock Management (independent)
-  // 2. Add to Existing Order (mutually exclusive with 3)
-  // 3. Add to New Order (mutually exclusive with 2)
+  // Delivery choice for Receive Cutting: Independent Checkboxes (Both can be ticked!)
+  // [✓] 1. Add to Stock - Stock Management
+  // [✓] 2. Add to Existing Order - Order Detail
+  // [ ] 3. Add to New Order
   const [deliveryToStock, setDeliveryToStock] = useState(true);
-  const [deliveryToExistingOrder, setDeliveryToExistingOrder] = useState(false);
+  const [deliveryToExistingOrder, setDeliveryToExistingOrder] = useState(true);
   const [deliveryToNewOrder, setDeliveryToNewOrder] = useState(false);
   const [newOrderCustomerName, setNewOrderCustomerName] = useState('');
+  const [completedOrderAlert, setCompletedOrderAlert] = useState<CustomerOrder | null>(null);
+  const [allowExtraCuttingForCompleted, setAllowExtraCuttingForCompleted] = useState(false);
+  const [liveOrderStatusOverride, setLiveOrderStatusOverride] = useState<{ orderId: string; status: string } | null>(null);
+  const [isCheckingOrderStatus, setIsCheckingOrderStatus] = useState(false);
 
   // Size rows for free-text typing & multiple size matrix
   const [cuttingSizeRows, setCuttingSizeRows] = useState<Array<{ id: string; size: string; qty: string; average: string; rate: string }>>([
@@ -220,10 +228,32 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
   const [isSubmittingTx, setIsSubmittingTx] = useState(false);
   const [editingEntry, setEditingEntry] = useState<CuttingEntry | null>(null);
-  const [editForm, setEditForm] = useState({ date: '', customerName: '', article: '', size: '', average: '', remarks: '', pairs: '', rate: '', billNo: '' });
+  const [editForm, setEditForm] = useState({
+    date: '',
+    customerName: '',
+    orderId: '',
+    orderNo: '',
+    article: '',
+    size: '',
+    average: '',
+    remarks: '',
+    pairs: '',
+    rate: '',
+    billNo: '',
+    cutterId: ''
+  });
+  const [editArticleSearch, setEditArticleSearch] = useState('');
+  const [isEditArticleDropdownOpen, setIsEditArticleDropdownOpen] = useState(false);
+  const [editShowNewArticleInput, setEditShowNewArticleInput] = useState(false);
+  const [editNewArticleInput, setEditNewArticleInput] = useState('');
+  const [editOrderSearch, setEditOrderSearch] = useState('');
+  const [isEditOrderDropdownOpen, setIsEditOrderDropdownOpen] = useState(false);
+  const [editShowNewOrderInput, setEditShowNewOrderInput] = useState(false);
+  const [editNewCustomerInput, setEditNewCustomerInput] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [deletingEntry, setDeletingEntry] = useState<CuttingEntry | null>(null);
   const [isDeletingEntry, setIsDeletingEntry] = useState(false);
+  const [deleteModalError, setDeleteModalError] = useState<string | null>(null);
   const [inlineEdit, setInlineEdit] = useState<{ entry: CuttingEntry; field: 'pairs' | 'rate'; value: string } | null>(null);
   const [returnTarget, setReturnTarget] = useState<CuttingEntry | null>(null);
   const [returnForm, setReturnForm] = useState({
@@ -302,7 +332,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         else if (isReturnCuttingModalOpen) setIsReturnCuttingModalOpen(false);
         else if (returnTarget) setReturnTarget(null);
         else if (editingEntry) setEditingEntry(null);
-        else if (deletingEntry) setDeletingEntry(null);
+        else if (deletingEntry && !isDeletingEntry) {
+          setDeletingEntry(null);
+          setDeleteModalError(null);
+        }
         else if (cutterDeleteTarget) setCutterDeleteTarget(null);
         else if (cutterStatusTarget) setCutterStatusTarget(null);
         else if (isAddCutterOpen) setIsAddCutterOpen(false);
@@ -565,7 +598,12 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const visibleLedgerEntries = useMemo(() => {
     const query = ledgerSearch.trim().toLowerCase();
     return query
-      ? dateFilteredEntries.filter(entry => (entry.customerName || '').toLowerCase().includes(query))
+      ? dateFilteredEntries.filter(entry => 
+          (entry.customerName || '').toLowerCase().includes(query) ||
+          (entry.orderNo || '').toLowerCase().includes(query) ||
+          (entry.articleTitle || entry.article || '').toLowerCase().includes(query) ||
+          (entry.billNo || '').toLowerCase().includes(query)
+        )
       : dateFilteredEntries;
   }, [dateFilteredEntries, ledgerSearch]);
 
@@ -578,12 +616,16 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       const pairs = Number(entry.pairs ?? entry.totalQty) || 0;
       const rate = Number(entry.rate) || 0;
       const amount = isReturn ? -Math.abs(pairs * rate) : Math.abs(pairs * rate);
+      const matchedOrder = entry.orderId ? orders.find(o => o.id === entry.orderId) : undefined;
+      const orderNo = entry.orderNo || matchedOrder?.orderNo || undefined;
       return {
         id: entry.id,
         kind: 'cutting' as const,
         date: entry.date,
         createdAt: entry.createdAt,
         customer: entry.customerName || 'PRO4',
+        orderId: entry.orderId || matchedOrder?.id,
+        orderNo,
         article: entry.articleTitle || entry.article || '-',
         size: entry.sizeName || entry.size || '-',
         pairs,
@@ -605,6 +647,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         date: payment.date,
         createdAt: payment.createdAt,
         customer: isCashOut ? 'Cash Paid (Out)' : 'Cash In Adjustment',
+        orderNo: '—' as string | undefined,
         article: isCashOut
           ? `Paid to ${activeCutter?.name || 'Contractor'}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}`
           : `Cash In from ${activeCutter?.name || 'Contractor'}${payment.billNo ? ` (Bill #${payment.billNo})` : ''}`,
@@ -645,18 +688,112 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     return [...computed].reverse();
   }, [visibleLedgerEntries, dateFilteredPayments, activeCutter?.name]);
 
-  // Dynamically filter customer orders that contain the selected Article
+  // Prioritize customer orders matching the selected Article, while keeping all other orders selectable
   const filteredOrdersForArticle = useMemo(() => {
-    if (!formArticle) return [];
-    return orders.filter(o =>
-      o.article?.toLowerCase() === formArticle.toLowerCase() ||
-      o.items.some(i =>
-        (i.article?.toLowerCase() === formArticle.toLowerCase()) ||
-        (i.title?.toLowerCase() === formArticle.toLowerCase()) || 
-        (i.gloveType?.toLowerCase() === formArticle.toLowerCase())
-      )
-    );
+    const activeOrders = [...orders];
+    if (!formArticle.trim()) return activeOrders;
+    const target = formArticle.trim().toLowerCase();
+    const matching: typeof orders = [];
+    const others: typeof orders = [];
+    activeOrders.forEach(o => {
+      const isMatch =
+        o.article?.toLowerCase() === target ||
+        o.items.some(i =>
+          (i.article?.toLowerCase() === target) ||
+          (i.title?.toLowerCase() === target) ||
+          (i.gloveType?.toLowerCase() === target)
+        );
+      if (isMatch) matching.push(o);
+      else others.push(o);
+    });
+    return [...matching, ...others];
   }, [orders, formArticle]);
+
+  const isOrderCompletedStatus = (status?: string): boolean => {
+    const normalized = (status || '').trim().toLowerCase();
+    return normalized === 'completed' || normalized === 'complete' || normalized === 'closed';
+  };
+
+  const isOrderCompleted = (ord?: CustomerOrder): boolean => {
+    if (!ord) return false;
+    const effectiveStatus =
+      liveOrderStatusOverride && liveOrderStatusOverride.orderId === ord.id
+        ? liveOrderStatusOverride.status
+        : ord.status;
+    return isOrderCompletedStatus(effectiveStatus);
+  };
+
+  const clearCuttingQuantityFields = () => {
+    setFormQty('');
+    setCuttingSizeRows(prev => prev.map(row => ({ ...row, qty: '' })));
+  };
+
+  // Live Firestore status check whenever user selects a Customer Order in Cutting Receive
+  const checkOrderStatusAndAlert = async (orderId: string) => {
+    if (!orderId) {
+      setLiveOrderStatusOverride(null);
+      return;
+    }
+
+    const localOrder = orders.find(item => item.id === orderId);
+    if (localOrder) {
+      setFormCustomerName(localOrder.customerName);
+      if (isOrderCompletedStatus(localOrder.status)) {
+        clearCuttingQuantityFields();
+        setAllowExtraCuttingForCompleted(false);
+        setCompletedOrderAlert(localOrder);
+      }
+    } else {
+      setFormCustomerName('');
+    }
+
+    if (!db) return;
+    setIsCheckingOrderStatus(true);
+    try {
+      const snap = await getDoc(doc(db, 'customer_orders', orderId));
+      if (snap.exists()) {
+        const data = snap.data() as Partial<CustomerOrder>;
+        const dbStatus = String(data.status || localOrder?.status || '');
+        setLiveOrderStatusOverride({ orderId, status: dbStatus });
+        if (data.customerName) {
+          setFormCustomerName(String(data.customerName));
+        }
+        if (isOrderCompletedStatus(dbStatus)) {
+          clearCuttingQuantityFields();
+          setAllowExtraCuttingForCompleted(false);
+          setCompletedOrderAlert({
+            ...(localOrder || ({} as CustomerOrder)),
+            ...data,
+            id: orderId,
+            status: dbStatus as CustomerOrder['status']
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('Live order status check fallback to local orders state:', err);
+    } finally {
+      setIsCheckingOrderStatus(false);
+    }
+  };
+
+  const selectedExistingOrder = useMemo(
+    () => (formOrderId ? orders.find(o => o.id === formOrderId) : undefined),
+    [orders, formOrderId]
+  );
+
+  const isSelectedOrderCompleted = Boolean(
+    txModalType === 'RECEIVE' &&
+    deliveryToExistingOrder &&
+    (
+      isOrderCompleted(selectedExistingOrder) ||
+      (liveOrderStatusOverride &&
+        liveOrderStatusOverride.orderId === formOrderId &&
+        isOrderCompletedStatus(liveOrderStatusOverride.status))
+    )
+  );
+
+  const isBlockedCompletedOrder = Boolean(isSelectedOrderCompleted && !allowExtraCuttingForCompleted);
+  const isExtraCuttingMode = Boolean(isSelectedOrderCompleted && allowExtraCuttingForCompleted);
 
   // Handle open transaction modal
   const handleOpenTxModal = (type: 'GIVE' | 'RECEIVE') => {
@@ -677,9 +814,12 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     setFormBillNo('');
     setFormFactoryNotes(activeCutter?.name ? `${activeCutter.name} Unit` : '');
     setDeliveryToStock(true);
-    setDeliveryToExistingOrder(false);
+    setDeliveryToExistingOrder(true);
     setDeliveryToNewOrder(false);
     setNewOrderCustomerName('');
+    setCompletedOrderAlert(null);
+    setAllowExtraCuttingForCompleted(false);
+    setLiveOrderStatusOverride(null);
     setCuttingSizeRows([
       { id: '1', size: '', qty: '', average: '', rate: activeCutter?.perPairRate ? String(activeCutter.perPairRate) : '' }
     ]);
@@ -734,6 +874,9 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
   // Close transaction modal
   const handleCloseTxModal = () => {
+    setCompletedOrderAlert(null);
+    setAllowExtraCuttingForCompleted(false);
+    setLiveOrderStatusOverride(null);
     setTxModalType(null);
   };
 
@@ -742,15 +885,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     e.preventDefault();
     if (!activeCutter || !txModalType) return;
 
-    const parsedQty = safeParse(formQty);
-    const parsedAverage = safeParse(formAverage);
-    const parsedRate = safeParse(formRate);
     if (!formDate) {
       showToast('Enter a date.', 'error');
-      return;
-    }
-    if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
-      showToast('Enter a valid pair quantity.', 'error');
       return;
     }
 
@@ -768,6 +904,11 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       }
       if (deliveryToExistingOrder && !formOrderId) {
         showToast('Select a customer order (PO).', 'error');
+        return;
+      }
+      if (isBlockedCompletedOrder) {
+        if (selectedExistingOrder) setCompletedOrderAlert(selectedExistingOrder);
+        showToast('Ye order already complete hai. Is me mazeed cutting ki zaroorat nahi hai. Please koi aur order select karein.', 'error');
         return;
       }
       if (deliveryToNewOrder && !newOrderCustomerName.trim()) {
@@ -812,25 +953,22 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
     setIsSubmittingTx(true);
     try {
-      // Auto-save new article in master catalog if it doesn't already exist and is not deleted
+      // Auto-save new article in master catalog if it doesn't already exist
       if (createArticleMaster) {
         const normArticle = finalArticle.trim().toLowerCase();
         const isDeleted = (deletedProductsList || []).some(d => d.name === normArticle);
         const existsInMaster = articlesMaster.some(
           a => a.articleName.trim().toLowerCase() === normArticle
         );
-        if (!existsInMaster && !isDeleted) {
+        if (!existsInMaster && (!isDeleted || txModalType === 'RECEIVE')) {
           try {
             await createArticleMaster({
               articleName: finalArticle,
               sizes: rowsToProcess.map(r => ({ sizeName: r.size, pairs: r.qty }))
             });
-            console.log(`Auto-saved new article to master catalog: "${finalArticle}"`);
           } catch (autoSaveErr) {
             console.warn('Auto-save article warning:', autoSaveErr);
           }
-        } else if (isDeleted) {
-          console.log(`Skipped auto-creating deleted article: "${finalArticle}"`);
         }
       }
 
@@ -867,24 +1005,33 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       for (const r of rowsToProcess) {
         const totalBalance = r.qty * r.rate;
 
-        let effectiveCustomerName = 'Stock Management';
-        let effectiveCustomerOrder = 'Stock Management - Direct to Stock';
+        let effectiveCustomerName = 'Stock - No Order';
+        let effectiveCustomerOrder = 'Stock - Direct to Stock';
 
         if (effectiveOrderId && targetOrder) {
           effectiveCustomerName = targetOrder.customerName;
           effectiveCustomerOrder = `${targetOrder.customerName} - ${targetOrder.orderNo}`;
         } else if (deliveryToExistingOrder) {
-          effectiveCustomerName = formCustomerName.trim() || 'Customer Order';
-          effectiveCustomerOrder = formCustomerName.trim() || 'Customer Order';
+          effectiveCustomerName = formCustomerName.trim() || 'Stock - No Order';
+          effectiveCustomerOrder = formCustomerName.trim() || 'Stock - No Order';
         } else if (txModalType === 'GIVE') {
           effectiveCustomerName = targetOrder?.customerName || formCustomerName.trim() || 'Direct Cutting';
           effectiveCustomerOrder = targetOrder ? `${targetOrder.customerName} - ${targetOrder.orderNo}` : 'Direct Cutting';
         }
 
+        const isExtraCutting = Boolean(
+          txModalType === 'RECEIVE' &&
+          deliveryToExistingOrder &&
+          targetOrder &&
+          isOrderCompleted(targetOrder) &&
+          allowExtraCuttingForCompleted
+        );
+        const extraCuttingQty = isExtraCutting ? -Math.abs(r.qty) : 0;
+
         await saveCuttingTransaction({
           cutterId: activeCutter.id,
-          cutterName: activeCutter.name,
-          cutterType: activeCutter.cutterType,
+          cutterName: (activeCutter.name || activeCutter.khataName || 'Cutting Master').trim(),
+          cutterType: activeCutter.cutterType || 'cutting_man',
           type: txModalType,
           date: formDate,
           qty: r.qty,
@@ -892,21 +1039,24 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           rate: r.rate,
           article: finalArticle,
           articleTitle: finalArticle,
-          orderId: effectiveOrderId,
-          orderNo: targetOrder?.orderNo || undefined,
-          customerName: effectiveCustomerName,
-          size: r.size,
-          sizeName: r.size,
-          average: r.average,
+          orderId: effectiveOrderId || '',
+          orderNo: targetOrder?.orderNo || '',
+          customerName: effectiveCustomerName || '',
+          size: r.size || '',
+          sizeName: r.size || '',
+          average: r.average || '',
           totalBalance,
-          customerOrder: effectiveCustomerOrder,
-          billNo: formBillNo.trim() || undefined,
-          factoryName: formFactoryNotes.trim() || undefined,
-          addToStock: txModalType === 'RECEIVE' ? deliveryToStock : false,
-          notes: formFactoryNotes.trim() || undefined
+          customerOrder: effectiveCustomerOrder || '',
+          billNo: formBillNo.trim() || '',
+          factoryName: formFactoryNotes.trim() || '',
+          addToStock: txModalType === 'RECEIVE' ? true : false,
+          isExtraCutting,
+          extraCuttingQty,
+          notes: formFactoryNotes.trim() || ''
         });
       }
 
+      const savedAsExtra = isExtraCuttingMode;
       setFormQty('');
       setFormArticle('');
       setFormSize('');
@@ -918,12 +1068,16 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       setFormFactoryNotes('');
       setArticleSearch('');
       setNewOrderCustomerName('');
+      setCompletedOrderAlert(null);
+      setAllowExtraCuttingForCompleted(false);
       setCuttingSizeRows([{ id: '1', size: '', qty: '', average: '', rate: '' }]);
       handleCloseTxModal();
       showToast(
-        deliveryToStock 
-          ? 'Cutting received and updated in Stock Management.' 
-          : 'Cutting entry saved successfully.'
+        savedAsExtra
+          ? 'Extra Cutting saved! Recorded in Ledger, Stock History & shown as Extra Cutting (-) on Order.'
+          : (deliveryToExistingOrder || deliveryToNewOrder)
+            ? 'Cutting saved once to Ledger, Stock History & Customer Order.'
+            : 'Cutting saved to Ledger & Stock Management (Stock - No Order).'
       );
     } catch (err) {
       console.error('Error saving transaction:', err);
@@ -935,69 +1089,158 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
   const openEditEntry = (entry: CuttingEntry) => {
     setEditingEntry(entry);
+    const matchedOrder = entry.orderId ? orders.find(o => o.id === entry.orderId) : (entry.orderNo ? orders.find(o => o.orderNo === entry.orderNo) : undefined);
     setEditForm({
       date: entry.date || '',
-      customerName: entry.customerName || '',
+      customerName: entry.customerName || (matchedOrder?.customerName || ''),
+      orderId: entry.orderId || (matchedOrder?.id || ''),
+      orderNo: entry.orderNo || (matchedOrder?.orderNo || ''),
       article: entry.articleTitle || entry.article || '',
       size: entry.sizeName || entry.size || '',
       average: entry.average || '',
       remarks: entry.remarks || '',
       pairs: String(Math.abs(entry.pairs ?? (entry as any).totalQty ?? 0)),
       rate: String(entry.rate ?? ''),
-      billNo: entry.billNo || ''
+      billNo: entry.billNo || '',
+      cutterId: entry.cutterId || activeCutterId || ''
     });
+    setEditArticleSearch('');
+    setIsEditArticleDropdownOpen(false);
+    setEditShowNewArticleInput(false);
+    setEditNewArticleInput('');
+    setEditOrderSearch('');
+    setIsEditOrderDropdownOpen(false);
+    setEditShowNewOrderInput(false);
+    setEditNewCustomerInput('');
   };
 
   useEffect(() => {
     if (editingEntry) {
+      const matchedOrder = editingEntry.orderId ? orders.find(o => o.id === editingEntry.orderId) : (editingEntry.orderNo ? orders.find(o => o.orderNo === editingEntry.orderNo) : undefined);
       setEditForm({
         date: editingEntry.date || '',
-        customerName: editingEntry.customerName || '',
+        customerName: editingEntry.customerName || (matchedOrder?.customerName || ''),
+        orderId: editingEntry.orderId || (matchedOrder?.id || ''),
+        orderNo: editingEntry.orderNo || (matchedOrder?.orderNo || ''),
         article: editingEntry.articleTitle || editingEntry.article || '',
         size: editingEntry.sizeName || editingEntry.size || '',
         average: editingEntry.average || '',
         remarks: editingEntry.remarks || '',
         pairs: String(Math.abs(editingEntry.pairs ?? (editingEntry as any).totalQty ?? 0)),
         rate: String(editingEntry.rate ?? ''),
-        billNo: editingEntry.billNo || ''
+        billNo: editingEntry.billNo || '',
+        cutterId: editingEntry.cutterId || activeCutterId || ''
       });
     }
-  }, [editingEntry]);
+  }, [editingEntry, orders, activeCutterId]);
 
   const handleUpdateEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingEntry) return;
+
+    const finalArticle = (editShowNewArticleInput ? editNewArticleInput.trim() : editForm.article.trim());
+    const finalSize = editForm.size.trim() || 'Standard';
     const pairs = Number(editForm.pairs);
     const rate = Number(editForm.rate);
-    if (!editForm.date || !editForm.customerName.trim() || !editForm.article.trim() || !Number.isFinite(pairs) || pairs <= 0 || !Number.isFinite(rate) || rate < 0) {
-      showToast('Date, customer, article, valid pair quantity, and rate are required.', 'error');
+
+    // Validation: Article / Customer Order khaali ho to Save na ho. Error: "Please select Article and Customer Order"
+    const hasCustomerOrOrder = editShowNewOrderInput 
+      ? editNewCustomerInput.trim().length > 0 
+      : (editForm.orderId || (editForm.customerName && editForm.customerName.trim() !== ''));
+
+    if (!finalArticle || !hasCustomerOrOrder) {
+      showToast('Please select Article and Customer Order', 'error');
       return;
     }
+
+    if (!editForm.date || !Number.isFinite(pairs) || pairs <= 0 || !Number.isFinite(rate) || rate < 0) {
+      showToast('Date, valid pair quantity, and rate are required.', 'error');
+      return;
+    }
+
     setIsSavingEdit(true);
     try {
-      const updates = {
+      let targetOrderId = editForm.orderId;
+      let targetOrderNo = editForm.orderNo;
+      let targetCustomerName = editForm.customerName;
+
+      // Handle "+ Add New Customer Order"
+      if (editShowNewOrderInput && editNewCustomerInput.trim()) {
+        const newOrder = await createCustomerOrder({
+          customerName: editNewCustomerInput.trim(),
+          orderDate: editForm.date,
+          deliveryDate: editForm.date,
+          items: [{
+            title: finalArticle,
+            gloveType: finalArticle,
+            customSizes: [{ size: finalSize, quantity: pairs }],
+            totalPairs: pairs,
+            sizes: { small: 0, medium: 0, large: 0, xl: 0, xxl: 0 }
+          }],
+          notes: `Created from Edited Cutting Entry`
+        });
+        if (newOrder) {
+          targetOrderId = newOrder.id;
+          targetOrderNo = newOrder.orderNo;
+          targetCustomerName = newOrder.customerName;
+        }
+      }
+
+      // Handle "+ Add New Article" to master catalog
+      if (editShowNewArticleInput && editNewArticleInput.trim()) {
+        try {
+          await createArticleMaster({
+            articleName: finalArticle,
+            sizes: [{ sizeName: finalSize, pairs }]
+          });
+        } catch (masterErr) {
+          console.warn('Master article creation:', masterErr);
+        }
+      }
+
+      const oldCustomer = editingEntry.customerName || 'Stock';
+      const oldOrder = editingEntry.orderNo || 'No Order';
+      const oldArticle = editingEntry.articleTitle || editingEntry.article || '-';
+      const newCustomer = targetCustomerName || 'Stock';
+      const newOrder = targetOrderNo || 'No Order';
+
+      const isMoved = oldCustomer !== newCustomer || oldOrder !== newOrder || oldArticle !== finalArticle || (editingEntry.cutterId && editForm.cutterId && editingEntry.cutterId !== editForm.cutterId);
+
+      const updates: Partial<CuttingEntry> = {
         date: editForm.date,
-        customerName: editForm.customerName.trim(),
-        article: editForm.article.trim(),
-        size: editForm.size.trim(),
+        customerName: targetCustomerName,
+        orderId: targetOrderId,
+        orderNo: targetOrderNo,
+        article: finalArticle,
+        articleTitle: finalArticle,
+        size: finalSize,
+        sizeName: finalSize,
         average: editForm.average.trim(),
         remarks: editForm.remarks.trim(),
         pairs,
         rate,
-        billNo: editForm.billNo.trim()
+        billNo: editForm.billNo.trim(),
+        cutterId: editForm.cutterId || editingEntry.cutterId,
+        cutterName: cutters.find(c => c.id === editForm.cutterId)?.name || editingEntry.cutterName
       };
+
       if (editingEntry.type === 'RETURN') {
         await updateCuttingReturn(editingEntry.id, {
-          date: updates.date,
-          remarks: updates.remarks,
-          pairs: updates.pairs,
-          rate: updates.rate
+          date: updates.date || editingEntry.date,
+          remarks: updates.remarks || '',
+          pairs: Number(updates.pairs) || Number(editingEntry.pairs),
+          rate: Number(updates.rate) || Number(editingEntry.rate)
         });
       } else {
         await updateCuttingEntry(editingEntry.id, updates);
       }
+
       setEditingEntry(null);
-      showToast('Cutting Entry Updated Successfully.');
+      if (isMoved) {
+        showToast(`Entry moved from ${oldCustomer} / ${oldOrder} / ${oldArticle} to ${newCustomer} / ${newOrder} / ${finalArticle}`);
+      } else {
+        showToast('Cutting Entry Updated Successfully.');
+      }
     } catch (err) {
       console.error('Error updating cutting entry:', err);
       showToast('The cutting entry could not be updated. Please try again.', 'error');
@@ -1008,15 +1251,19 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
   const handleDeleteEntry = async () => {
     if (!deletingEntry) return;
+    const deletedPairs = Math.abs(Number(deletingEntry.pairs ?? (deletingEntry as any).totalQty ?? 0));
     setIsDeletingEntry(true);
+    setDeleteModalError(null);
     try {
       if (deletingEntry.type === 'RETURN') await deleteCuttingReturn(deletingEntry.id);
       else await deleteCuttingEntry(deletingEntry.id);
       setDeletingEntry(null);
-      showToast('Cutting entry deleted successfully.');
+      setDeleteModalError(null);
+      showToast(`Entry Deleted - ${deletedPairs.toLocaleString()} Pairs Removed From Ledger + Order + Stock`, 'success');
     } catch (err) {
       console.error('Error deleting cutting entry:', err);
-      showToast('The cutting entry could not be deleted. Please try again.', 'error');
+      setDeleteModalError('Delete failed, please try again');
+      showToast('Delete failed, please try again', 'error');
     } finally {
       setIsDeletingEntry(false);
     }
@@ -1164,7 +1411,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       } else {
         await saveCuttingTransaction({
           cutterId: activeCutter.id,
-          cutterName: activeCutter.name,
+          cutterName: (activeCutter.name || activeCutter.khataName || 'Cutting Master').trim(),
           cutterType: activeCutter.cutterType || 'cutting_maker',
           type: 'RECEIVE',
           date: returnCuttingDate,
@@ -1173,7 +1420,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           article: returnCuttingArticle.trim(),
           articleTitle: returnCuttingArticle.trim(),
           remarks: `Return Cutting - ${returnCuttingArticle.trim()} - ${qty} pairs${returnCuttingNotes.trim() ? ` (${returnCuttingNotes.trim()})` : ''}`,
-          notes: returnCuttingNotes.trim()
+          notes: returnCuttingNotes.trim() || ''
         });
       }
       setIsReturnCuttingModalOpen(false);
@@ -1221,6 +1468,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       kind: 'cutting' | 'payment';
       date: string;
       customer: string;
+      orderNo?: string;
       article: string;
       size: string;
       pairs: string | number;
@@ -1266,6 +1514,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
       return [
         formatDate(row.date),
+        row.customer || '-',
+        row.orderNo || (row.kind === 'payment' ? '—' : 'Stock - No Order'),
         row.article || '-',
         row.size || '-',
         pairsStr,
@@ -1278,18 +1528,19 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
     const doc = new jsPDF({ orientation: 'landscape' });
     doc.setFontSize(14);
-    // Header only: "Cutting Ledger - All" + Date Range (No customer or company name)
+    // Header: "Cutting Ledger - All" + Date Range
     doc.text('Cutting Ledger - All', 14, 15);
     doc.setFontSize(9);
     doc.text(`${rangeLabel} | Total Entries: ${rows.length}`, 14, 22);
 
-    // EXACT 8 columns: DATE, ARTICLE, SIZE, PAIRS, AVERAGE, RATE, AMOUNT, BALANCE (Customer column removed)
     autoTable(doc, {
-      head: [['DATE', 'ARTICLE', 'SIZE', 'PAIRS', 'AVERAGE', 'RATE', 'AMOUNT', 'BALANCE']],
+      head: [['DATE', 'CUSTOMER', 'ORDER NO / PO NO', 'ARTICLE', 'SIZE', 'PAIRS', 'AVERAGE', 'RATE', 'AMOUNT', 'BALANCE']],
       body: tableRows,
       foot: [[
         'TOTAL',
+        '',
         `Paid: Rs. ${totalPaid.toLocaleString()}`,
+        '',
         '',
         `${totalPairsCount.toLocaleString()} Pairs`,
         '',
@@ -2187,24 +2438,25 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                   </p>
                 </div>
               ) : (
-                <table className="min-w-[1050px] w-full text-left text-xs border-collapse">
+                <table className="min-w-[1150px] w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
                       <th className="py-3 px-3.5 sticky left-0 bg-slate-100 z-10 border-r border-slate-200 shadow-xs">
                         1. Date
                       </th>
                       <th className="py-3 px-3">2. Customer</th>
-                      <th className="py-3 px-3">3. Article</th>
-                      <th className="py-3 px-2 text-center">4. Size</th>
-                      <th className="py-3 px-3 text-right">5. Pairs</th>
-                      <th className="py-3 px-2 text-center">6. Average</th>
-                      <th className="py-3 px-3 text-right">7. Rate</th>
-                      <th className="py-3 px-3 text-right">8. Amount</th>
+                      <th className="py-3 px-3">3. Order No / PO No</th>
+                      <th className="py-3 px-3">4. Article</th>
+                      <th className="py-3 px-2 text-center">5. Size</th>
+                      <th className="py-3 px-3 text-right">6. Pairs</th>
+                      <th className="py-3 px-2 text-center">7. Average</th>
+                      <th className="py-3 px-3 text-right">8. Rate</th>
+                      <th className="py-3 px-3 text-right">9. Amount</th>
                       <th className="py-3 px-3 text-right bg-blue-50/70 border-l border-blue-100 font-black text-blue-900">
-                        9. Balance
+                        10. Balance
                       </th>
                       <th className="py-3 px-3 text-center w-24">
-                        10. Action
+                        11. Action
                       </th>
                     </tr>
                   </thead>
@@ -2224,6 +2476,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                                 {isCashOut ? 'Cash Paid Out' : 'Cash In'}
                               </span>
                             </td>
+                            <td className="py-3 px-3 font-mono text-slate-400 text-xs">—</td>
                             <td className="py-3 px-3 font-semibold text-slate-800">
                               {row.article}
                             </td>
@@ -2267,20 +2520,85 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
                         const entry = row.rawEntry;
                         const isReturn = entry.type === 'RETURN';
+                        const isExtraCutting = !isReturn && entry.type === 'RECEIVE' && Boolean(entry.isExtraCutting);
 
                         return (
-                          <tr key={entry.id} className={isReturn ? 'bg-[#ffe6e6] font-bold text-[#cc0000]' : 'hover:bg-slate-50/70 transition'}>
-                            <td className="py-3.5 px-3.5 font-mono sticky left-0 bg-white z-10 border-r border-slate-200 whitespace-nowrap">
+                          <tr
+                            key={entry.id}
+                            className={
+                              isReturn
+                                ? 'bg-[#ffe6e6] font-bold text-[#cc0000]'
+                                : isExtraCutting
+                                  ? 'bg-rose-50/90 hover:bg-rose-100/80 text-rose-900 font-semibold transition'
+                                  : 'hover:bg-slate-50/70 transition'
+                            }
+                          >
+                            <td
+                              className={`py-3.5 px-3.5 font-mono sticky left-0 z-10 border-r border-slate-200 whitespace-nowrap ${
+                                isReturn
+                                  ? 'bg-[#ffe6e6] text-[#cc0000]'
+                                  : isExtraCutting
+                                    ? 'bg-rose-50 text-rose-900 font-bold'
+                                    : 'bg-white'
+                              }`}
+                            >
                               {formatDate(entry.date)}
                             </td>
-                            <td className="py-3.5 px-3 text-slate-700 font-semibold">{entry.customerName || 'PRO4'}</td>
-                            <td className="py-3.5 px-3 font-bold text-slate-900">
+                            <td className={`py-3.5 px-3 font-semibold ${isExtraCutting ? 'text-rose-900' : 'text-slate-700'}`}>
+                              {entry.customerName || 'Stock - No Order'}
+                            </td>
+                            <td className="py-3.5 px-3">
+                              {entry.orderNo ? (
+                                <div className="flex flex-col items-start gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const target = orders.find(o => o.orderNo === entry.orderNo || o.id === entry.orderId);
+                                      if (target) {
+                                        setSelectedCompanyName(target.customerName);
+                                        setSelectedOrderId(target.id);
+                                        setActiveModule('order_detail');
+                                      } else if (entry.orderId) {
+                                        setSelectedCompanyName(entry.customerName || null);
+                                        setSelectedOrderId(entry.orderId);
+                                        setActiveModule('order_detail');
+                                      }
+                                    }}
+                                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md font-bold font-mono text-[11px] border transition cursor-pointer ${
+                                      isExtraCutting
+                                        ? 'bg-rose-100 text-rose-800 border-rose-300 hover:bg-rose-200'
+                                        : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100 hover:text-blue-900'
+                                    }`}
+                                    title={`Click to view Order ${entry.orderNo}`}
+                                  >
+                                    <span>{entry.orderNo}</span>
+                                    <span className="text-[10px]">&rarr;</span>
+                                  </button>
+                                  {isExtraCutting && (
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-600 text-white text-[10px] font-black uppercase tracking-wide">
+                                      Extra
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 font-mono text-[11px]">Stock - No Order</span>
+                              )}
+                            </td>
+                            <td className={`py-3.5 px-3 font-bold ${isExtraCutting ? 'text-rose-900' : 'text-slate-900'}`}>
                               {entry.articleTitle || entry.article}
                               {isReturn && <span className="mt-0.5 block text-[10px] font-semibold text-[#cc0000]">{entry.remarks}</span>}
+                              {isExtraCutting && (
+                                <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-black text-rose-700 uppercase tracking-wide">
+                                  <span className="px-1.5 py-0.5 rounded bg-rose-100 border border-rose-300 text-rose-700">Extra</span>
+                                  <span>Extra Cutting: -{Math.abs(entry.pairs).toLocaleString()} pcs</span>
+                                </span>
+                              )}
                             </td>
-                            <td className="py-3.5 px-2 text-center font-semibold text-slate-800">{entry.sizeName || entry.size || '-'}</td>
+                            <td className={`py-3.5 px-2 text-center font-semibold ${isExtraCutting ? 'text-rose-900' : 'text-slate-800'}`}>
+                              {entry.sizeName || entry.size || '-'}
+                            </td>
                             <td
-                              className="py-3.5 px-3 text-right font-mono"
+                              className="py-3.5 px-3 text-right font-mono tabular-nums"
                               title={isReturn ? undefined : 'Double-click to quick edit'}
                               onDoubleClick={isReturn ? undefined : () => setInlineEdit({
                                 entry,
@@ -2310,14 +2628,30 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                                   className="w-20 px-2 py-1 text-right rounded border border-amber-400 outline-none"
                                 />
                               ) : (
-                                <span className={isReturn ? 'font-black text-[#cc0000]' : 'cursor-text font-bold text-slate-900'}>
-                                  {isReturn ? '-' : ''}{Math.abs(entry.pairs).toLocaleString()}
-                                </span>
+                                <div className="flex flex-col items-end">
+                                  <span
+                                    className={
+                                      isReturn
+                                        ? 'font-black text-[#cc0000]'
+                                        : isExtraCutting
+                                          ? 'cursor-text font-black text-rose-700'
+                                          : 'cursor-text font-bold text-slate-900'
+                                    }
+                                  >
+                                    {isReturn ? '-' : isExtraCutting ? '-' : ''}{Math.abs(entry.pairs).toLocaleString()}
+                                    {isExtraCutting ? ' pcs' : ''}
+                                  </span>
+                                  {isExtraCutting && (
+                                    <span className="text-[10px] font-black text-rose-700">
+                                      Extra
+                                    </span>
+                                  )}
+                                </div>
                               )}
                             </td>
-                            <td className="py-3.5 px-2 text-center text-slate-600">{entry.average || '-'}</td>
+                            <td className={`py-3.5 px-2 text-center ${isExtraCutting ? 'text-rose-800' : 'text-slate-600'}`}>{entry.average || '-'}</td>
                             <td
-                              className="py-3.5 px-3 text-right font-mono"
+                              className="py-3.5 px-3 text-right font-mono tabular-nums"
                               title={isReturn ? undefined : 'Double-click to quick edit'}
                               onDoubleClick={isReturn ? undefined : () => setInlineEdit({ entry, field: 'rate', value: String(entry.rate) })}
                             >
@@ -2343,15 +2677,15 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                                   className="w-20 rounded border border-amber-400 px-2 py-1 text-right outline-none"
                                 />
                               ) : (
-                                <span className={entry.rate ? 'cursor-text text-slate-800' : 'cursor-text text-rose-600'}>
+                                <span className={entry.rate ? (isExtraCutting ? 'cursor-text text-rose-900' : 'cursor-text text-slate-800') : 'cursor-text text-rose-600'}>
                                   {entry.rate ? `Rs. ${entry.rate}` : 'Rs. 0'}
                                 </span>
                               )}
                             </td>
-                            <td className={`py-3.5 px-3 text-right font-mono font-bold ${isReturn ? 'text-[#cc0000]' : 'text-slate-900'}`}>
+                            <td className={`py-3.5 px-3 text-right font-mono tabular-nums font-bold ${isReturn ? 'text-[#cc0000]' : isExtraCutting ? 'text-rose-800' : 'text-slate-900'}`}>
                               {isReturn ? `-Rs. ${Math.abs(row.amount).toLocaleString()}` : `Rs. ${row.amount.toLocaleString()}`}
                             </td>
-                            <td className={`py-3.5 px-3 text-right font-mono font-bold border-l border-blue-100 ${isReturn ? 'text-[#cc0000]' : 'text-blue-900 bg-blue-50/50'}`}>
+                            <td className={`py-3.5 px-3 text-right font-mono tabular-nums font-bold border-l border-blue-100 ${isReturn ? 'text-[#cc0000]' : isExtraCutting ? 'text-rose-800 bg-rose-100/50' : 'text-blue-900 bg-blue-50/50'}`}>
                               Rs. {row.runningBal.toLocaleString()}
                             </td>
                             <td className="py-3.5 px-3 text-center">
@@ -2366,7 +2700,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => setDeletingEntry(entry)}
+                                  onClick={() => {
+                                    setDeleteModalError(null);
+                                    setDeletingEntry(entry);
+                                  }}
                                   className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
                                   title="Delete Cutting Entry"
                                 >
@@ -2391,7 +2728,31 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                       </td>
                       <td className="px-2 py-3.5 text-center text-slate-400">—</td>
                       <td className="px-3 py-3.5 text-right font-mono text-slate-900">
-                        {visibleLedgerEntries.reduce((sum, entry) => sum + (entry.type === 'RETURN' ? -Math.abs(entry.pairs) : Math.abs(entry.pairs)), 0).toLocaleString()} Pairs
+                        {(() => {
+                          let normalPairs = 0;
+                          let extraSignedPairs = 0;
+                          visibleLedgerEntries.forEach(entry => {
+                            const p = Math.abs(Number(entry.pairs ?? entry.totalQty) || 0);
+                            if (entry.type === 'RETURN') {
+                              normalPairs -= p;
+                            } else if (entry.type === 'RECEIVE' && entry.isExtraCutting) {
+                              extraSignedPairs += entry.extraCuttingQty !== undefined ? Number(entry.extraCuttingQty) : -p;
+                            } else {
+                              normalPairs += p;
+                            }
+                          });
+                          const totalCutting = normalPairs + extraSignedPairs;
+                          return (
+                            <div>
+                              <span>{totalCutting.toLocaleString()} Pairs</span>
+                              {extraSignedPairs < 0 && (
+                                <span className="block text-[10px] font-black text-rose-700">
+                                  Extra: {extraSignedPairs.toLocaleString()} pcs
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-2 py-3.5 text-center text-slate-400">—</td>
                       <td className="px-3 py-3.5 text-right text-slate-400">—</td>
@@ -2589,6 +2950,23 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
             {/* Entry Form strictly following requested sequence */}
             <form onSubmit={handleSubmitTransaction} className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6 space-y-4 overscroll-contain">
+              {/* Red Warning Banner on top of form when Complete Order is selected */}
+              {isBlockedCompletedOrder && (
+                <div className="rounded-xl border-2 border-rose-400 bg-rose-600 px-4 py-3 text-white flex items-center justify-between gap-3 shadow-sm">
+                  <div className="flex items-center gap-2.5 text-xs sm:text-sm font-black">
+                    <AlertTriangle className="w-5 h-5 shrink-0" />
+                    <span>Complete Order - Cutting Not Allowed</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAllowExtraCuttingForCompleted(true)}
+                    className="px-3 py-1 rounded-lg bg-white text-rose-700 text-xs font-black hover:bg-rose-50 transition cursor-pointer whitespace-nowrap"
+                  >
+                    Phir Bhi Add Karein
+                  </button>
+                </div>
+              )}
+
               {/* Field 1: Date (Date Picker, default today) */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
@@ -2713,29 +3091,30 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
               {/* Destination Summary banner */}
               {txModalType === 'RECEIVE' && (
-                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs font-bold text-slate-800 flex items-center justify-between">
-                  <span className="text-slate-600 font-semibold">This entry will go to:</span>
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs font-bold text-slate-800 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-slate-600 font-semibold">This entry will go to (Single Entry ID):</span>
                   <span className="text-blue-700 font-black">
-                    {[
-                      deliveryToStock && 'Stock ✓',
-                      deliveryToExistingOrder && (formOrderId ? `Order ${orders.find(o => o.id === formOrderId)?.orderNo || 'Selected'} ✓` : 'Existing Order (Select Below)'),
-                      deliveryToNewOrder && `New Order (${newOrderCustomerName || 'Type Customer Name'}) ✓`
-                    ].filter(Boolean).join(', ') || 'Please select at least one destination'}
+                    Stock Management (Always){' '}
+                    {deliveryToExistingOrder
+                      ? `+ Order ${orders.find(o => o.id === formOrderId)?.orderNo || '(Select Below)'}`
+                      : deliveryToNewOrder
+                        ? `+ New Order (${newOrderCustomerName || 'Type Customer'})`
+                        : '(Stock - No Order)'}
                   </span>
                 </div>
               )}
 
-              {/* Task 4: Multi-Select Checkboxes for Delivery Destination */}
+              {/* Checkboxes for Delivery Choice: Both can be ticked */}
               {txModalType === 'RECEIVE' && (
                 <fieldset className="space-y-2.5 rounded-xl border border-slate-200 bg-slate-50 p-3.5">
                   <legend className="px-1 text-xs font-bold text-slate-700 uppercase tracking-wider">
-                    Delivery Choice * (Check destination)
+                    DELIVERY CHOICE / CHECK DESTINATION * (Both Can Be Ticked)
                   </legend>
 
                   <div className="space-y-2">
-                    {/* Checkbox 1: Add to Stock - Stock Management (Independent) */}
+                    {/* Checkbox 1: Add to Stock - Stock Management */}
                     <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
-                      deliveryToStock 
+                      deliveryToStock
                         ? 'border-emerald-500 bg-emerald-50/80 text-emerald-950 shadow-2xs' 
                         : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
                     }`}>
@@ -2743,7 +3122,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                         type="checkbox" 
                         checked={deliveryToStock} 
                         onChange={e => setDeliveryToStock(e.target.checked)} 
-                        className="mt-0.5 h-4 w-4 rounded text-emerald-600 focus:ring-emerald-500"
+                        className="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
                       />
                       <div>
                         <span className="font-bold flex items-center gap-1.5">
@@ -2751,65 +3130,62 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                           {deliveryToStock && <span className="text-emerald-600 font-black">✓</span>}
                         </span>
                         <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
-                          Direct to Stock: increases available pairs in Stock Management inventory.
+                          Stores cutting pairs in Stock Management Directory & Transaction History (Stock IN).
                         </span>
                       </div>
                     </label>
 
-                    {/* Checkbox 2: Add to Existing Order (Mutually exclusive with 3) */}
+                    {/* Checkbox 2: Add to Existing Order - Order Detail */}
                     <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
-                      deliveryToExistingOrder 
+                      deliveryToExistingOrder
                         ? 'border-blue-500 bg-blue-50/80 text-blue-950 shadow-2xs' 
-                        : deliveryToNewOrder
-                          ? 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed opacity-60'
-                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
                     }`}>
                       <input 
                         type="checkbox" 
-                        disabled={deliveryToNewOrder}
                         checked={deliveryToExistingOrder} 
                         onChange={e => {
-                          if (e.target.checked) {
-                            setDeliveryToExistingOrder(true);
+                          const checked = e.target.checked;
+                          setDeliveryToExistingOrder(checked);
+                          setAllowExtraCuttingForCompleted(false);
+                          if (checked) {
                             setDeliveryToNewOrder(false);
-                          } else {
-                            setDeliveryToExistingOrder(false);
+                            if (formOrderId) {
+                              void checkOrderStatusAndAlert(formOrderId);
+                            }
                           }
                         }} 
-                        className="mt-0.5 h-4 w-4 rounded text-blue-600 focus:ring-blue-500 disabled:opacity-40"
+                        className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                       />
                       <div>
                         <span className="font-bold flex items-center gap-1.5">
-                          <span>2. Add to Existing Order</span>
+                          <span>2. Add to Existing Order - Order Detail</span>
                           {deliveryToExistingOrder && <span className="text-blue-600 font-black">✓</span>}
                         </span>
                         <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
-                          Links directly to an existing customer order and updates fulfillment & cutting progress.
+                          Links entry to a Customer Order (PO) and ALSO stores it in Stock History with the Order No.
                         </span>
                       </div>
                     </label>
 
-                    {/* Checkbox 3: Add to New Order (Mutually exclusive with 2) */}
+                    {/* Checkbox 3: Add to New Order */}
                     <label className={`flex items-start gap-2.5 text-xs font-semibold cursor-pointer p-2.5 rounded-xl border transition ${
-                      deliveryToNewOrder 
+                      deliveryToNewOrder
                         ? 'border-indigo-500 bg-indigo-50/80 text-indigo-950 shadow-2xs' 
-                        : deliveryToExistingOrder
-                          ? 'border-slate-100 bg-slate-50 text-slate-400 cursor-not-allowed opacity-60'
-                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100/60'
                     }`}>
                       <input 
                         type="checkbox" 
-                        disabled={deliveryToExistingOrder}
                         checked={deliveryToNewOrder} 
                         onChange={e => {
-                          if (e.target.checked) {
-                            setDeliveryToNewOrder(true);
+                          const checked = e.target.checked;
+                          setDeliveryToNewOrder(checked);
+                          if (checked) {
                             setDeliveryToExistingOrder(false);
-                          } else {
-                            setDeliveryToNewOrder(false);
+                            setAllowExtraCuttingForCompleted(false);
                           }
                         }} 
-                        className="mt-0.5 h-4 w-4 rounded text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
+                        className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                       />
                       <div>
                         <span className="font-bold flex items-center gap-1.5">
@@ -2817,20 +3193,26 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                           {deliveryToNewOrder && <span className="text-indigo-600 font-black">✓</span>}
                         </span>
                         <span className="text-[11px] text-slate-500 font-normal block mt-0.5">
-                          Creates a brand-new Customer Order with this Article & Size matrix automatically.
+                          Creates a new Customer Order and stores the cutting entry once across Order & Stock History.
                         </span>
                       </div>
                     </label>
                   </div>
+
+                  <p className="mt-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-[11px] font-semibold text-emerald-900">
+                    Stock History me hamesha save hoga. Agar aap Order bhi tick karengi to ye Order me bhi jayega, lekin Stock se khatam nahi hoga.
+                  </p>
                 </fieldset>
               )}
 
               {/* Field 3: Customer Order selection (When deliveryToExistingOrder is checked) */}
               {txModalType === 'RECEIVE' && deliveryToExistingOrder && (
-                <div>
+                <div className="space-y-2">
                   <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
                     <span>Select Customer Order (PO) *</span>
-                    <span className="text-[10px] text-blue-600 font-bold">Linked Order Required</span>
+                    <span className="text-[10px] text-blue-600 font-bold">
+                      {isCheckingOrderStatus ? 'Checking Order Status...' : 'Linked Order Required'}
+                    </span>
                   </label>
                   <select
                     required
@@ -2838,18 +3220,77 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     onChange={e => {
                       const orderId = e.target.value;
                       setFormOrderId(orderId);
-                      const order = orders.find(item => item.id === orderId);
-                      if (order) setFormCustomerName(order.customerName);
+                      setAllowExtraCuttingForCompleted(false);
+                      setLiveOrderStatusOverride(null);
+                      void checkOrderStatusAndAlert(orderId);
                     }}
-                    className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    className={`w-full px-3 py-2 text-xs sm:text-sm rounded-xl border bg-white focus:outline-none focus:ring-2 ${
+                      isBlockedCompletedOrder
+                        ? 'border-rose-400 focus:ring-rose-500/20 text-rose-900'
+                        : isExtraCuttingMode
+                          ? 'border-rose-500 bg-rose-50/40 focus:ring-rose-500/20 text-rose-950'
+                          : 'border-slate-300 focus:ring-blue-500/20'
+                    }`}
                   >
                     <option value="">-- Select Customer Order (PO) --</option>
                     {filteredOrdersForArticle.map(ord => (
                       <option key={ord.id} value={ord.id}>
-                        {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}
+                        {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}{isOrderCompleted(ord) ? ` (${ord.status})` : ''}
                       </option>
                     ))}
                   </select>
+
+                  {isBlockedCompletedOrder && selectedExistingOrder && (
+                    <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs text-rose-900 space-y-2">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        <p className="font-bold leading-relaxed">
+                          Ye order already complete hai. Is me mazeed cutting ki zaroorat nahi hai. Please koi aur order select karein.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFormOrderId('');
+                            setFormCustomerName('');
+                            setAllowExtraCuttingForCompleted(false);
+                            setLiveOrderStatusOverride(null);
+                            clearCuttingQuantityFields();
+                          }}
+                          className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 font-bold hover:bg-slate-100 transition cursor-pointer"
+                        >
+                          Select Other Order
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAllowExtraCuttingForCompleted(true)}
+                          className="px-3 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 transition cursor-pointer"
+                        >
+                          Phir Bhi Add Karein
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {isExtraCuttingMode && selectedExistingOrder && (
+                    <div className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-xs text-rose-900 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-bold">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                        <span>
+                          Extra Cutting Mode Enabled: Order {selectedExistingOrder.orderNo} me ye entry{' '}
+                          <span className="underline">Extra Cutting (-)</span> ke tor par add hogi.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setAllowExtraCuttingForCompleted(false)}
+                        className="px-2.5 py-1 rounded-lg border border-rose-300 bg-white text-rose-700 font-bold hover:bg-rose-100 transition cursor-pointer"
+                      >
+                        Disable Extra Mode
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -3072,21 +3513,21 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 />
               </div>
 
-              {/* Receipts always update article stock; the destination controls the legacy stock widget only. */}
+              {/* Receipts always update article stock */}
               {txModalType === 'RECEIVE' && (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
-                  This cutting receipt automatically increases article stock and appears in stock history.
+                  Stock History me hamesha save hoga. Agar aap Order bhi tick karengi to ye Order me bhi jayega, lekin Stock se khatam nahi hoga.
                 </div>
               )}
 
               {/* Auto Dual Entry Badges confirmation as required */}
               <div className="flex items-center gap-3 p-2.5 bg-slate-50 rounded-xl text-xs border border-slate-200">
                 <span className="text-emerald-700 font-bold flex items-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" /> &check; Ledger Updated
+                  <CheckCircle2 className="w-4 h-4" /> &check; Ledger + Stock Updated
                 </span>
                 <span className="text-slate-300">&bull;</span>
                 <span className="text-blue-700 font-bold flex items-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" /> &check; Order Updated
+                  <CheckCircle2 className="w-4 h-4" /> &check; Order Updated (If Ticked)
                 </span>
               </div>
 
@@ -3105,18 +3546,97 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
                 <button
                   type="submit"
-                  disabled={isSubmittingTx}
-                  className={`px-6 py-2.5 rounded-xl text-xs sm:text-sm font-black text-white shadow-md transition active:scale-95 cursor-pointer flex items-center gap-2 ${
-                    txModalType === 'GIVE'
-                      ? 'bg-amber-500 hover:bg-amber-600 shadow-amber-500/25'
-                      : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/25'
+                  disabled={isSubmittingTx || isBlockedCompletedOrder}
+                  className={`px-6 py-2.5 rounded-xl text-xs sm:text-sm font-black text-white shadow-md transition flex items-center gap-2 ${
+                    isBlockedCompletedOrder
+                      ? 'bg-slate-300 text-slate-500 shadow-none cursor-not-allowed'
+                      : isExtraCuttingMode
+                        ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/25 active:scale-95 cursor-pointer'
+                        : txModalType === 'GIVE'
+                          ? 'bg-amber-500 hover:bg-amber-600 shadow-amber-500/25 active:scale-95 cursor-pointer'
+                          : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/25 active:scale-95 cursor-pointer'
                   }`}
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isSubmittingTx ? 'Saving...' : 'Save Entry'}</span>
+                  <span>
+                    {isSubmittingTx
+                      ? 'Saving...'
+                      : isBlockedCompletedOrder
+                        ? 'Add Cutting Disabled (Order Complete)'
+                        : isExtraCuttingMode
+                          ? 'Save as Extra Cutting (-pcs)'
+                          : txModalType === 'RECEIVE'
+                            ? 'Save Entry - Will Save Once To Stock + Order (If Ticked)'
+                            : 'Save Entry'}
+                  </span>
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Completed Order Alert Popup for Cutting Receive */}
+      {completedOrderAlert && (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-900/70 p-4 backdrop-blur-xs"
+          onClick={e => {
+            if (e.target === e.currentTarget) setCompletedOrderAlert(null);
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-black text-slate-900">
+                  Order Already Complete
+                </h3>
+                <p className="text-xs font-semibold text-slate-500">
+                  {completedOrderAlert.orderNo} &middot; {completedOrderAlert.customerName} &middot; Status: {completedOrderAlert.status}
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-sm font-bold text-rose-900 leading-relaxed">
+              Ye order already complete hai. Is me mazeed cutting ki zaroorat nahi hai. Please koi aur order select karein.
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Agar aap phir bhi is complete order me cutting add karna chahein, to ye cutting{' '}
+              <span className="font-bold text-rose-700">Extra Cutting</span> ke tor par save hogi aur order me Minus (-) me show hogi.
+            </p>
+
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  setFormOrderId('');
+                  setFormCustomerName('');
+                  setAllowExtraCuttingForCompleted(false);
+                  setLiveOrderStatusOverride(null);
+                  clearCuttingQuantityFields();
+                  setCompletedOrderAlert(null);
+                }}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition cursor-pointer whitespace-nowrap"
+              >
+                Select Other Order
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAllowExtraCuttingForCompleted(true);
+                  setCompletedOrderAlert(null);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-rose-600 text-xs font-black text-white hover:bg-rose-700 shadow-sm transition cursor-pointer whitespace-nowrap"
+              >
+                Phir Bhi Add Karein
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -3773,52 +4293,205 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     type="date"
                     value={editForm.date}
                     onChange={e => setEditForm(current => ({ ...current, date: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal bg-white"
                   />
                 </label>
+
+                {/* Cutter Dropdown */}
                 <label className="block text-xs font-bold text-slate-700">
-                  Customer Name *
-                  <input
-                    required
-                    type="text"
-                    placeholder="e.g. Bestway"
-                    value={editForm.customerName}
-                    onChange={e => setEditForm(current => ({ ...current, customerName: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-normal"
-                  />
+                  Cutter / Master *
+                  <select
+                    value={editForm.cutterId}
+                    onChange={e => setEditForm(current => ({ ...current, cutterId: e.target.value }))}
+                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold bg-white text-slate-900"
+                  >
+                    {Array.from(new Map(cutters.map(c => [c.id, c])).values()).map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.name || c.khataName || 'Cutter'} {c.khataName ? `(${c.khataName})` : ''} - {c.cutterType === 'cutting_maker' ? 'Maker' : 'Cutter'}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </div>
 
-              {/* SEPARATE Article Box and Size Box */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <label className="block text-xs font-bold text-slate-700">
-                  Article * (Separate Box)
-                  <input
-                    required
-                    type="text"
-                    list="cuttings-article-list"
-                    placeholder="e.g. pride, ce, 1202"
-                    value={editForm.article}
-                    onChange={e => setEditForm(current => ({ ...current, article: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900 bg-white"
-                  />
-                  <datalist id="cuttings-article-list">
-                    {allArticleOptions.map(opt => (
-                      <option key={opt.id} value={opt.articleName} />
-                    ))}
-                  </datalist>
-                </label>
+              {/* Customer Order: Searchable Dropdown */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Customer Order (PO) *
+                  </label>
+                  {!editShowNewOrderInput && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditShowNewOrderInput(true);
+                        setEditForm(prev => ({ ...prev, orderId: '', orderNo: '', customerName: '' }));
+                      }}
+                      className="text-[11px] font-bold text-blue-600 hover:text-blue-800 cursor-pointer"
+                    >
+                      + Add New Customer Order
+                    </button>
+                  )}
+                </div>
 
-                <label className="block text-xs font-bold text-slate-700">
-                  Size (Separate Box)
-                  <input
-                    type="text"
-                    placeholder="e.g. 10, L, M, XL"
-                    value={editForm.size}
-                    onChange={e => setEditForm(current => ({ ...current, size: e.target.value }))}
-                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-900 bg-white"
-                  />
-                </label>
+                {editShowNewOrderInput ? (
+                  <div className="p-3 rounded-xl border border-blue-200 bg-blue-50/60 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-bold text-blue-900">
+                      <span>Create New Customer Order</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditShowNewOrderInput(false);
+                          setEditNewCustomerInput('');
+                        }}
+                        className="text-[11px] text-slate-500 hover:text-slate-800 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="e.g. traders, best way, Shoaib Enterprises"
+                      value={editNewCustomerInput}
+                      onChange={e => setEditNewCustomerInput(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold bg-white text-slate-900"
+                      autoFocus
+                    />
+                    <p className="text-[10px] text-slate-500">
+                      Saving will automatically create a new customer card and order reference for this cutting entry.
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <select
+                      value={editForm.orderId ? editForm.orderId : (editForm.customerName === 'Stock' || !editForm.orderId ? '__stock_only__' : '')}
+                      onChange={e => {
+                        const val = e.target.value;
+                        if (val === '__new_order__') {
+                          setEditShowNewOrderInput(true);
+                          setEditForm(prev => ({ ...prev, orderId: '', orderNo: '', customerName: '' }));
+                        } else if (val === '__stock_only__') {
+                          setEditForm(prev => ({ ...prev, orderId: '', orderNo: '', customerName: 'Stock - No Order' }));
+                        } else {
+                          const ord = orders.find(o => o.id === val);
+                          if (ord) {
+                            setEditForm(prev => ({
+                              ...prev,
+                              orderId: ord.id,
+                              orderNo: ord.orderNo,
+                              customerName: ord.customerName
+                            }));
+                          }
+                        }
+                      }}
+                      className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="">-- Select Customer Order --</option>
+                      <option value="__stock_only__">Stock Management - Direct to Stock (No Order)</option>
+                      {orders.map(o => (
+                        <option key={o.id} value={o.id}>
+                          {o.customerName} - {formatDate(o.orderDate)} - {o.orderNo}
+                        </option>
+                      ))}
+                      <option value="__new_order__">+ Add New Customer Order...</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              {/* Article & Size: Searchable Dropdown */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-700">
+                      Article *
+                    </label>
+                    {!editShowNewArticleInput && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditShowNewArticleInput(true);
+                          setEditForm(prev => ({ ...prev, article: '' }));
+                        }}
+                        className="text-[11px] font-bold text-blue-600 hover:text-blue-800 cursor-pointer"
+                      >
+                        + Add New Article
+                      </button>
+                    )}
+                  </div>
+
+                  {editShowNewArticleInput ? (
+                    <div className="p-2.5 rounded-xl border border-blue-200 bg-blue-50/60 space-y-1.5">
+                      <div className="flex items-center justify-between text-xs font-bold text-blue-900">
+                        <span>New Article Name</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditShowNewArticleInput(false);
+                            setEditNewArticleInput('');
+                          }}
+                          className="text-[10px] text-slate-500 hover:text-slate-800 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      <input
+                        type="text"
+                        placeholder="e.g. mg, pride, ce"
+                        value={editNewArticleInput}
+                        onChange={e => setEditNewArticleInput(e.target.value)}
+                        className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold bg-white text-slate-900"
+                        autoFocus
+                      />
+                    </div>
+                  ) : (
+                    <select
+                      value={editForm.article}
+                      onChange={e => {
+                        const val = e.target.value;
+                        if (val === '__add_new__') {
+                          setEditShowNewArticleInput(true);
+                          setEditForm(prev => ({ ...prev, article: '' }));
+                        } else {
+                          setEditForm(prev => ({ ...prev, article: val }));
+                        }
+                      }}
+                      className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                    >
+                      <option value="">-- Select Article --</option>
+                      {allArticleOptions.map(opt => (
+                        <option key={opt.id} value={opt.articleName}>
+                          {opt.articleName} {opt.articleCode ? `(${opt.articleCode})` : ''}
+                        </option>
+                      ))}
+                      <option value="__add_new__">+ Add New Article...</option>
+                    </select>
+                  )}
+                </div>
+
+                {/* Size Dropdown */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Size *
+                  </label>
+                  <select
+                    value={editForm.size || 'Standard'}
+                    onChange={e => setEditForm(prev => ({ ...prev, size: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-semibold bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    <option value="7">Size 7</option>
+                    <option value="8">Size 8</option>
+                    <option value="9">Size 9</option>
+                    <option value="10">Size 10</option>
+                    <option value="11">Size 11</option>
+                    <option value="12">Size 12</option>
+                    <option value="Standard">Standard</option>
+                    <option value="Matrix">Matrix</option>
+                    {editForm.size && !['7', '8', '9', '10', '11', '12', 'Standard', 'Matrix'].includes(editForm.size) && (
+                      <option value={editForm.size}>{editForm.size} (Custom)</option>
+                    )}
+                  </select>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -3916,7 +4589,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
           onClick={(e) => {
-            if (e.target === e.currentTarget) setDeletingEntry(null);
+            if (e.target === e.currentTarget && !isDeletingEntry) {
+              setDeletingEntry(null);
+              setDeleteModalError(null);
+            }
           }}
         >
           <div
@@ -3927,34 +4603,65 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               <h3 className="text-lg font-bold text-slate-900">Delete Cutting Entry?</h3>
               <button
                 type="button"
-                onClick={() => setDeletingEntry(null)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 transition cursor-pointer"
+                disabled={isDeletingEntry}
+                onClick={() => {
+                  setDeletingEntry(null);
+                  setDeleteModalError(null);
+                }}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 disabled:opacity-40 transition cursor-pointer"
                 aria-label="Close / Back"
                 title="Close / Back (Esc)"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <p className="mt-3 text-sm text-slate-600">
-              Delete this entry permanently? Date: {formatConfirmationDate(deletingEntry.date)}, Customer: {deletingEntry.customerName || '-'}, Pairs: {deletingEntry.pairs}, Total: Rs.{deletingEntry.pairs * deletingEntry.rate}. This action cannot be undone.
+            <p className="mt-3 text-sm font-semibold text-slate-800">
+              Is entry ko delete kar dun? Ye wapas nahi aayegi.
             </p>
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Date:</span>
+                <span className="font-mono font-semibold text-slate-800">{formatConfirmationDate(deletingEntry.date)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Article / Size:</span>
+                <span className="font-semibold text-slate-800">{deletingEntry.articleTitle || deletingEntry.article || '-'} ({deletingEntry.sizeName || deletingEntry.size || 'Standard'})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Pairs / Total:</span>
+                <span className="font-mono font-bold text-rose-600">{Math.abs(Number(deletingEntry.pairs || 0)).toLocaleString()} Pairs (Rs.{(Math.abs(Number(deletingEntry.pairs || 0)) * Number(deletingEntry.rate || 0)).toLocaleString()})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Customer / Order:</span>
+                <span className="font-semibold text-slate-800">{deletingEntry.customerName || 'Stock - No Order'}{deletingEntry.orderNo ? ` (${deletingEntry.orderNo})` : ''}</span>
+              </div>
+            </div>
+            {deleteModalError && (
+              <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700">
+                {deleteModalError}
+              </div>
+            )}
             <div className="mt-5 flex justify-end gap-2 border-t border-slate-100 pt-3">
               <button
                 type="button"
-                onClick={() => setDeletingEntry(null)}
+                onClick={() => {
+                  setDeletingEntry(null);
+                  setDeleteModalError(null);
+                }}
                 disabled={isDeletingEntry}
-                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 transition cursor-pointer flex items-center gap-1.5"
+                className="rounded-xl px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-100 border border-slate-200 disabled:opacity-50 transition cursor-pointer flex items-center gap-1.5"
               >
                 <ArrowLeft className="w-4 h-4" />
-                <span>Cancel / Back</span>
+                <span>Cancel</span>
               </button>
               <button
                 type="button"
                 onClick={handleDeleteEntry}
                 disabled={isDeletingEntry}
-                className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60 transition cursor-pointer"
               >
-                {isDeletingEntry ? 'Deleting...' : 'Delete Entry'}
+                {isDeletingEntry && <Loader2 className="h-4 w-4 animate-spin" />}
+                <span>{isDeletingEntry ? 'Deleting...' : 'Delete Permanently'}</span>
               </button>
             </div>
           </div>

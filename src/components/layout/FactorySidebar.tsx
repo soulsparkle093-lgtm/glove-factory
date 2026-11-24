@@ -15,9 +15,7 @@ import {
   X,
   ShieldCheck,
   PackageCheck,
-  AlertTriangle,
-  Shirt,
-  Building2
+  Shirt
 } from 'lucide-react';
 import { useFactory } from '../../context/FactoryContext';
 import { FactoryModule } from '../../types/factory';
@@ -28,7 +26,16 @@ interface FactorySidebarProps {
 }
 
 export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose }) => {
-  const { activeModule, setActiveModule, orders, cuttings, products, settings } = useFactory();
+  const {
+    activeModule,
+    setActiveModule,
+    setSelectedOrderId,
+    setSelectedCompanyName,
+    orders,
+    cuttings,
+    products,
+    settings
+  } = useFactory();
 
   const activeOrdersCount = orders.filter(o => o.status !== 'Completed').length;
   const pendingCuttingsCount = cuttings.filter(c => c.status === 'Given').length;
@@ -43,8 +50,7 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
     badgeColor?: string;
   }[] = [
     { id: 'dashboard', labelEn: 'Dashboard', description: 'Overview & Analytics', icon: LayoutDashboard },
-    { id: 'orders', labelEn: 'Customer Orders', description: 'Orders & Production', icon: FileText, badge: activeOrdersCount > 0 ? activeOrdersCount : undefined, badgeColor: 'bg-blue-600' },
-    { id: 'order_companies', labelEn: 'Order Companies', description: 'Company-Wise Orders & History', icon: Building2 },
+    { id: 'orders', labelEn: 'Customer Orders', description: 'Companies, Orders & Production', icon: FileText, badge: activeOrdersCount > 0 ? activeOrdersCount : undefined, badgeColor: 'bg-blue-600' },
     { id: 'cuttings', labelEn: 'Cutting Management', description: 'Worker & Contractor Cutting', icon: Scissors, badge: pendingCuttingsCount > 0 ? pendingCuttingsCount : undefined, badgeColor: 'bg-amber-500' },
     { id: 'stitching', labelEn: 'Stitching Management', description: 'Stitching Orders & Stitcher Khata', icon: Shirt, badge: undefined },
     { id: 'stock', labelEn: 'Finished Goods Stock', description: 'Auto Stock Calculation', icon: Boxes, badge: lowStockCount > 0 ? lowStockCount : undefined, badgeColor: 'bg-rose-500' },
@@ -67,6 +73,11 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
   });
 
   const handleNav = (mod: FactoryModule) => {
+    if (mod === 'orders') {
+      setSelectedOrderId(null);
+      setSelectedCompanyName(null);
+      window.dispatchEvent(new Event('factory:reset-orders-view'));
+    }
     setActiveModule(mod);
     if (mod === 'stock_management') {
       window.history.pushState({}, '', '/stock-management');
@@ -128,7 +139,12 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
         <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
           {visibleNavItems.map(item => {
             const Icon = item.icon;
-            const isActive = activeModule === item.id;
+            const isActive =
+              activeModule === item.id ||
+              (item.id === 'orders' &&
+                (activeModule === 'order_detail' ||
+                  activeModule === 'order_companies' ||
+                  activeModule === 'company_detail'));
             return (
               <button
                 key={item.id}
@@ -170,7 +186,7 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
           <div className="flex items-center justify-between text-[11px] text-slate-500">
             <span>Auto System Status</span>
             <span className="text-emerald-700 font-bold flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
               Real-time Active
             </span>
           </div>

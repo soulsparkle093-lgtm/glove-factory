@@ -8,7 +8,7 @@ interface MobileBottomNavProps {
 }
 
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMobileMenu }) => {
-  const { activeModule, setActiveModule, cuttings, orders, settings } = useFactory();
+  const { activeModule, setActiveModule, setSelectedOrderId, setSelectedCompanyName, cuttings, orders, settings } = useFactory();
 
   const pendingCuttingsCount = cuttings.filter(c => c.status === 'Given').length;
   const activeOrdersCount = orders.filter(o => o.status !== 'Completed').length;
@@ -37,7 +37,12 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMobileMe
     <div className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-2 py-1.5 flex items-center justify-around lg:hidden shadow-xl">
       {visibleItems.map(item => {
         const Icon = item.icon;
-        const isActive = activeModule === item.id;
+        const isActive =
+          activeModule === item.id ||
+          (item.id === 'orders' &&
+            (activeModule === 'order_detail' ||
+              activeModule === 'order_companies' ||
+              activeModule === 'company_detail'));
 
         return (
           <button
@@ -46,6 +51,11 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({ onOpenMobileMe
               if (item.id === 'menu') {
                 onOpenMobileMenu();
               } else {
+                if (item.id === 'orders') {
+                  setSelectedOrderId(null);
+                  setSelectedCompanyName(null);
+                  window.dispatchEvent(new Event('factory:reset-orders-view'));
+                }
                 setActiveModule(item.id);
               }
             }}

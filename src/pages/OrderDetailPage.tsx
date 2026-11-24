@@ -53,6 +53,7 @@ interface CuttingHistoryRow {
   status: string;
   notes: string;
   isLegacyCut?: boolean;
+  isExtraCutting?: boolean;
 }
 
 interface CuttingArticleSizeGroup {
@@ -107,6 +108,8 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     cuttings, 
     cuttingEntries,
     stockLedger, 
+    stitchingHistory,
+    stitchingOrders,
     invoices, 
     orderDispatchHistory,
     cuttingTransactions,
@@ -255,68 +258,98 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     return sum + orig;
   }, 0) || Number(order.totalPairs) || 0;
 
-  // --- 2. SECTION B DATA: LIVE CALCULATED FROM HISTORY COLLECTIONS ---
-  // Cutting Given: sum of cuttings + cuttingTransactions where orderId matches
+  // --- 2. SECTION B DATA: LIVE CALCULATED FROM LIVE cuttingEntries (Single Source of Truth) ---
+  const liveOrderCuttingEntries = useMemo(() => {
+    const byId = new Map<string, (typeof cuttingEntries)[number]>();
+    cuttingEntries.forEach(entry => {
+      if (entry.isDeleted) return;
+      const pairs = Number(entry.pairs ?? (entry as any).totalQty ?? (entry as any).quantity ?? 0);
+      if (pairs <= 0) return;
+      const matchesOrder = entry.orderId === orderId || Boolean(order?.orderNo && entry.orderNo === order.orderNo);
+      if (matchesOrder && !byId.has(entry.id)) {
+        byId.set(entry.id, entry);
+      }
+    });
+    return [...byId.values()];
+  }, [cuttingEntries, orderId, order?.orderNo]);
+
   const orderCuttings = cuttings.filter(c => c.orderId === orderId);
   const orderCuttingTxs = cuttingTransactions.filter(t => t.orderId === orderId);
+
   const orderCuttingRecords = useMemo(() => {
     const recordsById = new Map<string, CuttingHistoryRow>();
-    orderCuttingTxs.forEach(tx => {
-      recordsById.set(tx.id, {
-        id: tx.id,
-        date: tx.date,
-        cutterName: tx.cutterName || 'Unknown Cutter',
-        article: tx.articleTitle || tx.article || 'Unspecified Article',
-        size: tx.sizeName || tx.size || '-',
-        qty: Number(tx.totalQty) || Number(tx.qty) || 0,
-        rate: Number(tx.rate) || 0,
-        amount: Number(tx.totalBalance) || Number(tx.lotTotal) || (Number(tx.qty) || 0) * (Number(tx.rate) || 0),
-        type: tx.type,
-        status: tx.type === 'GIVE' ? 'Cutting Issued' : 'Cutting Received',
-        notes: tx.notes || tx.remarks || ''
-      });
-    });
-    cuttingEntries.filter(entry => entry.orderId === orderId).forEach(entry => {
+
+    liveOrderCuttingEntries.forEach(entry => {
+      const pairs = Number(entry.pairs ?? (entry as any).totalQty ?? (entry as any).quantity ?? 0);
+      const rate = Number(entry.rate) || Number((entry as any).boxRate) || 0;
       recordsById.set(entry.id, {
         id: entry.id,
         date: entry.date,
         cutterName: entry.cutterName || 'Unknown Cutter',
         article: entry.articleTitle || entry.article || 'Unspecified Article',
         size: entry.sizeName || entry.size || '-',
-        qty: Number(entry.totalQty) || Number(entry.quantity) || Number(entry.pairs) || 0,
-        rate: Number(entry.rate) || Number(entry.boxRate) || 0,
-        amount: Number(entry.totalBalance) || Number(entry.lotTotal) || (Number(entry.pairs) || 0) * (Number(entry.rate) || 0),
+        qty: pairs,
+        rate,
+        amount: Number(entry.totalBalance) || Number(entry.lotTotal) || pairs * rate,
         type: entry.type,
-        status: entry.type === 'GIVE' ? 'Cutting Issued' : entry.type === 'RETURN' ? 'Cutting Returned' : 'Cutting Received',
-        notes: entry.remarks || ''
+        status: entry.isExtraCutting ? 'Extra Cutting' : entry.type === 'GIVE' ? 'Cutting Issued' : entry.type === 'RETURN' ? 'Cutting Returned' : 'Cutting Received',
+        notes: entry.remarks || (entry.billNo ? `Bill #${entry.billNo}` : ''),
+        isExtraCutting: Boolean(entry.isExtraCutting)
       });
     });
-    orderCuttings.forEach(cutting => {
-      if (recordsById.has(cutting.id)) return;
-      recordsById.set(cutting.id, {
-        id: cutting.id,
-        date: cutting.date,
-        cutterName: cutting.personName || 'Unknown Cutter',
-        article: cutting.gloveType || 'Unspecified Article',
-        size: cutting.size || '-',
-        qty: Number(cutting.qty) || 0,
-        rate: Number(cutting.rate) || 0,
-        amount: Number(cutting.totalAmount) || (Number(cutting.qty) || 0) * (Number(cutting.rate) || 0),
-        type: cutting.status === 'Received' ? 'RECEIVE' : 'GIVE',
-        status: cutting.status === 'Received' ? 'Cutting Received' : 'Cutting Issued',
-        notes: cutting.notes || '',
-        isLegacyCut: true
-      });
-    });
+
+    // Fallback to legacy only if no live cuttingEntries found
+    if (recordsById.size === 0) {
+      orderCuttingTxs
+        .filter(t => !t.isDeleted && (Number(t.qty || t.totalQty) > 0))
+        .forEach(tx => {
+          const qty = Number(tx.totalQty) || Number(tx.qty) || 0;
+          const rate = Number(tx.rate) || 0;
+          recordsById.set(tx.id, {
+            id: tx.id,
+            date: tx.date,
+            cutterName: tx.cutterName || 'Unknown Cutter',
+            article: tx.articleTitle || tx.article || 'Unspecified Article',
+            size: tx.sizeName || tx.size || '-',
+            qty,
+            rate,
+            amount: Number(tx.totalBalance) || Number(tx.lotTotal) || qty * rate,
+            type: tx.type,
+            status: tx.isExtraCutting ? 'Extra Cutting' : tx.type === 'GIVE' ? 'Cutting Issued' : 'Cutting Received',
+            notes: tx.notes || tx.remarks || '',
+            isExtraCutting: Boolean(tx.isExtraCutting)
+          });
+        });
+
+      if (recordsById.size === 0) {
+        orderCuttings.forEach(cutting => {
+          const qty = Number(cutting.qty) || 0;
+          const rate = Number(cutting.rate) || 0;
+          recordsById.set(cutting.id, {
+            id: cutting.id,
+            date: cutting.date,
+            cutterName: cutting.personName || 'Unknown Cutter',
+            article: cutting.gloveType || 'Unspecified Article',
+            size: cutting.size || '-',
+            qty,
+            rate,
+            amount: Number(cutting.totalAmount) || qty * rate,
+            type: cutting.status === 'Received' ? 'RECEIVE' : 'GIVE',
+            status: cutting.isExtraCutting ? 'Extra Cutting' : cutting.status === 'Received' ? 'Cutting Received' : 'Cutting Issued',
+            notes: cutting.notes || '',
+            isLegacyCut: true,
+            isExtraCutting: Boolean(cutting.isExtraCutting)
+          });
+        });
+      }
+    }
+
     return [...recordsById.values()]
-      .filter(record => {
-        const isGhost = (record.article.includes('Size Matrix') || record.article.includes('/ Matrix')) && record.qty <= 0;
-        return !isGhost;
-      })
+      .filter(record => record.qty > 0)
       .sort((a, b) =>
         safeStringCompare(a.date, b.date) || safeStringCompare(a.id, b.id)
       );
-  }, [cuttingEntries, orderCuttingTxs, orderCuttings, orderId]);
+  }, [liveOrderCuttingEntries, orderCuttingTxs, orderCuttings]);
 
   const cuttingArticleGroups = useMemo(() => {
     const groups = new Map<string, CuttingArticleSizeGroup>();
@@ -514,16 +547,79 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
     );
   }, [orderDeliveryRecords, deliverySearch]);
 
-  const cuttingGivenPairs = orderCuttings.reduce((sum, c) => sum + (Number(c.qty) || 0), 0) ||
-    orderCuttingTxs.filter(t => t.type === 'GIVE').reduce((sum, t) => sum + (Number(t.qty) || 0), 0);
+  const liveGiven = liveOrderCuttingEntries.filter(e => e.type === 'GIVE');
+  const liveReceive = liveOrderCuttingEntries.filter(e => e.type === 'RECEIVE');
+  const liveReturn = liveOrderCuttingEntries.filter(e => e.type === 'RETURN');
 
-  // Stock Received: sum of stock_ledger where orderId matches and type is in or cutting_received
-  const orderStockLedger = stockLedger.filter(s => s.orderId === orderId);
-  const stockReceivedPairs = orderStockLedger
-    .filter(s => s.type === 'in' || s.type === 'cutting_received')
+  // =========================================================================
+  // EXACT FORMULAS (Section B - Live Order Progress & Cutting Balance):
+  // 1. CUTTING GIVEN = Sum of cutting entries for this orderId (counted ONCE).
+  //    Uses GIVE entries if present; otherwise uses RECEIVE cutting entries once.
+  // 2. TOTAL CUTTING RECEIVED = Sum of unique RECEIVE entries minus RETURN entries.
+  // 3. CUTTING REMAINING = Total Order Qty - Total Cutting Received
+  //    (If Cutting Received > Order Qty, Remaining is NEGATIVE e.g. -1,000).
+  // 4. STOCK RECEIVED = Sum from Stitching receipts (stitchingHistory / stitchingOrders)
+  //    + non-cutting Stock IN entries ONLY. NEVER copies cutting values (0 if none).
+  // 5. BILLED / DISPATCHED = Sum of actual sales invoices / deliveries.
+  // 6. PENDING = Total Order Qty - Dispatched Qty.
+  // =========================================================================
+  const cuttingGivenPairs = liveGiven.length > 0
+    ? liveGiven.reduce((sum, e) => sum + Math.abs(Number(e.pairs ?? (e as any).totalQty) || 0), 0)
+    : (liveReceive.length > 0
+        ? liveReceive.reduce((sum, e) => sum + Math.abs(Number(e.pairs ?? (e as any).totalQty) || 0), 0)
+        : (orderCuttingTxs.filter(t => !t.isDeleted && t.type === 'GIVE').reduce((sum, t) => sum + Math.abs(Number(t.qty) || 0), 0) ||
+           orderCuttingTxs.filter(t => !t.isDeleted && t.type === 'RECEIVE').reduce((sum, t) => sum + Math.abs(Number(t.qty) || 0), 0) ||
+           orderCuttings.reduce((sum, c) => sum + Math.abs(Number(c.qty) || 0), 0)));
+
+  const cuttingReceivedPairs = liveOrderCuttingEntries.length > 0
+    ? (liveReceive.reduce((sum, e) => sum + Math.abs(Number(e.pairs ?? (e as any).totalQty) || 0), 0) -
+       liveReturn.reduce((sum, e) => sum + Math.abs(Number(e.pairs ?? (e as any).totalQty) || 0), 0))
+    : (orderCuttingTxs.filter(t => !t.isDeleted).length > 0
+        ? orderCuttingTxs
+            .filter(t => !t.isDeleted && t.type === 'RECEIVE')
+            .reduce((sum, t) => sum + Math.abs(Number(t.totalQty ?? t.qty) || 0), 0)
+        : orderCuttings
+            .filter(c => c.status === 'Received')
+            .reduce((sum, c) => sum + Math.abs(Number(c.qty) || 0), 0));
+
+  // Remaining = Total Order Qty - Total Cutting Received (Negative when Cutting > Order)
+  const cuttingRemainingPairs = totalOriginalPairs - cuttingReceivedPairs;
+
+  // STOCK RECEIVED: strictly from Stitching receipts or non-cutting Stock IN entries (never copies cutting!)
+  const cuttingRefIds = new Set<string>([
+    ...liveOrderCuttingEntries.map(e => e.id),
+    ...orderCuttingTxs.map(t => t.id),
+    ...orderCuttings.map(c => c.id)
+  ]);
+
+  const orderStitchingHistoryReceive = (stitchingHistory || [])
+    .filter(h => (h.orderId === orderId || Boolean(order?.orderNo && h.orderNo === order.orderNo)) && h.type === 'RECEIVE')
+    .reduce((sum, h) => sum + (Number(h.quantity) || 0), 0);
+
+  const orderStitchingOrderReceived = (stitchingOrders || [])
+    .filter(so => so.orderId === orderId || Boolean(order?.orderNo && so.orderNo === order.orderNo))
+    .reduce((sum, so) => sum + (Number(so.receivedQuantity) || 0), 0);
+
+  const stitchingStockReceivedPairs = orderStitchingHistoryReceive > 0
+    ? orderStitchingHistoryReceive
+    : orderStitchingOrderReceived;
+
+  const nonCuttingStockInPairs = (stockLedger || [])
+    .filter(s => {
+      if ((s as any).isDeleted) return false;
+      const matchesOrd = s.orderId === orderId || Boolean(order?.orderNo && s.orderNo === order.orderNo);
+      if (!matchesOrd) return false;
+      if (s.type !== 'in') return false;
+      // Exclude cutting backfill / cutting receipts so Stock Received never mirrors Cutting
+      if (s.id.startsWith('stk-') || (s.referenceId && cuttingRefIds.has(s.referenceId))) return false;
+      if ((s.notes || '').toLowerCase().includes('cutting')) return false;
+      return true;
+    })
     .reduce((sum, s) => sum + (Number(s.qty) || 0), 0);
 
-  // Billed / Dispatched: sum of sales_invoices where orderId matches
+  const stockReceivedPairs = stitchingStockReceivedPairs + nonCuttingStockInPairs;
+
+  // Billed / Dispatched: sum of sales_invoices / deliveries where orderId matches
   const orderInvoices = invoices.filter(i => i.orderId === orderId);
   const invoiceDispatchedPairs = orderInvoices.reduce((sum, inv) => {
     return sum + (inv.items || []).reduce((iSum, itm) => iSum + (Number(itm.qty) || 0), 0);
@@ -536,7 +632,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
 
   const dispatchedPairs = Math.max(invoiceDispatchedPairs, historyDispatchedPairs, totalDeliveredPairs);
 
-  // Pending Pairs: Original Qty - Dispatched Qty
+  // Pending Pairs: Total Order Qty - Dispatched Qty
   const pendingPairs = Math.max(0, totalOriginalPairs - dispatchedPairs);
 
   // Progress Percentages
@@ -889,13 +985,18 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
               <ArrowLeft className="w-5 h-5" />
             </button>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono font-black text-lg text-blue-700">
                   #{order.orderNo}
                 </span>
                 <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${statusBadge.bg}`}>
                   {statusBadge.label}
                 </span>
+                {cuttingRemainingPairs < 0 && (
+                  <span className="px-2.5 py-0.5 rounded-md text-xs font-black font-mono tabular-nums bg-rose-100 text-rose-700 border border-rose-300">
+                    Extra Cutting {cuttingRemainingPairs.toLocaleString()}
+                  </span>
+                )}
               </div>
               <h1 className="text-base sm:text-lg font-black text-slate-900 truncate">
                 {order.customerName}
@@ -1235,11 +1336,16 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
             </div>
             <div className="mt-3">
               <div className="text-2xl font-black text-amber-700 font-mono">
-                {cuttingGivenPairs} <span className="text-xs font-medium text-slate-500">pairs</span>
+                {cuttingGivenPairs.toLocaleString()} <span className="text-xs font-medium text-slate-500">pairs</span>
               </div>
+              {cuttingRemainingPairs < 0 && (
+                <div className="mt-1 text-xs font-mono font-black text-rose-700">
+                  Extra Cutting {cuttingRemainingPairs.toLocaleString()}
+                </div>
+              )}
               <div className="mt-2 text-xs text-slate-500 flex items-center justify-between">
                 <span>{cuttingPct}% of original PO</span>
-                <span className="font-semibold text-amber-800">{orderCuttings.length} work batches</span>
+                <span className="font-semibold text-amber-800">{liveOrderCuttingEntries.length || orderCuttings.length} entries</span>
               </div>
               <div className="w-full h-1.5 bg-amber-100 rounded-full mt-2 overflow-hidden">
                 <div style={{ width: `${cuttingPct}%` }} className="h-full bg-amber-500 rounded-full" />
@@ -1247,7 +1353,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
             </div>
           </div>
 
-          {/* Card 2: Stock Received */}
+          {/* Card 2: Stock Received (Strictly from Stitching / Stock - NEVER copied from Cutting) */}
           <div className="bg-white rounded-2xl p-5 border border-emerald-200 shadow-xs relative overflow-hidden">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold uppercase tracking-wider text-emerald-700">
@@ -1259,11 +1365,11 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
             </div>
             <div className="mt-3">
               <div className="text-2xl font-black text-emerald-600 font-mono">
-                {stockReceivedPairs} <span className="text-xs font-medium text-slate-500">pairs</span>
+                {stockReceivedPairs.toLocaleString()} <span className="text-xs font-medium text-slate-500">pairs</span>
               </div>
               <div className="mt-2 text-xs text-slate-500 flex items-center justify-between">
                 <span>{stockPct}% ready in warehouse</span>
-                <span className="font-semibold text-emerald-800">From Cutters</span>
+                <span className="font-semibold text-emerald-800">From Stitching / Stock</span>
               </div>
               <div className="w-full h-1.5 bg-emerald-100 rounded-full mt-2 overflow-hidden">
                 <div style={{ width: `${stockPct}%` }} className="h-full bg-emerald-500 rounded-full" />
@@ -1495,18 +1601,25 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                         group.rows.some(r => r.cutterName.toLowerCase().includes(q));
                     })
                     .map(group => {
+                      // EXACT FORMULA:
+                      // - Total Cutting Received = sum of RECEIVE minus RETURN entries in this group (counted ONCE)
+                      // - Remaining = Order Qty - Total Cutting Received (negative when over-cut)
                       const issuedPairs = group.rows.reduce((sum, row) =>
                         sum + (row.type === 'GIVE' || row.isLegacyCut ? row.qty : 0), 0);
-                      const receivedPairs = group.rows.reduce((sum, row) =>
-                        sum + (row.type === 'RECEIVE' ? row.qty : 0), 0);
-                      const remainingPairs = Math.max(0, group.orderedPairs - receivedPairs);
+                      const receivedPairs = group.rows.reduce((sum, row) => {
+                        if (row.type === 'RECEIVE') return sum + row.qty;
+                        if (row.type === 'RETURN') return sum - row.qty;
+                        return sum;
+                      }, 0);
+                      const remainingPairs = group.orderedPairs - receivedPairs;
+                      const isOverCut = remainingPairs < 0;
                       const progress = group.orderedPairs > 0
-                        ? Math.min(100, Math.round((receivedPairs / group.orderedPairs) * 100))
+                        ? Math.min(100, Math.round((Math.max(0, receivedPairs) / group.orderedPairs) * 100))
                         : 0;
                       const expanded = expandedCuttingGroup === group.key;
 
                       return (
-                        <div key={group.key} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                        <div key={group.key} className={`overflow-hidden rounded-xl border bg-white ${isOverCut ? 'border-rose-300' : 'border-slate-200'}`}>
                           <button
                             type="button"
                             onClick={() => setExpandedCuttingGroup(expanded ? null : group.key)}
@@ -1517,7 +1630,14 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                               {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-amber-700" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
                               <span className="min-w-0">
                                 <span className="block truncate text-sm font-black text-slate-900">{group.article}</span>
-                                <span className="block text-[11px] text-slate-500">Article</span>
+                                <span className="block text-[11px] text-slate-500">
+                                  Order: {group.orderedPairs.toLocaleString()} · Received: {receivedPairs.toLocaleString()}
+                                  {isOverCut && (
+                                    <span className="ml-2 font-mono font-black text-rose-700">
+                                      · Extra Cutting {remainingPairs.toLocaleString()}
+                                    </span>
+                                  )}
+                                </span>
                               </span>
                             </span>
                             <span>
@@ -1533,8 +1653,12 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                               <span className="block text-[11px] text-slate-500">Issued</span>
                             </span>
                             <span>
-                              <span className="block text-sm font-bold text-blue-800">{remainingPairs.toLocaleString()} Pairs</span>
-                              <span className="block text-[11px] text-slate-500">Remaining</span>
+                              <span className={`block text-sm font-black font-mono ${isOverCut ? 'text-rose-600' : 'text-blue-800'}`}>
+                                {isOverCut ? `Extra Cutting ${remainingPairs.toLocaleString()}` : `${remainingPairs.toLocaleString()} Pairs`}
+                              </span>
+                              <span className={`block text-[11px] ${isOverCut ? 'text-rose-600 font-semibold' : 'text-slate-500'}`}>
+                                Remaining
+                              </span>
                             </span>
                             <span className="flex items-center gap-2 sm:min-w-[95px]">
                               <span className="h-2 min-w-14 flex-1 overflow-hidden rounded-full bg-slate-200">
@@ -1562,26 +1686,44 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {group.rows.map((row, rIdx) => (
-                                      <tr key={row.id} className={rIdx % 2 ? 'bg-slate-50' : 'bg-white'}>
+                                    {group.rows.map((row, rIdx) => {
+                                      const isExtra = Boolean(row.isExtraCutting) && row.type === 'RECEIVE';
+                                      return (
+                                      <tr key={row.id} className={isExtra ? 'bg-rose-50 text-rose-900 font-semibold' : (rIdx % 2 ? 'bg-slate-50' : 'bg-white')}>
                                         <td className="border border-slate-200 px-3 py-2 font-mono text-slate-500">{rIdx + 1}</td>
                                         <td className="border border-slate-200 px-3 py-2 font-mono">{formatDate(row.date)}</td>
-                                        <td className="border border-slate-200 px-3 py-2 font-bold text-slate-900">{row.cutterName}</td>
+                                        <td className={`border border-slate-200 px-3 py-2 font-bold ${isExtra ? 'text-rose-900' : 'text-slate-900'}`}>{row.cutterName}</td>
                                         <td className="border border-slate-200 px-3 py-2">{row.article}</td>
                                         <td className="border border-slate-200 px-3 py-2">{row.size}</td>
-                                        <td className="border border-slate-200 px-3 py-2 text-right font-mono font-bold text-amber-800">{row.qty.toLocaleString()}</td>
+                                        <td className={`border border-slate-200 px-3 py-2 text-right font-mono font-bold ${isExtra ? 'text-rose-700' : 'text-amber-800'}`}>
+                                          {row.qty.toLocaleString()}
+                                        </td>
                                         <td className="border border-slate-200 px-3 py-2 text-right font-mono">{row.rate > 0 ? `Rs. ${row.rate}` : '-'}</td>
                                         <td className="border border-slate-200 px-3 py-2 text-right font-mono font-bold">{row.amount > 0 ? `Rs. ${row.amount.toLocaleString()}` : '-'}</td>
                                         <td className="border border-slate-200 px-3 py-2">
-                                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${row.type === 'GIVE' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
-                                            {row.status}
+                                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                            isExtra
+                                              ? 'bg-rose-600 text-white'
+                                              : row.type === 'GIVE'
+                                                ? 'bg-amber-100 text-amber-800'
+                                                : 'bg-emerald-100 text-emerald-800'
+                                          }`}>
+                                            {isExtra ? 'Extra Cutting' : row.status}
                                           </span>
                                         </td>
                                       </tr>
-                                    ))}
+                                      );
+                                    })}
                                     <tr className="bg-amber-100/60 font-black">
                                       <td className="border border-slate-300 px-3 py-2" colSpan={5}>TOTAL CUTTING ISSUED / RECEIVED</td>
-                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono text-amber-900">{issuedPairs.toLocaleString()} / {receivedPairs.toLocaleString()}</td>
+                                      <td className="border border-slate-300 px-3 py-2 text-right font-mono text-amber-900">
+                                        <span>{issuedPairs.toLocaleString()} / {receivedPairs.toLocaleString()}</span>
+                                        {isOverCut && (
+                                          <span className="block text-[10px] font-black text-rose-700">
+                                            Extra Cutting {remainingPairs.toLocaleString()}
+                                          </span>
+                                        )}
+                                      </td>
                                       <td className="border border-slate-300 px-3 py-2" />
                                       <td className="border border-slate-300 px-3 py-2 text-right font-mono text-slate-900">
                                         Rs. {group.rows.reduce((sum, row) => sum + row.amount, 0).toLocaleString()}
