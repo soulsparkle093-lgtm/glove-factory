@@ -153,7 +153,7 @@ export const StockManagement: React.FC = () => {
 
   const [isWapsiModalOpen, setIsWapsiModalOpen] = useState(false);
   const [wapsiDate, setWapsiDate] = useState(new Date().toISOString().slice(0, 10));
-  const [wapsiSource, setWapsiSource] = useState('Customer Return / Wapsi');
+  const [wapsiSource, setWapsiSource] = useState('Customer Return');
   const [wapsiQty, setWapsiQty] = useState('');
   const [wapsiReason, setWapsiReason] = useState('Quality Defect');
   const [wapsiNotes, setWapsiNotes] = useState('');
@@ -712,10 +712,10 @@ export const StockManagement: React.FC = () => {
       setIsWapsiModalOpen(false);
       setWapsiQty('');
       setWapsiNotes('');
-      showToast(`Wapsi / Return recorded: ${qty} pairs of ${selectedArticleName}`);
+      showToast(`Stock Return recorded: ${qty} pairs of ${selectedArticleName}`);
     } catch (err) {
-      console.error('Error recording wapsi:', err);
-      showToast(err instanceof Error ? err.message : 'Could not record return/wapsi.', 'error');
+      console.error('Error recording stock return:', err);
+      showToast(err instanceof Error ? err.message : 'Could not record stock return.', 'error');
     } finally {
       setIsSavingWapsi(false);
     }
@@ -1297,7 +1297,7 @@ export const StockManagement: React.FC = () => {
             totalDelivered: increment(qty),
             deliveryHistory: arrayUnion({
               date: bulkDeliveryDate,
-              orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Bilty: ${bulkReferenceNo}` : bulkBillNo),
+              orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Receipt: ${bulkReferenceNo}` : bulkBillNo),
               customerName: customer,
               pairs: qty,
               remainingAfter: item.availableStock - qty,
@@ -1314,7 +1314,7 @@ export const StockManagement: React.FC = () => {
               totalDelivered: qty,
               deliveryHistory: [{
                 date: bulkDeliveryDate,
-                orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Bilty: ${bulkReferenceNo}` : bulkBillNo),
+                orderNo: targetOrder?.orderNo || (bulkReferenceNo ? `Receipt: ${bulkReferenceNo}` : bulkBillNo),
                 customerName: customer,
                 pairs: qty,
                 remainingAfter: item.availableStock - qty,
@@ -1335,7 +1335,7 @@ export const StockManagement: React.FC = () => {
               quantity: qty,
               article: item.articleName,
               size: item.size || 'Standard',
-              notes: bulkReferenceNo ? `Bilty/Ref: ${bulkReferenceNo}` : `${bulkBillNo} from Stock Management`,
+              notes: bulkReferenceNo ? `Receipt Ref: ${bulkReferenceNo}` : `${bulkBillNo} from Stock Management`,
               createdAt: now
             });
           }
@@ -1821,7 +1821,7 @@ export const StockManagement: React.FC = () => {
               className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-rose-600 hover:from-orange-600 hover:to-rose-700 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-md shadow-orange-500/25 transition active:scale-95 cursor-pointer"
             >
               <RotateCcw className="h-4 w-4" />
-              <span>RETURN / WAPSI ADD</span>
+              <span>ADD STOCK RETURN</span>
             </button>
           </div>
 
@@ -2264,7 +2264,7 @@ export const StockManagement: React.FC = () => {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <h3 className="text-lg font-black text-rose-800">Add Stock Return / Wapsi</h3>
+                <h3 className="text-lg font-black text-rose-800">Add Stock Return</h3>
                 <button
                   type="button"
                   onClick={() => setIsWapsiModalOpen(false)}
@@ -2288,7 +2288,7 @@ export const StockManagement: React.FC = () => {
                 </div>
                 <div>
                   <label className="text-xs font-bold text-slate-700">Return Source / Party</label>
-                  <input type="text" placeholder="e.g. Customer Return / Cutting Wapsi" value={wapsiSource} onChange={e => setWapsiSource(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs" />
+                  <input type="text" placeholder="e.g. Customer Return / Cutting Return" value={wapsiSource} onChange={e => setWapsiSource(e.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 p-2.5 text-xs" />
                 </div>
                 <div>
                   <label className="text-xs font-bold text-slate-700">Reason</label>
@@ -2313,7 +2313,7 @@ export const StockManagement: React.FC = () => {
                     <span>Cancel / Back</span>
                   </button>
                   <button type="submit" disabled={isSavingWapsi} className="rounded-xl bg-gradient-to-r from-orange-600 to-rose-600 px-5 py-2 text-xs font-bold text-white hover:from-orange-700 hover:to-rose-700 disabled:opacity-50 transition cursor-pointer">
-                    {isSavingWapsi ? 'Saving...' : 'Add Wapsi'}
+                    {isSavingWapsi ? 'Saving...' : 'Add Return'}
                   </button>
                 </div>
               </form>
@@ -2486,7 +2486,7 @@ export const StockManagement: React.FC = () => {
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <h3 className="text-base font-bold text-slate-900">Edit Return / Wapsi Entry</h3>
+                <h3 className="text-base font-bold text-slate-900">Edit Stock Return Entry</h3>
                 <button
                   type="button"
                   onClick={() => setEditingReturnItem(null)}
@@ -3499,7 +3499,7 @@ export const StockManagement: React.FC = () => {
                 {/* 4. Reference / Bilty No */}
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1">
-                    Reference / Bilty No
+                    Transport Receipt / Reference No.
                   </label>
                   <input
                     type="text"
@@ -4736,10 +4736,10 @@ export const StockManagement: React.FC = () => {
 
             <div className="mt-3 space-y-2.5 text-xs text-slate-600">
               <p className="text-slate-800 font-semibold leading-relaxed">
-                Kya aap sabhi Stock OUT Deliveries &amp; Dispatches (aur old/deleted entries) ko Firestore aur LocalStorage se permanently clear karna chahti hain?
+                Are you sure you want to permanently clear all Stock Out Deliveries &amp; Dispatches (including archived/deleted entries) from Firestore and Local Storage?
               </p>
               <div className="rounded-xl bg-rose-50 border border-rose-200 p-3 text-rose-800 text-[11px] font-medium">
-                Sabhi Stock Out shipments delete ho kar delivered pairs stock balance me wapis aa jayenge aur page automatically refresh hoga.
+                All Stock Out shipments will be deleted, delivered pairs will be restored to stock balance, and the page will refresh automatically.
               </div>
             </div>
 

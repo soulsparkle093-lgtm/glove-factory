@@ -219,7 +219,7 @@ export const SettingsPage: React.FC = () => {
                 <div>
                   <span className="text-sm font-bold text-slate-900 block">Stitching Management</span>
                   <span className="text-xs text-slate-500">
-                    Stitching orders, worker wages, and stitcher khata ledger.
+                    Stitching orders, worker wages, and stitcher ledger.
                   </span>
                 </div>
                 <button

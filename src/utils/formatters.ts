@@ -52,7 +52,7 @@ export const generateWhatsAppReminder = (
 
   if (balance > 0) {
     // Customer owes us
-    return `Assalam-o-Alaikum / Dear ${partyName},\nThis is a polite reminder from ${businessName} that your outstanding balance is ${formattedAmount}. Kindly arrange the payment at your earliest convenience.\nThank you!`;
+    return `Dear ${partyName},\nThis is a polite reminder from ${businessName} that your outstanding balance is ${formattedAmount}. Kindly arrange the payment at your earliest convenience.\nThank you!`;
   } else if (balance < 0) {
     // We owe supplier
     return `Dear ${partyName},\nGreetings from ${businessName}. As per our ledger records, our payable balance to you is ${formattedAmount}. Please verify.\nThank you!`;

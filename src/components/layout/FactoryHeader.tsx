@@ -36,7 +36,7 @@ export const FactoryHeader: React.FC<FactoryHeaderProps> = ({
       case 'cuttings':
         return { en: 'Cutting Management', sub: 'Factory Workers & Outside Contractors' };
       case 'stitching':
-        return { en: 'Stitching Management', sub: 'Stitching Orders & Stitcher Khata' };
+        return { en: 'Stitching Management', sub: 'Stitching Orders & Stitcher Ledger' };
       case 'stock':
         return { en: 'Ready Stock', sub: 'Finished Gloves Inventory (Auto Log)' };
       case 'sales':

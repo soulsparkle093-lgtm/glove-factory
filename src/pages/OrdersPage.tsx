@@ -246,9 +246,9 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
 
     const cuttingReceived = totalReceive - returnedCutting;
     const cuttingGiven = rawGiven > 0 ? rawGiven : cuttingReceived;
-    // Remaining = Total Order Qty - Total Cutting Received (never clamped to 0)
-    const cuttingRemaining = totalOriginal - cuttingReceived;
-    const extraCutting = cuttingRemaining < 0 ? Math.abs(cuttingRemaining) : flaggedExtraCutting;
+    // Counted Cutting caps at Total Order Quantity; Balance >= 0; Extra Cutting = excess pairs
+    const cuttingRemaining = Math.max(0, totalOriginal - cuttingReceived);
+    const extraCutting = cuttingReceived > totalOriginal ? (cuttingReceived - totalOriginal) : flaggedExtraCutting;
 
     // Stock Received: strictly from Stitching / non-cutting Stock IN (never copies cutting)
     const stitchHistReceive = (stitchingHistory || [])
@@ -641,10 +641,10 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
               <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
               <div>
                 <span className="font-bold">
-                  Order #{orderToDelete.orderNo} ({orderToDelete.customerName}): Is order ko delete karne se is ka Cutting, Stitching, Stock aur Stock Out sab delete ho jayega. Kya aap confirm karti hain?
+                  Order #{orderToDelete.orderNo} ({orderToDelete.customerName}): Deleting this order will permanently delete all linked Cutting, Stitching, Stock, and Stock Out records. Are you sure you want to continue?
                 </span>
                 <p className="text-[11px] text-rose-700 mt-0.5">
-                  {(orderToDelete.totalPairs || orderToDelete.totalQty || 0).toLocaleString()} pairs aur is se mutaliqa tamaam records permanently delete ho jayenge.
+                  {(orderToDelete.totalPairs || orderToDelete.totalQty || 0).toLocaleString()} pairs and all related records will be permanently deleted.
                 </p>
               </div>
             </div>
@@ -687,11 +687,16 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
             <div className="divide-y divide-slate-200">
               {filteredCompanyOrders.map(ord => {
                 const isExpanded = expandedOrderId === ord.id;
-                const badge = getOrderStatusBadge(ord.status);
+                const live = getOrderLiveMetrics(ord);
+                const isOrdFulfilled =
+                  ord.status === 'Completed' ||
+                  (live.totalOriginal > 0 && live.cuttingReceived >= live.totalOriginal && live.cuttingRemaining === 0);
+                const badge = isOrdFulfilled
+                  ? { label: 'Completed', bg: 'bg-emerald-100 text-emerald-800 border-emerald-300' }
+                  : getOrderStatusBadge(ord.status);
                 const sizeRows = extractOrderSizeRows(ord);
                 const uniqueArticles = Array.from(new Set(sizeRows.map(r => r.article)));
                 const articleCount = uniqueArticles.length || ord.items?.length || 0;
-                const live = getOrderLiveMetrics(ord);
 
                 // Chronological cutting entries for this order (Section C - Cutting History)
                 const sortedCuttingEntries = [...live.entries].sort(
@@ -816,10 +821,10 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                         <span className="font-mono tabular-nums font-black text-sm text-slate-900">
                           {live.totalOriginal.toLocaleString()} Pairs
                         </span>
-                        {(live.cuttingRemaining < 0 || live.extraCutting > 0) && (
+                        {live.extraCutting > 0 && (
                           <span className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-100 px-2 py-0.5 font-mono tabular-nums text-[11px] font-black text-rose-700">
                             <span className="rounded bg-rose-600 px-1 py-0.5 text-[9px] font-black uppercase text-white">Extra</span>
-                            Extra Cutting -{(live.cuttingRemaining < 0 ? Math.abs(live.cuttingRemaining) : live.extraCutting).toLocaleString()}
+                            Extra Cutting: {live.extraCutting.toLocaleString()} Pairs
                           </span>
                         )}
                         <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${badge.bg}`}>
@@ -881,10 +886,10 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                             <h3 className="text-sm sm:text-base font-black text-slate-900">
                               {ord.customerName} &mdash; {ord.orderNo} &mdash; {formatDate(ord.orderDate)} &mdash;{' '}
                               <span className="font-mono text-blue-700">{live.totalOriginal.toLocaleString()} Pairs</span>
-                              {(live.cuttingRemaining < 0 || live.extraCutting > 0) && (
+                              {live.extraCutting > 0 && (
                                 <span className="ml-2 inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-100 px-2 py-0.5 font-mono text-xs font-black text-rose-700">
                                   <span className="rounded bg-rose-600 px-1 py-0.5 text-[9px] font-black uppercase text-white">Extra</span>
-                                  Extra Cutting -{(live.cuttingRemaining < 0 ? Math.abs(live.cuttingRemaining) : live.extraCutting).toLocaleString()}
+                                  Extra Cutting: {live.extraCutting.toLocaleString()} Pairs
                                 </span>
                               )}
                             </h3>
@@ -1059,7 +1064,7 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                                           <td className={`px-3 py-2 font-mono ${isExtra ? 'text-rose-800' : 'text-slate-600'}`}>{entry.sizeName || entry.size || 'Standard'}</td>
                                           <td className={`px-3 py-2 text-right font-mono tabular-nums font-bold ${isExtra ? 'text-rose-700' : 'text-slate-900'}`}>
                                             {isExtra
-                                              ? `-${pairsVal.toLocaleString()} pcs`
+                                              ? `${pairsVal.toLocaleString()} Pairs (Extra)`
                                               : entry.type === 'RETURN'
                                                 ? `-${pairsVal.toLocaleString()}`
                                                 : pairsVal.toLocaleString()}
@@ -1084,18 +1089,18 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                                   <tr>
                                     <th className="px-3 py-2">Article</th>
                                     <th className="px-3 py-2">Size</th>
-                                    <th className="px-3 py-2 text-right">Ordered</th>
+                                    <th className="px-3 py-2 text-right">Total Order Quantity</th>
                                     <th className="px-3 py-2 text-right">Cutting Given</th>
                                     <th className="px-3 py-2 text-right">Cutting Received</th>
                                     <th className="px-3 py-2 text-right">Dispatched</th>
-                                    <th className="px-3 py-2 text-right">Remaining</th>
+                                    <th className="px-3 py-2 text-right">Balance</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                   {totalHistoryRows.map((row, idx) => {
-                                    // Remaining = Total Order Qty - Total Cutting Received (negative when Cutting > Order)
-                                    const rowCuttingRemaining = row.ordered - row.received;
-                                    const isExtraRow = rowCuttingRemaining < 0 || row.extraCutting > 0;
+                                    const rowCuttingBalance = Math.max(0, row.ordered - row.received);
+                                    const rowExtraCutting = Math.max(0, row.received - row.ordered) || row.extraCutting;
+                                    const isExtraRow = rowExtraCutting > 0;
                                     return (
                                     <tr key={idx} className={isExtraRow ? 'bg-rose-50/70 hover:bg-rose-50' : 'hover:bg-slate-50'}>
                                       <td className="px-3 py-2 font-bold text-slate-900">{row.article}</td>
@@ -1112,10 +1117,13 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                                       <td className="px-3 py-2 text-right font-mono tabular-nums text-blue-700 font-semibold">
                                         {row.dispatched.toLocaleString()}
                                       </td>
-                                      <td className={`px-3 py-2 text-right font-mono tabular-nums font-bold ${rowCuttingRemaining < 0 ? 'text-rose-700' : 'text-slate-900'}`}>
-                                        {rowCuttingRemaining < 0
-                                          ? `Extra Cutting -${Math.abs(rowCuttingRemaining).toLocaleString()}`
-                                          : rowCuttingRemaining.toLocaleString()}
+                                      <td className={`px-3 py-2 text-right font-mono tabular-nums font-bold ${isExtraRow ? 'text-rose-700' : 'text-slate-900'}`}>
+                                        <span>{rowCuttingBalance.toLocaleString()} Pairs</span>
+                                        {isExtraRow && (
+                                          <span className="block text-[10px] font-black text-rose-700">
+                                            Extra Cutting: {rowExtraCutting.toLocaleString()} Pairs
+                                          </span>
+                                        )}
                                       </td>
                                     </tr>
                                     );
@@ -1138,10 +1146,13 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                                     <td className="px-3 py-2.5 text-right font-mono tabular-nums text-blue-800">
                                       {live.dispatched.toLocaleString()}
                                     </td>
-                                    <td className={`px-3 py-2.5 text-right font-mono tabular-nums ${live.cuttingRemaining < 0 ? 'text-rose-700' : ''}`}>
-                                      {live.cuttingRemaining < 0
-                                        ? `Extra Cutting -${Math.abs(live.cuttingRemaining).toLocaleString()}`
-                                        : live.cuttingRemaining.toLocaleString()}
+                                    <td className={`px-3 py-2.5 text-right font-mono tabular-nums ${live.extraCutting > 0 ? 'text-rose-700' : ''}`}>
+                                      <span>{live.cuttingRemaining.toLocaleString()} Pairs</span>
+                                      {live.extraCutting > 0 && (
+                                        <span className="block text-[10px] font-black text-rose-700">
+                                          Extra Cutting: {live.extraCutting.toLocaleString()} Pairs
+                                        </span>
+                                      )}
                                     </td>
                                   </tr>
                                 </tfoot>

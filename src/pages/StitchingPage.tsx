@@ -621,8 +621,8 @@ export const StitchingPage: React.FC = () => {
       Customer: row.customerName || '-'
     })));
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, sheet, 'Stitcher Khata');
-    XLSX.writeFile(workbook, `${selectedStitcher.name.replace(/[^a-z0-9]+/gi, '-')}-stitcher-khata.xlsx`);
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Stitcher Ledger');
+    XLSX.writeFile(workbook, `${selectedStitcher.name.replace(/[^a-z0-9]+/gi, '-')}-stitcher-ledger.xlsx`);
   };
 
   const updateStatus = async (orderId: string, status: StitchingOrderStatus) => {
@@ -704,7 +704,7 @@ export const StitchingPage: React.FC = () => {
   };
 
   const nav: { id: StitchingView; title: string; subtitle: string; icon: React.FC<{ className?: string }>; count: string; color: string }[] = [
-    { id: 'khata', title: 'Stitcher Roster', subtitle: 'Stitcher list & individual khata', icon: UserRound, count: `${stitchers.length} Stitchers`, color: 'blue' },
+    { id: 'khata', title: 'Stitcher Roster', subtitle: 'Stitcher list & individual ledger', icon: UserRound, count: `${stitchers.length} Stitchers`, color: 'blue' },
     { id: 'orders', title: 'All Stitching Orders', subtitle: 'Assignments & production status', icon: FileText, count: `${stitchingOrders.length} Orders`, color: 'amber' },
     { id: 'ready', title: 'Ready for Stitching', subtitle: 'Orders with completed cutting', icon: Scissors, count: `${readyOrders.length} Ready`, color: 'emerald' },
     { id: 'dashboard', title: 'Stitching Dashboard', subtitle: 'Overview & production metrics', icon: Shirt, count: `${metrics.activeStitchers} Active`, color: 'indigo' }
@@ -883,7 +883,7 @@ export const StitchingPage: React.FC = () => {
                 <div className="p-12 text-center text-slate-400"><BookOpen className="mx-auto mb-2 h-8 w-8 opacity-40" /><p className="text-xs">No entries in {selectedStitcher.name}'s notebook yet.</p><p className="mt-1 text-xs text-slate-500">Select "Issue Stitching" or "Record Payment" above to add the first record.</p></div>
               ) : (
                 <table className="min-w-[1250px] w-full text-left text-xs">
-                  <thead><tr className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-600"><th className="px-4 py-3">Date (Wasooli Date)</th><th className="px-4 py-3">Customer Name</th><th className="px-4 py-3">Article</th><th className="px-4 py-3">Size</th><th className="px-4 py-3 text-right">Pairs</th><th className="px-4 py-3">Average</th><th className="px-4 py-3 text-right">Rate (Rs.)</th><th className="px-4 py-3 text-right">Total Balance</th><th className="px-4 py-3 text-center">Action</th></tr></thead>
+                  <thead><tr className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-600"><th className="px-4 py-3">Receive Date</th><th className="px-4 py-3">Customer Name</th><th className="px-4 py-3">Article</th><th className="px-4 py-3">Size</th><th className="px-4 py-3 text-right">Pairs</th><th className="px-4 py-3">Average</th><th className="px-4 py-3 text-right">Rate (Rs.)</th><th className="px-4 py-3 text-right">Total Balance</th><th className="px-4 py-3 text-center">Action</th></tr></thead>
                   <tbody className="divide-y divide-slate-100 font-medium">
                     {filteredLedgerRows.map(row => (
                       <tr key={row.id} className="transition hover:bg-slate-50/70">
@@ -999,7 +999,7 @@ export const StitchingPage: React.FC = () => {
             <div className="flex items-start justify-between">
               <div>
                 <h2 className="text-lg font-black text-slate-900">{selectedStitcherForActions && form.stitcherId === selectedStitcherForActions.id ? 'Issue Stitching' : 'Add New Stitching Order'}</h2>
-                <p className="text-xs text-slate-500">Assign work from a customer order and record the stitcher's khata.</p>
+                <p className="text-xs text-slate-500">Assign work from a customer order and record the stitcher ledger.</p>
               </div>
               <button 
                 type="button" 
@@ -1194,7 +1194,7 @@ export const StitchingPage: React.FC = () => {
             className="my-auto max-h-[92vh] w-full max-w-md rounded-xl bg-white p-6 shadow-xl overflow-y-auto"
           >
             <h3 className="text-lg font-bold text-slate-900">Delete Ledger Entry?</h3>
-            <p className="mt-2 text-sm text-slate-600">This action cannot be undone. Removing a stitching issue also removes its linked order and khata entries. A received entry cannot be deleted until the issue is reconciled.</p>
+            <p className="mt-2 text-sm text-slate-600">This action cannot be undone. Removing a stitching issue also removes its linked order and ledger entries. A received entry cannot be deleted until the issue is reconciled.</p>
             <div className="mt-5 flex justify-end gap-2">
               <button 
                 type="button" 
@@ -1224,7 +1224,7 @@ export const StitchingPage: React.FC = () => {
             <div className="flex flex-col gap-3">
               <button type="button" onClick={() => startIssueStitching(selectedStitcherForActions)} className="w-full rounded-lg bg-blue-600 p-3 text-left font-bold text-white hover:bg-blue-700 cursor-pointer">1. Issue Stitching</button>
               <button type="button" onClick={() => openReceivingForm(selectedStitcherForActions)} disabled={stitcherOrdersForReceiving.length === 0} className="w-full rounded-lg bg-green-600 p-3 text-left font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer">2. Receive Stitching</button>
-              <button type="button" onClick={() => openStitcherKhata(selectedStitcherForActions)} className="w-full rounded-lg bg-gray-800 p-3 text-left font-bold text-white hover:bg-gray-900 cursor-pointer">3. Khata / Ledger</button>
+              <button type="button" onClick={() => openStitcherKhata(selectedStitcherForActions)} className="w-full rounded-lg bg-gray-800 p-3 text-left font-bold text-white hover:bg-gray-900 cursor-pointer">3. Stitcher Ledger</button>
             </div>
             <button 
               type="button" 
@@ -1297,7 +1297,7 @@ export const StitchingPage: React.FC = () => {
             className="my-auto max-h-[92vh] w-full max-w-md rounded-xl bg-white p-6 shadow-xl overflow-y-auto"
           >
             <h3 className="text-lg font-bold text-slate-900">Delete Stitcher?</h3>
-            <p className="mt-2 text-sm text-slate-600">Are you sure you want to delete {deleteStitcherTarget.name}? Existing stitching orders and khata history will be retained.</p>
+            <p className="mt-2 text-sm text-slate-600">Are you sure you want to delete {deleteStitcherTarget.name}? Existing stitching orders and ledger history will be retained.</p>
             <div className="mt-5 flex justify-end gap-2">
               <button 
                 type="button" 

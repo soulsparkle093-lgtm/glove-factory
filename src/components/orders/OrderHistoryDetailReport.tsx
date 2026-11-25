@@ -252,18 +252,60 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
     delivered: summary.delivered + group.delivered
   }), { cutting: 0, totalOrder: 0, delivered: 0 });
 
-  // Remaining = Total Order Qty - Total Cutting Received (Negative when Cutting > Order)
-  const grandCuttingRem = totals.totalOrder - totals.cutting;
+  const grandCuttingBalance = Math.max(0, totals.totalOrder - totals.cutting);
+  const grandExtraCutting = Math.max(0, totals.cutting - totals.totalOrder);
+  const grandDeliveryBalance = Math.max(0, totals.totalOrder - totals.delivered);
+  const isOrderCompleted =
+    order?.status === 'Completed' ||
+    (totals.totalOrder > 0 && totals.cutting >= totals.totalOrder && grandCuttingBalance === 0);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
       <header className="border-b border-slate-200 px-4 py-4 sm:px-5">
-        <h2 className="font-black text-slate-900">
-          Customer Order : {order?.orderNo || orderId} <span className="font-medium text-slate-500">+ Article : {articleName || 'Unspecified Article'}</span>
-        </h2>
-        <p className="mt-1 text-xs text-slate-500">
-          Read-only summary grouped by article. Formula: Remaining = Total Order Qty - Total Cutting Received.
-        </p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-black text-slate-900">
+                Customer Order: {order?.orderNo || orderId}{' '}
+                <span className="font-medium text-slate-500">
+                  {articleName ? `· Article: ${articleName}` : ''}
+                </span>
+              </h2>
+              <span
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${
+                  isOrderCompleted
+                    ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
+                    : 'border-amber-300 bg-amber-100 text-amber-800'
+                }`}
+              >
+                {isOrderCompleted ? 'Completed' : 'In Progress'}
+              </span>
+              {grandExtraCutting > 0 && (
+                <span className="rounded-md border border-rose-300 bg-rose-100 px-2.5 py-0.5 font-mono text-[11px] font-black text-rose-700">
+                  Extra Cutting: {grandExtraCutting.toLocaleString()} Pairs
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-slate-500">
+              Article-wise &amp; size-wise cutting and delivery summary. Counted Cutting caps at Total Order Quantity; over-cut pairs are shown as Extra Cutting.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-right">
+              <span className="block text-[10px] font-bold uppercase text-blue-700">Total Original Pairs</span>
+              <span className="font-mono font-black text-blue-900">{totals.totalOrder.toLocaleString()} Pairs</span>
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-right">
+              <span className="block text-[10px] font-bold uppercase text-amber-700">Total Cutting Received</span>
+              <span className="font-mono font-black text-amber-900">{totals.cutting.toLocaleString()} Pairs</span>
+            </div>
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-right">
+              <span className="block text-[10px] font-bold uppercase text-emerald-700">Dispatched to Customer</span>
+              <span className="font-mono font-black text-emerald-900">{totals.delivered.toLocaleString()} Pairs</span>
+            </div>
+          </div>
+        </div>
       </header>
 
       <div className="overflow-x-auto">
@@ -271,22 +313,22 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
           <thead>
             <tr className="bg-slate-100 text-center text-xs font-black uppercase tracking-wide text-slate-700">
               <th colSpan={2} className="border border-slate-300 px-3 py-2">Cutting Detail</th>
-              <th className="border border-slate-300 px-3 py-2">ART (Size)</th>
+              <th className="border border-slate-300 px-3 py-2">Article &amp; Size</th>
               <th colSpan={3} className="border border-slate-300 px-3 py-2">Delivery Report</th>
             </tr>
             <tr className="bg-slate-50 text-xs font-bold text-slate-700">
-              <th className="border border-slate-300 px-3 py-2 text-right">T Cutting</th>
-              <th className="border border-slate-300 px-3 py-2 text-right">T.REM</th>
+              <th className="border border-slate-300 px-3 py-2 text-right">Cutting Received</th>
+              <th className="border border-slate-300 px-3 py-2 text-right">Balance</th>
               <th className="border border-slate-300 px-3 py-2">Size</th>
               <th className="border border-slate-300 px-3 py-2 text-right">Total Order</th>
               <th className="border border-slate-300 px-3 py-2 text-right">Delivered</th>
-              <th className="border border-slate-300 px-3 py-2 text-right">Remaining</th>
+              <th className="border border-slate-300 px-3 py-2 text-right">Balance</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {groupedArticles.map((group) => {
-              // Exact Formula: Remaining = Order Qty - Cutting Received (Negative if Cutting > Order)
-              const groupCuttingRem = group.totalOrder - group.cutting;
+              const groupCuttingBalance = Math.max(0, group.totalOrder - group.cutting);
+              const groupExtraCutting = Math.max(0, group.cutting - group.totalOrder);
               const groupOrderRem = Math.max(0, group.totalOrder - group.delivered);
               return (
                 <React.Fragment key={group.article}>
@@ -295,11 +337,11 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
                     <td className="border border-blue-200 px-3 py-2.5 text-right font-mono text-xs text-blue-900">
                       {group.cutting.toLocaleString()}
                     </td>
-                    <td className={`border border-blue-200 px-3 py-2.5 text-right font-mono text-xs ${groupCuttingRem < 0 ? 'text-rose-700 font-black' : 'text-blue-900'}`}>
-                      <span>{groupCuttingRem.toLocaleString()}</span>
-                      {groupCuttingRem < 0 && (
+                    <td className={`border border-blue-200 px-3 py-2.5 text-right font-mono text-xs ${groupExtraCutting > 0 ? 'text-rose-700 font-black' : 'text-blue-900'}`}>
+                      <span>{groupCuttingBalance.toLocaleString()}</span>
+                      {groupExtraCutting > 0 && (
                         <span className="mt-0.5 block text-[10px] font-black text-rose-700">
-                          Extra Cutting {groupCuttingRem.toLocaleString()}
+                          Extra Cutting: {groupExtraCutting.toLocaleString()} Pairs
                         </span>
                       )}
                     </td>
@@ -312,11 +354,11 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
                           Total: {group.totalOrder.toLocaleString()} Pairs
                         </span>
                         <span className="rounded-md bg-emerald-100 border border-emerald-300 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-800">
-                          Balance: {groupOrderRem.toLocaleString()} Pairs
+                          Balance: {groupCuttingBalance.toLocaleString()} Pairs
                         </span>
-                        {groupCuttingRem < 0 && (
+                        {groupExtraCutting > 0 && (
                           <span className="inline-flex items-center gap-1 rounded-md bg-rose-100 border border-rose-300 px-2 py-0.5 font-mono text-[11px] font-black text-rose-700">
-                            Extra Cutting {groupCuttingRem.toLocaleString()}
+                            Extra Cutting: {groupExtraCutting.toLocaleString()} Pairs
                           </span>
                         )}
                       </div>
@@ -334,25 +376,30 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
 
                   {/* Sub-rows for each size */}
                   {group.sizeRows.map((row) => {
-                    // Exact Formula: Remaining = Order Qty - Cutting Received
-                    const cuttingRemaining = row.totalOrder - row.cutting;
+                    const cuttingBalance = Math.max(0, row.totalOrder - row.cutting);
+                    const extraCutting = Math.max(0, row.cutting - row.totalOrder);
                     const orderRemaining = Math.max(0, row.totalOrder - row.delivered);
-                    const isOverCut = cuttingRemaining < 0;
+                    const isOverCut = extraCutting > 0;
                     return (
                       <tr key={row.key} className={isOverCut ? 'bg-rose-50/70 text-rose-900 hover:bg-rose-50 transition' : 'text-slate-700 hover:bg-slate-50 transition'}>
                         <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums text-xs">
                           {row.cutting.toLocaleString()}
                         </td>
                         <td className={`border border-slate-200 px-3 py-2 text-right font-bold font-mono tabular-nums text-xs ${isOverCut ? 'text-rose-700 font-black' : ''}`}>
-                          <span>{cuttingRemaining.toLocaleString()}</span>
+                          <span>{cuttingBalance.toLocaleString()}</span>
                           {isOverCut && (
                             <span className="mt-0.5 block text-[10px] font-black text-rose-700">
-                              Extra Cutting {cuttingRemaining.toLocaleString()}
+                              Extra Cutting: {extraCutting.toLocaleString()} Pairs
                             </span>
                           )}
                         </td>
                         <td className="border border-slate-200 px-3 py-2 font-mono font-bold text-xs pl-6 text-slate-800">
-                          Size: {row.size}
+                          <span>Size: {row.size}</span>
+                          {isOverCut && (
+                            <span className="ml-2 inline-block rounded border border-rose-300 bg-rose-100 px-1.5 py-0.5 text-[10px] font-black text-rose-700">
+                              Total: {row.totalOrder.toLocaleString()} Pairs · Balance: 0 Pairs · Extra Cutting: {extraCutting.toLocaleString()} Pairs
+                            </span>
+                          )}
                         </td>
                         <td className="border border-slate-200 px-3 py-2 text-right font-mono tabular-nums text-xs">
                           {row.totalOrder.toLocaleString()}
@@ -379,18 +426,18 @@ export const OrderHistoryDetailReport: React.FC<OrderHistoryDetailReportProps> =
                 <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">
                   {totals.cutting.toLocaleString()}
                 </td>
-                <td className={`border border-slate-300 px-3 py-2.5 text-right font-mono ${grandCuttingRem < 0 ? 'text-rose-700 font-black' : ''}`}>
-                  <span>{grandCuttingRem.toLocaleString()}</span>
-                  {grandCuttingRem < 0 && (
+                <td className={`border border-slate-300 px-3 py-2.5 text-right font-mono ${grandExtraCutting > 0 ? 'text-rose-700 font-black' : ''}`}>
+                  <span>{grandCuttingBalance.toLocaleString()}</span>
+                  {grandExtraCutting > 0 && (
                     <span className="mt-0.5 block text-[10px] font-black text-rose-700">
-                      Extra Cutting {grandCuttingRem.toLocaleString()}
+                      Extra Cutting: {grandExtraCutting.toLocaleString()} Pairs
                     </span>
                   )}
                 </td>
                 <td className="border border-slate-300 px-3 py-2.5 font-bold uppercase tracking-wide">Grand Total</td>
                 <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{totals.totalOrder.toLocaleString()}</td>
                 <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{totals.delivered.toLocaleString()}</td>
-                <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{Math.max(0, totals.totalOrder - totals.delivered).toLocaleString()}</td>
+                <td className="border border-slate-300 px-3 py-2.5 text-right font-mono">{grandDeliveryBalance.toLocaleString()}</td>
               </tr>
             </tfoot>
           )}

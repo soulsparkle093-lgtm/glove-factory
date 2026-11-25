@@ -144,7 +144,7 @@ export const ReportsPage: React.FC = () => {
                 <span>{formatCurrency(grossProfit, settings.currency)}</span>
               </div>
               <div className="py-2.5 flex items-center justify-between text-slate-600 pl-4">
-                <span>Less: Operating Factory Overheads (Rent, Power, Chai, Blades, Transport)</span>
+                <span>Less: Operating Factory Overheads (Rent, Power, Tea &amp; Refreshments, Blades, Transport)</span>
                 <span className="text-rose-600">-{formatCurrency(totalOperatingExpenses, settings.currency)}</span>
               </div>
               <div className="py-3 flex items-center justify-between font-black text-lg text-blue-900 bg-blue-50/70 px-3 rounded-xl border border-blue-200">

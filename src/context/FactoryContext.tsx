@@ -2421,7 +2421,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const resolvedCustomerName = data.customerName?.trim() || (data.type === 'RECEIVE' && !data.orderId ? 'Stock - No Order' : '');
     const resolvedCustomerOrder = data.customerOrder?.trim() || (data.orderId ? data.orderNo || '' : (data.type === 'RECEIVE' ? 'Stock - No Order' : 'Direct Cutting'));
     const isExtraCutting = Boolean(data.isExtraCutting && data.type === 'RECEIVE');
-    const extraCuttingQty = isExtraCutting ? -Math.abs(data.qty) : 0;
+    const extraCuttingQty = isExtraCutting ? Math.abs(data.qty) : 0;
 
     const txDoc: CuttingTransaction = stripUndefined({
       id: txId,
@@ -2621,7 +2621,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             size: sizeName,
             isExtraCutting,
             extraCuttingQty,
-            notes: data.notes || (isExtraCutting ? 'Extra Cutting (-' + data.qty + ' pcs)' : (data.type === 'GIVE' ? 'Cutting Assigned' : 'Cutting Received')),
+            notes: data.notes || (isExtraCutting ? `Extra Cutting (${data.qty} Pairs)` : (data.type === 'GIVE' ? 'Cutting Assigned' : 'Cutting Received')),
             createdAt: now
           }));
 
@@ -2638,7 +2638,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             article: articleName,
             isExtraCutting,
             extraCuttingQty,
-            notes: data.notes || (isExtraCutting ? `Extra Cutting (-${data.qty} pcs)` : ''),
+            notes: data.notes || (isExtraCutting ? `Extra Cutting (${data.qty} Pairs)` : ''),
             createdAt: now
           }));
 

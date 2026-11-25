@@ -231,7 +231,7 @@ export const CashbookPage: React.FC = () => {
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Received counter payment, Office chai bill"
+                  placeholder="e.g. Received counter payment, Office tea bill"
                   value={description}
                   onChange={e => setDescription(e.target.value)}
                   className="w-full px-3 py-2 text-sm rounded-xl border border-slate-300"

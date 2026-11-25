@@ -52,7 +52,7 @@ export const FactorySidebar: React.FC<FactorySidebarProps> = ({ isOpen, onClose 
     { id: 'dashboard', labelEn: 'Dashboard', description: 'Overview & Analytics', icon: LayoutDashboard },
     { id: 'orders', labelEn: 'Customer Orders', description: 'Companies, Orders & Production', icon: FileText, badge: activeOrdersCount > 0 ? activeOrdersCount : undefined, badgeColor: 'bg-blue-600' },
     { id: 'cuttings', labelEn: 'Cutting Management', description: 'Worker & Contractor Cutting', icon: Scissors, badge: pendingCuttingsCount > 0 ? pendingCuttingsCount : undefined, badgeColor: 'bg-amber-500' },
-    { id: 'stitching', labelEn: 'Stitching Management', description: 'Stitching Orders & Stitcher Khata', icon: Shirt, badge: undefined },
+    { id: 'stitching', labelEn: 'Stitching Management', description: 'Stitching Orders & Stitcher Ledger', icon: Shirt, badge: undefined },
     { id: 'stock', labelEn: 'Finished Goods Stock', description: 'Auto Stock Calculation', icon: Boxes, badge: lowStockCount > 0 ? lowStockCount : undefined, badgeColor: 'bg-rose-500' },
     { id: 'stock_management', labelEn: 'Stock Management', description: 'Cutting Stock & Deliveries', icon: PackageCheck },
     { id: 'sales', labelEn: 'Sale Invoices', description: 'Customer Bills & Dispatch', icon: Receipt },

@@ -213,8 +213,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const [deliveryToExistingOrder, setDeliveryToExistingOrder] = useState(true);
   const [deliveryToNewOrder, setDeliveryToNewOrder] = useState(false);
   const [newOrderCustomerName, setNewOrderCustomerName] = useState('');
-  const [completedOrderAlert, setCompletedOrderAlert] = useState<CustomerOrder | null>(null);
+  const [completedOrderAlert, setCompletedOrderAlert] = useState<{ order: CustomerOrder; triggeredOnSubmit?: boolean } | null>(null);
   const [allowExtraCuttingForCompleted, setAllowExtraCuttingForCompleted] = useState(false);
+  const [wrongArticleConfirm, setWrongArticleConfirm] = useState<{
+    article: string;
+    orderNo: string;
+    requiredArticles: string[];
+    forceExtraCutting?: boolean;
+  } | null>(null);
   const [liveOrderStatusOverride, setLiveOrderStatusOverride] = useState<{ orderId: string; status: string } | null>(null);
   const [isCheckingOrderStatus, setIsCheckingOrderStatus] = useState(false);
 
@@ -326,7 +332,9 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   useEffect(() => {
     const handleGlobalEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (paymentToDelete) setPaymentToDelete(null);
+        if (wrongArticleConfirm) setWrongArticleConfirm(null);
+        else if (completedOrderAlert) setCompletedOrderAlert(null);
+        else if (paymentToDelete) setPaymentToDelete(null);
         else if (paymentModalType) setPaymentModalType(null);
         else if (editingPayment) setEditingPayment(null);
         else if (isReturnCuttingModalOpen) setIsReturnCuttingModalOpen(false);
@@ -346,6 +354,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     window.addEventListener('keydown', handleGlobalEscape);
     return () => window.removeEventListener('keydown', handleGlobalEscape);
   }, [
+    wrongArticleConfirm,
+    completedOrderAlert,
     paymentToDelete,
     paymentModalType,
     editingPayment,
@@ -353,6 +363,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     returnTarget,
     editingEntry,
     deletingEntry,
+    isDeletingEntry,
     cutterDeleteTarget,
     cutterStatusTarget,
     isAddCutterOpen,
@@ -714,13 +725,89 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     return normalized === 'completed' || normalized === 'complete' || normalized === 'closed';
   };
 
+  const getOrderRequiredArticles = (ord?: CustomerOrder): string[] => {
+    if (!ord) return [];
+    const seen = new Map<string, string>();
+    const addArt = (val?: string) => {
+      const cleaned = (val || '').trim();
+      if (!cleaned) return;
+      if (cleaned.includes('Size Matrix') || cleaned.includes('/ Matrix')) return;
+      const key = cleaned.toLowerCase();
+      if (!seen.has(key)) seen.set(key, cleaned);
+    };
+    (ord.items || []).forEach(item => {
+      const origQty = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
+      const title = (item.title || item.gloveType || item.article || '').trim();
+      if ((title.includes('Size Matrix') || title.includes('/ Matrix')) && origQty <= 0) return;
+      addArt(item.title);
+      addArt(item.gloveType);
+      addArt(item.article);
+    });
+    (ord.cuttingArticleSizes || []).forEach(cs => addArt(cs.article));
+    addArt(ord.article);
+    return [...seen.values()];
+  };
+
+  const getOrderCuttingSummary = (ord?: CustomerOrder) => {
+    if (!ord) return { totalOrderQty: 0, totalReceived: 0, balance: 0 };
+    let itemsOrderQty = 0;
+    (ord.items || []).forEach(item => {
+      const title = (item.title || item.gloveType || '').trim();
+      const origQty = Number(item.originalQty) || Number(item.totalPairs) || Number(item.qty) || 0;
+      if ((title.includes('Size Matrix') || title.includes('/ Matrix')) && origQty <= 0) return;
+      if (item.customSizes && item.customSizes.length > 0) {
+        itemsOrderQty += item.customSizes.reduce((s, cs) => s + (Number(cs.quantity) || 0), 0);
+      } else {
+        itemsOrderQty += origQty;
+      }
+    });
+    const totalOrderQty =
+      itemsOrderQty ||
+      Number(ord.originalTotalPairs) ||
+      Number(ord.totalPairs) ||
+      Number(ord.totalQty) ||
+      0;
+
+    const deletedIds = new Set(cuttingEntries.filter(e => e.isDeleted).map(e => e.id));
+    const receivedById = new Map<string, number>();
+
+    cuttingEntries.forEach(entry => {
+      if (entry.isDeleted) return;
+      const matches = entry.orderId === ord.id || Boolean(ord.orderNo && entry.orderNo === ord.orderNo);
+      if (!matches) return;
+      if (entry.type !== 'RECEIVE' && entry.type !== 'RETURN') return;
+      const qty = Math.abs(Number(entry.pairs ?? entry.totalQty ?? entry.quantity ?? 0));
+      if (qty <= 0) return;
+      receivedById.set(entry.id, entry.type === 'RETURN' ? -qty : qty);
+    });
+
+    cuttingTransactions.forEach(tx => {
+      if (tx.isDeleted || deletedIds.has(tx.id) || receivedById.has(tx.id)) return;
+      const matches = tx.orderId === ord.id || Boolean(ord.orderNo && tx.orderNo === ord.orderNo);
+      if (!matches || tx.type !== 'RECEIVE') return;
+      const qty = Math.abs(Number(tx.totalQty ?? tx.qty ?? 0));
+      if (qty <= 0) return;
+      receivedById.set(tx.id, qty);
+    });
+
+    let totalReceived = 0;
+    receivedById.forEach(v => {
+      totalReceived += v;
+    });
+
+    const balance = Math.max(0, totalOrderQty - totalReceived);
+    return { totalOrderQty, totalReceived, balance };
+  };
+
   const isOrderCompleted = (ord?: CustomerOrder): boolean => {
     if (!ord) return false;
     const effectiveStatus =
       liveOrderStatusOverride && liveOrderStatusOverride.orderId === ord.id
         ? liveOrderStatusOverride.status
         : ord.status;
-    return isOrderCompletedStatus(effectiveStatus);
+    if (isOrderCompletedStatus(effectiveStatus)) return true;
+    const { totalOrderQty, totalReceived, balance } = getOrderCuttingSummary(ord);
+    return totalOrderQty > 0 && totalReceived >= totalOrderQty && balance === 0;
   };
 
   const clearCuttingQuantityFields = () => {
@@ -738,10 +825,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     const localOrder = orders.find(item => item.id === orderId);
     if (localOrder) {
       setFormCustomerName(localOrder.customerName);
-      if (isOrderCompletedStatus(localOrder.status)) {
+      if (isOrderCompleted(localOrder)) {
         clearCuttingQuantityFields();
         setAllowExtraCuttingForCompleted(false);
-        setCompletedOrderAlert(localOrder);
+        setCompletedOrderAlert({ order: localOrder, triggeredOnSubmit: false });
       }
     } else {
       setFormCustomerName('');
@@ -758,15 +845,16 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         if (data.customerName) {
           setFormCustomerName(String(data.customerName));
         }
-        if (isOrderCompletedStatus(dbStatus)) {
+        const mergedOrder = {
+          ...(localOrder || ({} as CustomerOrder)),
+          ...data,
+          id: orderId,
+          status: dbStatus as CustomerOrder['status']
+        };
+        if (isOrderCompletedStatus(dbStatus) || isOrderCompleted(mergedOrder)) {
           clearCuttingQuantityFields();
           setAllowExtraCuttingForCompleted(false);
-          setCompletedOrderAlert({
-            ...(localOrder || ({} as CustomerOrder)),
-            ...data,
-            id: orderId,
-            status: dbStatus as CustomerOrder['status']
-          });
+          setCompletedOrderAlert({ order: mergedOrder, triggeredOnSubmit: false });
         }
       }
     } catch (err) {
@@ -819,6 +907,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     setNewOrderCustomerName('');
     setCompletedOrderAlert(null);
     setAllowExtraCuttingForCompleted(false);
+    setWrongArticleConfirm(null);
     setLiveOrderStatusOverride(null);
     setCuttingSizeRows([
       { id: '1', size: '', qty: '', average: '', rate: activeCutter?.perPairRate ? String(activeCutter.perPairRate) : '' }
@@ -876,48 +965,38 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
   const handleCloseTxModal = () => {
     setCompletedOrderAlert(null);
     setAllowExtraCuttingForCompleted(false);
+    setWrongArticleConfirm(null);
     setLiveOrderStatusOverride(null);
     setTxModalType(null);
   };
 
-  // Handle transaction submission (Dual Entry Batched Write)
-  const handleSubmitTransaction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeCutter || !txModalType) return;
-
+  const collectTransactionRows = () => {
+    if (!activeCutter || !txModalType) return null;
     if (!formDate) {
       showToast('Enter a date.', 'error');
-      return;
+      return null;
     }
-
-    // Article: support free-text and auto-save
-    const finalArticle = (formArticle.trim() || articleSearch.trim());
+    const finalArticle = formArticle.trim() || articleSearch.trim();
     if (!finalArticle) {
       showToast('Enter an article name.', 'error');
-      return;
+      return null;
     }
 
     if (txModalType === 'RECEIVE') {
       if (!deliveryToStock && !deliveryToExistingOrder && !deliveryToNewOrder) {
         showToast('Please select at least one destination: Stock / Order / New Order', 'error');
-        return;
+        return null;
       }
       if (deliveryToExistingOrder && !formOrderId) {
         showToast('Select a customer order (PO).', 'error');
-        return;
-      }
-      if (isBlockedCompletedOrder) {
-        if (selectedExistingOrder) setCompletedOrderAlert(selectedExistingOrder);
-        showToast('Ye order already complete hai. Is me mazeed cutting ki zaroorat nahi hai. Please koi aur order select karein.', 'error');
-        return;
+        return null;
       }
       if (deliveryToNewOrder && !newOrderCustomerName.trim()) {
-        showToast('Please enter customer/company name for the new order.', 'error');
-        return;
+        showToast('Please enter a customer/company name for the new order.', 'error');
+        return null;
       }
     }
 
-    // Collect size rows
     const rowsToProcess: Array<{ size: string; qty: number; average: string; rate: number }> = [];
     if (txModalType === 'RECEIVE') {
       cuttingSizeRows.forEach(r => {
@@ -948,7 +1027,48 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
     if (rowsToProcess.length === 0 || rowsToProcess.every(r => r.qty <= 0)) {
       showToast('Enter a valid pair quantity.', 'error');
+      return null;
+    }
+
+    return { finalArticle, rowsToProcess };
+  };
+
+  // Core persistence runner (invoked directly or after confirmation popups)
+  const executeSaveTransaction = async (options?: { bypassCompletedCheck?: boolean; bypassWrongArticleCheck?: boolean }) => {
+    if (!activeCutter || !txModalType) return;
+    const collected = collectTransactionRows();
+    if (!collected) return;
+
+    const { finalArticle, rowsToProcess } = collected;
+    const existingOrder = deliveryToExistingOrder ? orders.find(o => o.id === formOrderId) : undefined;
+    const isCompletedCheckBlocked =
+      txModalType === 'RECEIVE' &&
+      deliveryToExistingOrder &&
+      Boolean(isSelectedOrderCompleted && !allowExtraCuttingForCompleted && !options?.bypassCompletedCheck);
+
+    if (isCompletedCheckBlocked) {
+      if (existingOrder) {
+        setCompletedOrderAlert({ order: existingOrder, triggeredOnSubmit: true });
+      }
+      showToast('This order is already completed. No more cutting is required.', 'error');
       return;
+    }
+
+    // Wrong Article Validation (Article Not Required in Selected Customer Order)
+    if (txModalType === 'RECEIVE' && deliveryToExistingOrder && existingOrder && !options?.bypassWrongArticleCheck) {
+      const requiredArticles = getOrderRequiredArticles(existingOrder);
+      const isArticleMatch =
+        requiredArticles.length === 0 ||
+        requiredArticles.some(art => art.trim().toLowerCase() === finalArticle.trim().toLowerCase());
+      if (!isArticleMatch) {
+        setWrongArticleConfirm({
+          article: finalArticle,
+          orderNo: existingOrder.orderNo,
+          requiredArticles,
+          forceExtraCutting: Boolean(options?.bypassCompletedCheck || allowExtraCuttingForCompleted)
+        });
+        return;
+      }
     }
 
     setIsSubmittingTx(true);
@@ -974,7 +1094,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
       // Check destinations
       let effectiveOrderId: string | undefined = undefined;
-      let targetOrder = deliveryToExistingOrder ? orders.find(o => o.id === formOrderId) : undefined;
+      let targetOrder = existingOrder;
 
       if (txModalType === 'RECEIVE' && deliveryToNewOrder) {
         const totalOrderPairs = rowsToProcess.reduce((sum, r) => sum + r.qty, 0);
@@ -1002,6 +1122,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         targetOrder = orders.find(o => o.id === formOrderId);
       }
 
+      const useExtraMode = Boolean(
+        txModalType === 'RECEIVE' &&
+        deliveryToExistingOrder &&
+        targetOrder &&
+        (isOrderCompleted(targetOrder) || isSelectedOrderCompleted) &&
+        (allowExtraCuttingForCompleted || options?.bypassCompletedCheck)
+      );
+
       for (const r of rowsToProcess) {
         const totalBalance = r.qty * r.rate;
 
@@ -1019,14 +1147,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
           effectiveCustomerOrder = targetOrder ? `${targetOrder.customerName} - ${targetOrder.orderNo}` : 'Direct Cutting';
         }
 
-        const isExtraCutting = Boolean(
-          txModalType === 'RECEIVE' &&
-          deliveryToExistingOrder &&
-          targetOrder &&
-          isOrderCompleted(targetOrder) &&
-          allowExtraCuttingForCompleted
-        );
-        const extraCuttingQty = isExtraCutting ? -Math.abs(r.qty) : 0;
+        const isExtraCutting = useExtraMode;
+        const extraCuttingQty = isExtraCutting ? Math.abs(r.qty) : 0;
 
         await saveCuttingTransaction({
           cutterId: activeCutter.id,
@@ -1056,7 +1178,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
         });
       }
 
-      const savedAsExtra = isExtraCuttingMode;
+      const savedAsExtra = useExtraMode;
       setFormQty('');
       setFormArticle('');
       setFormSize('');
@@ -1070,11 +1192,12 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
       setNewOrderCustomerName('');
       setCompletedOrderAlert(null);
       setAllowExtraCuttingForCompleted(false);
+      setWrongArticleConfirm(null);
       setCuttingSizeRows([{ id: '1', size: '', qty: '', average: '', rate: '' }]);
       handleCloseTxModal();
       showToast(
         savedAsExtra
-          ? 'Extra Cutting saved! Recorded in Ledger, Stock History & shown as Extra Cutting (-) on Order.'
+          ? 'Extra Cutting saved! Recorded in Ledger, Stock History & shown as Extra Cutting on Order.'
           : (deliveryToExistingOrder || deliveryToNewOrder)
             ? 'Cutting saved once to Ledger, Stock History & Customer Order.'
             : 'Cutting saved to Ledger & Stock Management (Stock - No Order).'
@@ -1085,6 +1208,12 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
     } finally {
       setIsSubmittingTx(false);
     }
+  };
+
+  // Handle transaction submission (Dual Entry Batched Write)
+  const handleSubmitTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSaveTransaction();
   };
 
   const openEditEntry = (entry: CuttingEntry) => {
@@ -2590,7 +2719,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                               {isExtraCutting && (
                                 <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-black text-rose-700 uppercase tracking-wide">
                                   <span className="px-1.5 py-0.5 rounded bg-rose-100 border border-rose-300 text-rose-700">Extra</span>
-                                  <span>Extra Cutting: -{Math.abs(entry.pairs).toLocaleString()} pcs</span>
+                                  <span>Extra Cutting: {Math.abs(entry.pairs).toLocaleString()} Pairs</span>
                                 </span>
                               )}
                             </td>
@@ -2638,8 +2767,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                                           : 'cursor-text font-bold text-slate-900'
                                     }
                                   >
-                                    {isReturn ? '-' : isExtraCutting ? '-' : ''}{Math.abs(entry.pairs).toLocaleString()}
-                                    {isExtraCutting ? ' pcs' : ''}
+                                    {isReturn ? '-' : ''}{Math.abs(entry.pairs).toLocaleString()}
+                                    {isExtraCutting ? ' Pairs' : ''}
                                   </span>
                                   {isExtraCutting && (
                                     <span className="text-[10px] font-black text-rose-700">
@@ -2745,9 +2874,9 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                           return (
                             <div>
                               <span>{totalCutting.toLocaleString()} Pairs</span>
-                              {extraSignedPairs < 0 && (
+                              {extraSignedPairs !== 0 && (
                                 <span className="block text-[10px] font-black text-rose-700">
-                                  Extra: {extraSignedPairs.toLocaleString()} pcs
+                                  Extra: {Math.abs(extraSignedPairs).toLocaleString()} Pairs
                                 </span>
                               )}
                             </div>
@@ -2955,14 +3084,14 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                 <div className="rounded-xl border-2 border-rose-400 bg-rose-600 px-4 py-3 text-white flex items-center justify-between gap-3 shadow-sm">
                   <div className="flex items-center gap-2.5 text-xs sm:text-sm font-black">
                     <AlertTriangle className="w-5 h-5 shrink-0" />
-                    <span>Complete Order - Cutting Not Allowed</span>
+                    <span>Order Already Completed - No More Cutting Required</span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setAllowExtraCuttingForCompleted(true)}
                     className="px-3 py-1 rounded-lg bg-white text-rose-700 text-xs font-black hover:bg-rose-50 transition cursor-pointer whitespace-nowrap"
                   >
-                    Phir Bhi Add Karein
+                    Add Anyway
                   </button>
                 </div>
               )}
@@ -3200,7 +3329,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                   </div>
 
                   <p className="mt-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-[11px] font-semibold text-emerald-900">
-                    Stock History me hamesha save hoga. Agar aap Order bhi tick karengi to ye Order me bhi jayega, lekin Stock se khatam nahi hoga.
+                    Always saves to Stock History. If an order is also checked, it links to the Order while remaining in Stock.
                   </p>
                 </fieldset>
               )}
@@ -3235,7 +3364,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     <option value="">-- Select Customer Order (PO) --</option>
                     {filteredOrdersForArticle.map(ord => (
                       <option key={ord.id} value={ord.id}>
-                        {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}{isOrderCompleted(ord) ? ` (${ord.status})` : ''}
+                        {ord.customerName} - {formatDate(ord.orderDate)} - {ord.orderNo}{isOrderCompleted(ord) ? ' (Completed)' : ''}
                       </option>
                     ))}
                   </select>
@@ -3245,7 +3374,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                       <div className="flex items-start gap-2">
                         <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                         <p className="font-bold leading-relaxed">
-                          Ye order already complete hai. Is me mazeed cutting ki zaroorat nahi hai. Please koi aur order select karein.
+                          This order is already completed. No more cutting is required. Please select another order or choose Add Anyway.
                         </p>
                       </div>
                       <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -3267,7 +3396,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                           onClick={() => setAllowExtraCuttingForCompleted(true)}
                           className="px-3 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 transition cursor-pointer"
                         >
-                          Phir Bhi Add Karein
+                          Add Anyway
                         </button>
                       </div>
                     </div>
@@ -3278,8 +3407,8 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                       <div className="flex items-center gap-2 font-bold">
                         <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
                         <span>
-                          Extra Cutting Mode Enabled: Order {selectedExistingOrder.orderNo} me ye entry{' '}
-                          <span className="underline">Extra Cutting (-)</span> ke tor par add hogi.
+                          Extra Cutting Mode Enabled: This entry will be added to Order {selectedExistingOrder.orderNo} as{' '}
+                          <span className="underline">Extra Cutting</span>.
                         </span>
                       </div>
                       <button
@@ -3516,7 +3645,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               {/* Receipts always update article stock */}
               {txModalType === 'RECEIVE' && (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
-                  Stock History me hamesha save hoga. Agar aap Order bhi tick karengi to ye Order me bhi jayega, lekin Stock se khatam nahi hoga.
+                  Always saves to Stock History. If an order is also checked, it links to the Order while remaining in Stock.
                 </div>
               )}
 
@@ -3546,10 +3675,10 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
 
                 <button
                   type="submit"
-                  disabled={isSubmittingTx || isBlockedCompletedOrder}
+                  disabled={isSubmittingTx}
                   className={`px-6 py-2.5 rounded-xl text-xs sm:text-sm font-black text-white shadow-md transition flex items-center gap-2 ${
                     isBlockedCompletedOrder
-                      ? 'bg-slate-300 text-slate-500 shadow-none cursor-not-allowed'
+                      ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/25 cursor-pointer'
                       : isExtraCuttingMode
                         ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-600/25 active:scale-95 cursor-pointer'
                         : txModalType === 'GIVE'
@@ -3562,11 +3691,11 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                     {isSubmittingTx
                       ? 'Saving...'
                       : isBlockedCompletedOrder
-                        ? 'Add Cutting Disabled (Order Complete)'
+                        ? 'Order Completed (Click to Review)'
                         : isExtraCuttingMode
-                          ? 'Save as Extra Cutting (-pcs)'
+                          ? 'Save as Extra Cutting'
                           : txModalType === 'RECEIVE'
-                            ? 'Save Entry - Will Save Once To Stock + Order (If Ticked)'
+                            ? 'Save Entry - Stock + Order (If Ticked)'
                             : 'Save Entry'}
                   </span>
                 </button>
@@ -3594,47 +3723,114 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               </div>
               <div className="space-y-1">
                 <h3 className="text-base font-black text-slate-900">
-                  Order Already Complete
+                  Order Already Completed
                 </h3>
                 <p className="text-xs font-semibold text-slate-500">
-                  {completedOrderAlert.orderNo} &middot; {completedOrderAlert.customerName} &middot; Status: {completedOrderAlert.status}
+                  {completedOrderAlert.order.orderNo} &middot; {completedOrderAlert.order.customerName} &middot; Status: {isOrderCompleted(completedOrderAlert.order) ? 'Completed' : completedOrderAlert.order.status}
                 </p>
               </div>
             </div>
 
             <div className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-sm font-bold text-rose-900 leading-relaxed">
-              Ye order already complete hai. Is me mazeed cutting ki zaroorat nahi hai. Please koi aur order select karein.
+              This order is already completed. No more cutting is required.
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Agar aap phir bhi is complete order me cutting add karna chahein, to ye cutting{' '}
-              <span className="font-bold text-rose-700">Extra Cutting</span> ke tor par save hogi aur order me Minus (-) me show hogi.
+              If you still choose to add cutting to this completed order, it will be saved and marked as{' '}
+              <span className="font-bold text-rose-700">Extra Cutting</span>.
             </p>
 
             <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 pt-2 border-t border-slate-100">
               <button
                 type="button"
                 onClick={() => {
-                  setFormOrderId('');
-                  setFormCustomerName('');
                   setAllowExtraCuttingForCompleted(false);
-                  setLiveOrderStatusOverride(null);
-                  clearCuttingQuantityFields();
+                  if (!completedOrderAlert.triggeredOnSubmit) {
+                    clearCuttingQuantityFields();
+                  }
                   setCompletedOrderAlert(null);
                 }}
                 className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition cursor-pointer whitespace-nowrap"
               >
-                Select Other Order
+                OK
               </button>
               <button
                 type="button"
                 onClick={() => {
+                  const shouldSubmitAfter = Boolean(completedOrderAlert.triggeredOnSubmit);
                   setAllowExtraCuttingForCompleted(true);
                   setCompletedOrderAlert(null);
+                  if (shouldSubmitAfter) {
+                    void executeSaveTransaction({ bypassCompletedCheck: true });
+                  }
                 }}
                 className="px-4 py-2.5 rounded-xl bg-rose-600 text-xs font-black text-white hover:bg-rose-700 shadow-sm transition cursor-pointer whitespace-nowrap"
               >
-                Phir Bhi Add Karein
+                Add Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wrong Article Confirmation Popup for Cutting Receive */}
+      {wrongArticleConfirm && (
+        <div
+          className="fixed inset-0 z-[125] flex items-center justify-center bg-slate-900/70 p-4 backdrop-blur-xs"
+          onClick={e => {
+            if (e.target === e.currentTarget) setWrongArticleConfirm(null);
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-md rounded-2xl border border-amber-200 bg-white p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-black text-slate-900">
+                  Article Not Required
+                </h3>
+                <p className="text-xs font-semibold text-slate-500">
+                  Order #{wrongArticleConfirm.orderNo} &middot; Entered Article: {wrongArticleConfirm.article}
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-sm font-bold text-amber-900 leading-relaxed">
+              This article is not required in this order. Do you still want to add it?
+            </div>
+
+            {wrongArticleConfirm.requiredArticles.length > 0 && (
+              <p className="text-xs text-slate-600">
+                Required Articles in Order #{wrongArticleConfirm.orderNo}:{' '}
+                <span className="font-bold text-slate-800">{wrongArticleConfirm.requiredArticles.join(', ')}</span>
+              </p>
+            )}
+
+            <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setWrongArticleConfirm(null)}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-700 hover:bg-slate-50 transition cursor-pointer whitespace-nowrap"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const forceExtra = Boolean(wrongArticleConfirm.forceExtraCutting);
+                  setWrongArticleConfirm(null);
+                  void executeSaveTransaction({
+                    bypassCompletedCheck: forceExtra,
+                    bypassWrongArticleCheck: true
+                  });
+                }}
+                className="px-4 py-2.5 rounded-xl bg-amber-600 text-xs font-black text-white hover:bg-amber-700 shadow-sm transition cursor-pointer whitespace-nowrap"
+              >
+                Add Anyway
               </button>
             </div>
           </div>
@@ -4307,7 +4503,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
                   >
                     {Array.from(new Map(cutters.map(c => [c.id, c])).values()).map(c => (
                       <option key={c.id} value={c.id}>
-                        {c.name || c.khataName || 'Cutter'} {c.khataName ? `(${c.khataName})` : ''} - {c.cutterType === 'cutting_maker' ? 'Maker' : 'Cutter'}
+                        {c.name || getCutterLedgerName(c)} ({getCutterLedgerName(c)}) - {c.cutterType === 'cutting_maker' ? 'Maker' : 'Cutter'}
                       </option>
                     ))}
                   </select>
@@ -4616,7 +4812,7 @@ const CuttingsPageContent: React.FC<CuttingsPageProps> = () => {
               </button>
             </div>
             <p className="mt-3 text-sm font-semibold text-slate-800">
-              Is entry ko delete kar dun? Ye wapas nahi aayegi.
+              Are you sure you want to delete this entry? This action cannot be undone.
             </p>
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 space-y-1">
               <div className="flex justify-between">

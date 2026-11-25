@@ -582,8 +582,11 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
             .filter(c => c.status === 'Received')
             .reduce((sum, c) => sum + Math.abs(Number(c.qty) || 0), 0));
 
-  // Remaining = Total Order Qty - Total Cutting Received (Negative when Cutting > Order)
-  const cuttingRemainingPairs = totalOriginalPairs - cuttingReceivedPairs;
+  // Counted Cutting caps at Total Order Quantity; Balance never goes negative; Extra Cutting = over-cut amount
+  const cuttingBalancePairs = Math.max(0, totalOriginalPairs - cuttingReceivedPairs);
+  const extraCuttingPairs = Math.max(0, cuttingReceivedPairs - totalOriginalPairs);
+  const isFulfilledByCutting = totalOriginalPairs > 0 && cuttingReceivedPairs >= totalOriginalPairs && cuttingBalancePairs === 0;
+  const isOrderCompleted = order.status === 'Completed' || isFulfilledByCutting;
 
   // STOCK RECEIVED: strictly from Stitching receipts or non-cutting Stock IN entries (never copies cutting!)
   const cuttingRefIds = new Set<string>([
@@ -989,12 +992,18 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                 <span className="font-mono font-black text-lg text-blue-700">
                   #{order.orderNo}
                 </span>
-                <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${statusBadge.bg}`}>
-                  {statusBadge.label}
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                    isOrderCompleted
+                      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                      : 'bg-amber-100 text-amber-800 border-amber-300'
+                  }`}
+                >
+                  {isOrderCompleted ? 'Completed' : 'In Progress'}
                 </span>
-                {cuttingRemainingPairs < 0 && (
+                {extraCuttingPairs > 0 && (
                   <span className="px-2.5 py-0.5 rounded-md text-xs font-black font-mono tabular-nums bg-rose-100 text-rose-700 border border-rose-300">
-                    Extra Cutting {cuttingRemainingPairs.toLocaleString()}
+                    Extra Cutting: {extraCuttingPairs.toLocaleString()} Pairs
                   </span>
                 )}
               </div>
@@ -1004,15 +1013,39 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
             </div>
           </div>
 
-          {/* TOTAL ORIGINAL PAIRS IN BIG BOLD BLUE (as requested) */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6 bg-blue-50/70 border border-blue-200/80 px-4 py-2.5 rounded-xl">
-            <div className="text-left sm:text-right">
-              <span className="text-[10px] font-extrabold uppercase tracking-wider text-blue-600 block">
-                Total Original Pairs
-              </span>
-              <span className="text-2xl sm:text-3xl font-black text-blue-700 font-mono tracking-tight">
-                {totalOriginalPairs} <span className="text-sm font-bold text-blue-600">Pairs</span>
-              </span>
+          {/* TOTAL ORIGINAL PAIRS, TOTAL CUTTING RECEIVED & DISPATCHED SUMMARY */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-5 bg-blue-50/70 border border-blue-200/80 px-4 py-2.5 rounded-xl">
+            <div className="flex flex-wrap items-center gap-4 sm:gap-5">
+              <div className="text-left sm:text-right">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-blue-600 block">
+                  Total Original Pairs
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-blue-700 font-mono tracking-tight">
+                  {totalOriginalPairs.toLocaleString()} <span className="text-xs font-bold text-blue-600">Pairs</span>
+                </span>
+              </div>
+
+              <div className="h-8 w-px bg-blue-200 hidden sm:block" />
+
+              <div className="text-left sm:text-right">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700 block">
+                  Total Cutting Received
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-amber-700 font-mono tracking-tight">
+                  {cuttingReceivedPairs.toLocaleString()} <span className="text-xs font-bold text-amber-600">Pairs</span>
+                </span>
+              </div>
+
+              <div className="h-8 w-px bg-blue-200 hidden sm:block" />
+
+              <div className="text-left sm:text-right">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700 block">
+                  Dispatched to Customer
+                </span>
+                <span className="text-xl sm:text-2xl font-black text-emerald-700 font-mono tracking-tight">
+                  {dispatchedPairs.toLocaleString()} <span className="text-xs font-bold text-emerald-600">Pairs</span>
+                </span>
+              </div>
             </div>
 
             <div className="h-8 w-px bg-blue-200 hidden sm:block" />
@@ -1039,14 +1072,14 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
 
         {/* Real-time Order Progress Bar: Dispatched / Original */}
         <div className="mt-3.5 pt-3 border-t border-slate-100">
-          <div className="flex items-center justify-between text-xs font-bold mb-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold mb-1.5">
             <span className="text-slate-700 flex items-center gap-1.5">
               <PackageCheck className="w-4 h-4 text-emerald-600" />
               <span>Dispatched to Customer:</span>
-              <span className="text-emerald-700 font-mono font-black">{dispatchedPairs} / {totalOriginalPairs} Pairs</span>
+              <span className="text-emerald-700 font-mono font-black">{dispatchedPairs.toLocaleString()} / {totalOriginalPairs.toLocaleString()} Pairs</span>
             </span>
             <span className="text-slate-500 text-[11px] font-mono font-semibold">
-              {dispatchedPct}% Fulfilled &bull; Pending: {pendingPairs} Pairs
+              {dispatchedPct}% Fulfilled &bull; Cutting Balance: {cuttingBalancePairs.toLocaleString()} Pairs &bull; Pending Dispatch: {pendingPairs.toLocaleString()} Pairs
             </span>
           </div>
           <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
@@ -1336,11 +1369,14 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
             </div>
             <div className="mt-3">
               <div className="text-2xl font-black text-amber-700 font-mono">
-                {cuttingGivenPairs.toLocaleString()} <span className="text-xs font-medium text-slate-500">pairs</span>
+                {cuttingGivenPairs.toLocaleString()} <span className="text-xs font-medium text-slate-500">Pairs</span>
               </div>
-              {cuttingRemainingPairs < 0 && (
+              <div className="mt-1 text-xs text-slate-600 font-mono">
+                Received: <strong>{cuttingReceivedPairs.toLocaleString()}</strong> &bull; Balance: <strong>{cuttingBalancePairs.toLocaleString()} Pairs</strong>
+              </div>
+              {extraCuttingPairs > 0 && (
                 <div className="mt-1 text-xs font-mono font-black text-rose-700">
-                  Extra Cutting {cuttingRemainingPairs.toLocaleString()}
+                  Extra Cutting: {extraCuttingPairs.toLocaleString()} Pairs
                 </div>
               )}
               <div className="mt-2 text-xs text-slate-500 flex items-center justify-between">
@@ -1611,8 +1647,9 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                         if (row.type === 'RETURN') return sum - row.qty;
                         return sum;
                       }, 0);
-                      const remainingPairs = group.orderedPairs - receivedPairs;
-                      const isOverCut = remainingPairs < 0;
+                      const cuttingBalance = Math.max(0, group.orderedPairs - receivedPairs);
+                      const extraCutting = Math.max(0, receivedPairs - group.orderedPairs);
+                      const isOverCut = extraCutting > 0;
                       const progress = group.orderedPairs > 0
                         ? Math.min(100, Math.round((Math.max(0, receivedPairs) / group.orderedPairs) * 100))
                         : 0;
@@ -1631,10 +1668,10 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                               <span className="min-w-0">
                                 <span className="block truncate text-sm font-black text-slate-900">{group.article}</span>
                                 <span className="block text-[11px] text-slate-500">
-                                  Order: {group.orderedPairs.toLocaleString()} · Received: {receivedPairs.toLocaleString()}
+                                  Total: {group.orderedPairs.toLocaleString()} Pairs &bull; Received: {receivedPairs.toLocaleString()} Pairs
                                   {isOverCut && (
                                     <span className="ml-2 font-mono font-black text-rose-700">
-                                      · Extra Cutting {remainingPairs.toLocaleString()}
+                                      &bull; Extra Cutting: {extraCutting.toLocaleString()} Pairs
                                     </span>
                                   )}
                                 </span>
@@ -1653,12 +1690,16 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                               <span className="block text-[11px] text-slate-500">Issued</span>
                             </span>
                             <span>
-                              <span className={`block text-sm font-black font-mono ${isOverCut ? 'text-rose-600' : 'text-blue-800'}`}>
-                                {isOverCut ? `Extra Cutting ${remainingPairs.toLocaleString()}` : `${remainingPairs.toLocaleString()} Pairs`}
+                              <span className={`block text-sm font-black font-mono ${isOverCut ? 'text-rose-700' : 'text-blue-800'}`}>
+                                {cuttingBalance.toLocaleString()} Pairs
                               </span>
-                              <span className={`block text-[11px] ${isOverCut ? 'text-rose-600 font-semibold' : 'text-slate-500'}`}>
-                                Remaining
-                              </span>
+                              {isOverCut ? (
+                                <span className="block text-[11px] text-rose-600 font-black">
+                                  Extra Cutting: {extraCutting.toLocaleString()} Pairs
+                                </span>
+                              ) : (
+                                <span className="block text-[11px] text-slate-500">Balance</span>
+                              )}
                             </span>
                             <span className="flex items-center gap-2 sm:min-w-[95px]">
                               <span className="h-2 min-w-14 flex-1 overflow-hidden rounded-full bg-slate-200">
@@ -1720,7 +1761,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                                         <span>{issuedPairs.toLocaleString()} / {receivedPairs.toLocaleString()}</span>
                                         {isOverCut && (
                                           <span className="block text-[10px] font-black text-rose-700">
-                                            Extra Cutting {remainingPairs.toLocaleString()}
+                                            Extra Cutting: {extraCutting.toLocaleString()} Pairs
                                           </span>
                                         )}
                                       </td>
@@ -1811,7 +1852,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                       <th className="py-3 px-3 text-right">Rate</th>
                       <th className="py-3 px-3 text-right font-bold">Amount</th>
                       <th className="py-3 px-3">Delivered To</th>
-                      <th className="py-3 px-3">Vehicle / Driver / Bilty</th>
+                      <th className="py-3 px-3">Vehicle / Driver / Receipt Ref</th>
                       <th className="py-3 px-3">Status</th>
                       <th className="py-3 px-3 text-right font-black text-blue-700">Balance Remaining</th>
                       <th className="py-3 px-3 text-center">Action</th>
@@ -2218,7 +2259,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
               </label>
 
               <label className="text-xs font-bold text-slate-700 sm:col-span-2">
-                Bilty / Reference No.
+                Transport Receipt / Reference No.
                 <input
                   value={deliveryForm.biltyNo}
                   onChange={e => setDeliveryForm({ ...deliveryForm, biltyNo: e.target.value })}
@@ -2462,12 +2503,12 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
               </label>
 
               <label className="text-xs font-bold text-slate-700 sm:col-span-2">
-                Bilty / Reference No.
+                Transport Receipt / Reference No.
                 <input
                   value={editDeliveryForm.biltyNo}
                   onChange={e => setEditDeliveryForm({ ...editDeliveryForm, biltyNo: e.target.value })}
                   className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-mono"
-                  placeholder="Optional bilty number"
+                  placeholder="Optional transport receipt number"
                 />
               </label>
             </div>
@@ -2570,7 +2611,7 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
                   <span className="text-xs font-mono font-bold text-slate-800">#{order.orderNo}</span>
                 </div>
                 <div className="text-right">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Bilty / Reference No.</span>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Transport Receipt / Reference No.</span>
                   <span className="text-xs font-mono font-bold text-slate-800">{selectedGatePass.biltyNo || '-'}</span>
                 </div>
               </div>
