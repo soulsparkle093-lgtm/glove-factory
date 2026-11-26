@@ -33,19 +33,22 @@ export const KhataPage: React.FC = () => {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingParty, setEditingParty] = useState<Party | null>(null);
   const [selectedPartyForLedger, setSelectedPartyForLedger] = useState<Party | null>(null);
+  const [partyToDelete, setPartyToDelete] = useState<Party | null>(null);
+  const [isDeletingParty, setIsDeletingParty] = useState(false);
 
   // Close on Escape key
   useEffect(() => {
-    if (!isAddOpen && !selectedPartyForLedger) return;
+    if (!isAddOpen && !selectedPartyForLedger && !partyToDelete) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsAddOpen(false);
         setSelectedPartyForLedger(null);
+        if (!isDeletingParty) setPartyToDelete(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAddOpen, selectedPartyForLedger]);
+  }, [isAddOpen, selectedPartyForLedger, partyToDelete, isDeletingParty]);
 
   // Form states
   const [name, setName] = useState('');
@@ -118,6 +121,20 @@ export const KhataPage: React.FC = () => {
     }
 
     setIsAddOpen(false);
+  };
+
+  const handleConfirmDeleteParty = async () => {
+    if (!partyToDelete || isDeletingParty) return;
+    setIsDeletingParty(true);
+    try {
+      await deleteParty(partyToDelete.id);
+      if (selectedPartyForLedger?.id === partyToDelete.id) {
+        setSelectedPartyForLedger(null);
+      }
+      setPartyToDelete(null);
+    } finally {
+      setIsDeletingParty(false);
+    }
   };
 
   const openWhatsApp = (phone: string, text: string) => {
@@ -308,8 +325,9 @@ export const KhataPage: React.FC = () => {
                             <Edit className="w-3.5 h-3.5" />
                           </button>
                           <button
-                            onClick={() => deleteParty(p.id)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600"
+                            onClick={() => setPartyToDelete(p)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 cursor-pointer"
+                            title="Delete Party Permanently"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -508,6 +526,50 @@ export const KhataPage: React.FC = () => {
               >
                 <ArrowLeft className="w-4 h-4" />
                 Close / Back
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Permanent Delete Party Confirmation Modal */}
+      {partyToDelete && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isDeletingParty) setPartyToDelete(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-100 text-rose-600 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Delete Party "{partyToDelete.name}"?</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Are you sure you want to permanently delete this? This cannot be undone. All linked party ledger transactions will also be permanently deleted.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isDeletingParty}
+                onClick={() => setPartyToDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold border border-slate-300 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                No
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingParty}
+                onClick={handleConfirmDeleteParty}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer disabled:opacity-50"
+              >
+                {isDeletingParty ? 'Deleting...' : 'Yes'}
               </button>
             </div>
           </div>

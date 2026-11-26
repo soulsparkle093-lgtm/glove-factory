@@ -21,6 +21,8 @@ export const SalesPage: React.FC<SalesPageProps> = ({ onOpenCreateInvoice }) => 
   const [search, setSearch] = useState('');
   const [invoiceToDelete, setInvoiceToDelete] = useState<SaleInvoice | null>(null);
 
+  const [isDeleting, setIsDeleting] = useState(false);
+
   const totalSales = invoices.reduce((s, i) => s + i.grandTotal, 0);
   const totalPaid = invoices.reduce((s, i) => s + i.paidAmount, 0);
   const totalPending = invoices.reduce((s, i) => s + i.remaining, 0);
@@ -37,10 +39,15 @@ export const SalesPage: React.FC<SalesPageProps> = ({ onOpenCreateInvoice }) => 
 
   const activeInvoiceForPrint = invoices.find(i => i.id === selectedInvoiceId);
 
-  const handleDelete = () => {
-    if (!invoiceToDelete) return;
-    deleteSaleInvoice(invoiceToDelete.id);
-    setInvoiceToDelete(null);
+  const handleDelete = async () => {
+    if (!invoiceToDelete || isDeleting) return;
+    setIsDeleting(true);
+    try {
+      await deleteSaleInvoice(invoiceToDelete.id);
+      setInvoiceToDelete(null);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   return (
@@ -101,20 +108,24 @@ export const SalesPage: React.FC<SalesPageProps> = ({ onOpenCreateInvoice }) => 
           <div className="p-4 bg-rose-50 border-b border-rose-200 flex items-center justify-between text-xs text-rose-900">
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>Cancel invoice #{invoiceToDelete.invoiceNo}? Sold pairs will be returned to inventory stock automatically.</span>
+              <span>
+                Invoice #{invoiceToDelete.invoiceNo}: Are you sure you want to permanently delete this? This cannot be undone. Sold pairs will be returned to inventory stock automatically.
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setInvoiceToDelete(null)}
-                className="px-2.5 py-1 rounded bg-white border border-slate-300 font-semibold"
+                disabled={isDeleting}
+                className="px-3 py-1 rounded bg-white border border-slate-300 font-semibold cursor-pointer"
               >
-                Cancel
+                No
               </button>
               <button
                 onClick={handleDelete}
-                className="px-2.5 py-1 rounded bg-rose-600 text-white font-semibold hover:bg-rose-700"
+                disabled={isDeleting}
+                className="px-3 py-1 rounded bg-rose-600 text-white font-semibold hover:bg-rose-700 cursor-pointer disabled:opacity-50"
               >
-                Yes, Cancel Bill
+                {isDeleting ? 'Deleting...' : 'Yes'}
               </button>
             </div>
           </div>

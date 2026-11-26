@@ -41,11 +41,7 @@ import {
 import { 
   defaultFactorySettings, 
   FactorySettings, 
-  GLOVE_TEMPLATE_PRESETS,
-  initialParties,
-  initialOrders,
-  initialCuttings,
-  initialStockLedger
+  GLOVE_TEMPLATE_PRESETS
 } from '../data/initialFactoryData';
 import { formatStockInDateTime, safeStringCompare, toComparableString } from '../utils/factoryFormatters';
 import { 
@@ -69,35 +65,36 @@ import {
   arrayUnion
 } from '../firebase';
 
-const STORAGE_KEYS = {
-  PARTIES: 'gferp_parties_v2',
-  STAFF: 'gferp_staff_v2',
-  PRODUCTS: 'gferp_products_v2',
-  ORDERS: 'gferp_orders_v2',
-  CUTTINGS: 'gferp_cuttings_v2',
-  STOCK_LEDGER: 'gferp_stock_ledger_v2',
-  INVOICES: 'gferp_invoices_v2',
-  PARTY_TXS: 'gferp_party_txs_v2',
-  STAFF_LEDGER: 'gferp_staff_ledger_v2',
-  PURCHASES: 'gferp_purchases_v2',
-  RAW_MATERIALS: 'gferp_raw_materials_v2',
-  EXPENSES: 'gferp_expenses_v2',
-  CASHBOOK: 'gferp_cashbook_v2',
-  ATTENDANCE: 'gferp_attendance_v2',
-  SETTINGS: 'gferp_settings_v2',
-  CUTTERS: 'gferp_cutters_v3',
-  CUTTING_TXS: 'gferp_cutting_txs_v3',
-  STITCHERS: 'gferp_stitchers_v1',
-  STITCHING_ORDERS: 'gferp_stitching_orders_v1',
-  STITCHER_KHATA: 'gferp_stitcher_khata_v1',
-  STITCHING_HISTORY: 'gferp_stitching_history_v1',
-  ORDER_HISTORY: 'gferp_order_dispatch_history_v3',
-  ORDER_COMPANIES: 'gferp_order_companies_v1',
-  DELETED_CUTTING_IDS: 'gferp_deleted_cutting_ids_v1',
-  STOCK_OUT: 'gferp_stock_out_v1',
-  DELETED_DELIVERY_IDS: 'gferp_deleted_delivery_ids_v1',
-  DELETED_ORDER_IDS: 'gferp_deleted_order_ids_v1'
-};
+const LEGACY_STORAGE_KEYS = [
+  'gferp_parties_v2',
+  'gferp_staff_v2',
+  'gferp_products_v2',
+  'gferp_orders_v2',
+  'gferp_cuttings_v2',
+  'gferp_stock_ledger_v2',
+  'gferp_invoices_v2',
+  'gferp_party_txs_v2',
+  'gferp_staff_ledger_v2',
+  'gferp_purchases_v2',
+  'gferp_raw_materials_v2',
+  'gferp_expenses_v2',
+  'gferp_cashbook_v2',
+  'gferp_attendance_v2',
+  'gferp_settings_v2',
+  'gferp_cutters_v3',
+  'gferp_cutting_txs_v3',
+  'gferp_stitchers_v1',
+  'gferp_stitching_orders_v1',
+  'gferp_stitcher_khata_v1',
+  'gferp_stitching_history_v1',
+  'gferp_order_dispatch_history_v3',
+  'gferp_order_companies_v1',
+  'gferp_deleted_cutting_ids_v1',
+  'gferp_stock_out_v1',
+  'gferp_deleted_delivery_ids_v1',
+  'gferp_deleted_order_ids_v1',
+  'gferp_deleted_products_v1'
+];
 
 // Recursively remove `undefined` values from plain objects/arrays before writing to Firestore,
 // while leaving Firestore FieldValue sentinels (increment, arrayUnion, serverTimestamp) untouched.
@@ -142,25 +139,6 @@ const dedupeCuttersList = (rawList: Cutter[]): Cutter[] => {
   });
   return Array.from(map.values());
 };
-
-function loadLocal<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw);
-  } catch (e) {
-    console.error(`Error reading ${key}:`, e);
-    return fallback;
-  }
-}
-
-function saveLocal<T>(key: string, val: T): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(val));
-  } catch (e) {
-    console.error(`Error saving ${key}:`, e);
-  }
-}
 
 const normalizeStockDocumentId = (value: string): string =>
   value.trim().toLocaleLowerCase().replace(/[\\/]/g, '-');
@@ -344,11 +322,11 @@ interface FactoryContextType {
   // Actions & Auto Logic
   addParty: (data: Omit<Party, 'id' | 'createdAt' | 'updatedAt' | 'currentBalance'>) => Party;
   updateParty: (id: string, updates: Partial<Party>) => void;
-  deleteParty: (id: string) => void;
+  deleteParty: (id: string) => Promise<void>;
 
   addStaff: (data: Omit<Staff, 'id' | 'createdAt' | 'currentBalance'>) => Staff;
   updateStaff: (id: string, updates: Partial<Staff>) => void;
-  deleteStaff: (id: string) => void;
+  deleteStaff: (id: string) => Promise<void>;
   payStaffWage: (staffId: string, amount: number, paymentMode: 'cash' | 'bank', note?: string) => void;
 
   addProduct: (data: Omit<Product, 'id' | 'createdAt' | 'currentStock'>) => Product;
@@ -416,7 +394,7 @@ interface FactoryContextType {
     notes?: string;
   }) => Cutting;
   receiveCutting: (cuttingId: string) => void; // AUTO: creates stock_ledger in, stockReceivedQty += qty, updates order status
-  deleteCutting: (cuttingId: string) => void;
+  deleteCutting: (cuttingId: string) => Promise<void>;
 
   // 3. Critical sales invoice logic: automatic stock deduction and customer ledger updates
   createSaleInvoice: (invoiceData: {
@@ -437,7 +415,7 @@ interface FactoryContextType {
     paymentMode: 'cash' | 'bank' | 'credit';
     notes?: string;
   }) => SaleInvoice;
-  deleteSaleInvoice: (invoiceId: string) => void;
+  deleteSaleInvoice: (invoiceId: string) => Promise<void>;
 
   // 4. Raw Material Purchase (Leather Buying)
   createPurchase: (data: {
@@ -455,16 +433,16 @@ interface FactoryContextType {
 
   // 5. Expenses & Cashbook
   addExpense: (data: Omit<Expense, 'id' | 'createdAt'>) => Expense;
-  deleteExpense: (id: string) => void;
+  deleteExpense: (id: string) => Promise<void>;
   addCashbookEntry: (data: Omit<CashbookEntry, 'id' | 'createdAt'>) => CashbookEntry;
-  deleteCashbookEntry: (id: string) => void;
+  deleteCashbookEntry: (id: string) => Promise<void>;
 
   // 6. Staff Attendance
   markAttendance: (record: Omit<StaffAttendance, 'id'>) => void;
 
   // Settings
   updateSettings: (newSettings: Partial<FactorySettings>) => void;
-  clearAllFactoryData: () => void;
+  clearAllFactoryData: () => Promise<void>;
 }
 
 const FactoryContext = createContext<FactoryContextType | undefined>(undefined);
@@ -479,103 +457,51 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
   const [selectedCompanyName, setSelectedCompanyName] = useState<string | null>(null);
 
-  const [parties, setParties] = useState<Party[]>(() => {
-    const local = loadLocal<Party[]>(STORAGE_KEYS.PARTIES, []);
-    let list = [...local];
-    initialParties.forEach(ip => {
-      if (!list.some(p => p.id === ip.id || p.name.toLowerCase() === ip.name.toLowerCase())) {
-        list.push(ip);
-      }
-    });
-    return list;
-  });
-  const [staff, setStaff] = useState<Staff[]>(() => loadLocal(STORAGE_KEYS.STAFF, []));
-  const [products, setProducts] = useState<Product[]>(() => loadLocal(STORAGE_KEYS.PRODUCTS, []));
-  const [orders, setOrders] = useState<CustomerOrder[]>(() => {
-    const deletedOrds = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []));
-    const local = loadLocal<CustomerOrder[]>(STORAGE_KEYS.ORDERS, []).filter(o => !deletedOrds.has(o.id));
-    let list = [...local];
-    initialOrders.forEach(io => {
-      if (deletedOrds.has(io.id)) return;
-      const idx = list.findIndex(o => o.orderNo === io.orderNo || o.id === io.id);
-      if (idx === -1) {
-        list.push(io);
-      } else {
-        const existing = list[idx];
-        const isOrd004 = io.orderNo === 'ORD-004' && (existing.orderNo === 'ORD-004' || existing.customerName?.toLowerCase() === 'traders');
-        if (isOrd004) {
-          const hasCustomSizes = existing.items?.some(i => i.customSizes && i.customSizes.length >= 2);
-          if (!hasCustomSizes) {
-            list[idx] = { ...existing, items: io.items, totalPairs: 16000, originalTotalPairs: 16000 };
-          }
-        }
-      }
-    });
-    return list;
-  });
-  const [cuttings, setCuttings] = useState<Cutting[]>(() => {
-    const deletedCuts = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, []));
-    const deletedOrds = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []));
-    const local = loadLocal<Cutting[]>(STORAGE_KEYS.CUTTINGS, []).filter(
-      c => !deletedCuts.has(c.id) && !deletedOrds.has(c.orderId)
-    );
-    let list = [...local];
-    initialCuttings.forEach(ic => {
-      if (deletedCuts.has(ic.id) || deletedOrds.has(ic.orderId)) return;
-      if (!list.some(c => c.id === ic.id)) {
-        list.push(ic);
-      }
-    });
-    return list;
-  });
-  const [cutters, setCutters] = useState<Cutter[]>(() => {
-    const local = loadLocal<Cutter[]>(STORAGE_KEYS.CUTTERS, []);
-    return dedupeCuttersList(local);
-  });
-  const [cuttingTransactions, setCuttingTransactions] = useState<CuttingTransaction[]>(() => loadLocal(STORAGE_KEYS.CUTTING_TXS, []));
+  const [parties, setParties] = useState<Party[]>([]);
+  const [staff, setStaff] = useState<Staff[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [cuttings, setCuttings] = useState<Cutting[]>([]);
+  const [cutters, setCutters] = useState<Cutter[]>([]);
+  const [cuttingTransactions, setCuttingTransactions] = useState<CuttingTransaction[]>([]);
   const [cuttingEntries, setCuttingEntries] = useState<CuttingEntry[]>([]);
-  const [stitchers, setStitchers] = useState<Stitcher[]>(() => loadLocal(STORAGE_KEYS.STITCHERS, []));
-  const [stitchingOrders, setStitchingOrders] = useState<StitchingOrder[]>(() => loadLocal(STORAGE_KEYS.STITCHING_ORDERS, []));
-  const [stitcherKhataTransactions, setStitcherKhataTransactions] = useState<StitcherKhataTransaction[]>(() => loadLocal(STORAGE_KEYS.STITCHER_KHATA, []));
-  const [stitchingHistory, setStitchingHistory] = useState<StitchingHistoryEntry[]>(() => loadLocal(STORAGE_KEYS.STITCHING_HISTORY, []));
-  const [orderDispatchHistory, setOrderDispatchHistory] = useState<OrderDispatchHistory[]>(() => loadLocal(STORAGE_KEYS.ORDER_HISTORY, []));
-  const [stockLedger, setStockLedger] = useState<StockLedgerEntry[]>(() => loadLocal(STORAGE_KEYS.STOCK_LEDGER, []));
+  const [stitchers, setStitchers] = useState<Stitcher[]>([]);
+  const [stitchingOrders, setStitchingOrders] = useState<StitchingOrder[]>([]);
+  const [stitcherKhataTransactions, setStitcherKhataTransactions] = useState<StitcherKhataTransaction[]>([]);
+  const [stitchingHistory, setStitchingHistory] = useState<StitchingHistoryEntry[]>([]);
+  const [orderDispatchHistory, setOrderDispatchHistory] = useState<OrderDispatchHistory[]>([]);
+  const [stockLedger, setStockLedger] = useState<StockLedgerEntry[]>([]);
   const [stockManagement, setStockManagement] = useState<FactoryStockItem[]>([]);
   const [articleStock, setArticleStock] = useState<ArticleStockItem[]>([]);
-  const [deliveryHistory, setDeliveryHistory] = useState<DeliveryHistoryEntry[]>(() => {
-    const deletedDels = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, []));
-    const deletedOrds = new Set(loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []));
-    return loadLocal<DeliveryHistoryEntry[]>(STORAGE_KEYS.STOCK_OUT, []).filter(
-      d => !deletedDels.has(d.id) && !deletedOrds.has(d.orderId || '') && !deletedOrds.has(d.customerOrderId || '')
-    );
-  });
+  const [deliveryHistory, setDeliveryHistory] = useState<DeliveryHistoryEntry[]>([]);
   const [articlesMaster, setArticlesMaster] = useState<FactoryArticleMaster[]>([]);
   const [articleCatalog, setArticleCatalog] = useState<FactoryArticleMaster[]>([]);
   const [legacyArticleMaster, setLegacyArticleMaster] = useState<FactoryArticleMaster[]>([]);
-  const [invoices, setInvoices] = useState<SaleInvoice[]>(() => loadLocal(STORAGE_KEYS.INVOICES, []));
-  const [partyTransactions, setPartyTransactions] = useState<PartyTransaction[]>(() => loadLocal(STORAGE_KEYS.PARTY_TXS, []));
-  const [staffLedger, setStaffLedger] = useState<StaffLedgerEntry[]>(() => loadLocal(STORAGE_KEYS.STAFF_LEDGER, []));
-  const [purchases, setPurchases] = useState<Purchase[]>(() => loadLocal(STORAGE_KEYS.PURCHASES, []));
-  const [rawMaterials, setRawMaterials] = useState<RawMaterialStock[]>(() => loadLocal(STORAGE_KEYS.RAW_MATERIALS, []));
-  const [expenses, setExpenses] = useState<Expense[]>(() => loadLocal(STORAGE_KEYS.EXPENSES, []));
-  const [cashbook, setCashbook] = useState<CashbookEntry[]>(() => loadLocal(STORAGE_KEYS.CASHBOOK, []));
-  const [attendance, setAttendance] = useState<StaffAttendance[]>(() => loadLocal(STORAGE_KEYS.ATTENDANCE, []));
-  const [settings, setSettings] = useState<FactorySettings>(() => loadLocal(STORAGE_KEYS.SETTINGS, defaultFactorySettings));
-  const [deletedProductsList, setDeletedProductsList] = useState<DeletedProductItem[]>(() =>
-    loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', [])
-  );
-  const [deletedCuttingIdsList, setDeletedCuttingIdsList] = useState<string[]>(() =>
-    loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, [])
-  );
-  const [deletedOrderIdsList, setDeletedOrderIdsList] = useState<string[]>(() =>
-    loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, [])
-  );
-  const [deletedDeliveryIdsList, setDeletedDeliveryIdsList] = useState<string[]>(() =>
-    loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, [])
-  );
-  const [orderCompanies, setOrderCompanies] = useState<OrderCompany[]>(() =>
-    loadLocal<OrderCompany[]>(STORAGE_KEYS.ORDER_COMPANIES, [])
-  );
+  const [invoices, setInvoices] = useState<SaleInvoice[]>([]);
+  const [partyTransactions, setPartyTransactions] = useState<PartyTransaction[]>([]);
+  const [staffLedger, setStaffLedger] = useState<StaffLedgerEntry[]>([]);
+  const [purchases, setPurchases] = useState<Purchase[]>([]);
+  const [rawMaterials, setRawMaterials] = useState<RawMaterialStock[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [cashbook, setCashbook] = useState<CashbookEntry[]>([]);
+  const [attendance, setAttendance] = useState<StaffAttendance[]>([]);
+  const [settings, setSettings] = useState<FactorySettings>(defaultFactorySettings);
+  const [deletedProductsList, setDeletedProductsList] = useState<DeletedProductItem[]>([]);
+  const [deletedCuttingIdsList, setDeletedCuttingIdsList] = useState<string[]>([]);
+  const [deletedOrderIdsList, setDeletedOrderIdsList] = useState<string[]>([]);
+  const [deletedDeliveryIdsList, setDeletedDeliveryIdsList] = useState<string[]>([]);
+  const [orderCompanies, setOrderCompanies] = useState<OrderCompany[]>([]);
+
+  // Clear legacy browser localStorage caches once on startup so deleted items can never resurrect from old caches
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        LEGACY_STORAGE_KEYS.forEach(key => window.localStorage.removeItem(key));
+      }
+    } catch {
+      // ignore storage access issues
+    }
+  }, []);
 
   const deletedProductNames = useMemo(() => {
     const s = new Set<string>();
@@ -640,14 +566,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const norm = (articleName || '').trim().toLowerCase();
     if (!norm) return;
     if (deletedProductNamesRef.current.has(norm)) {
-      const next = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).filter(
-        d => (d.name || '').trim().toLowerCase() !== norm
-      );
-      saveLocal('gferp_deleted_products_v1', next);
-      setDeletedProductsList(next);
       const nextSet = new Set(deletedProductNamesRef.current);
       nextSet.delete(norm);
       deletedProductNamesRef.current = nextSet;
+      setDeletedProductsList(prev => prev.filter(d => (d.name || '').trim().toLowerCase() !== norm));
     }
     if (db) {
       await deleteDoc(doc(db, 'deleted_products', norm)).catch(() => {});
@@ -658,11 +580,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const idList = Array.from(new Set(Array.from(ids).map(i => (i || '').trim()).filter(Boolean)));
     if (idList.length === 0) return;
 
-    const currentLocal = loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, []);
-    const mergedSet = new Set<string>([...currentLocal, ...deletedCuttingIdsRef.current, ...idList]);
+    const mergedSet = new Set<string>([...deletedCuttingIdsRef.current, ...idList]);
     const mergedArr = Array.from(mergedSet);
     deletedCuttingIdsRef.current = mergedSet;
-    saveLocal(STORAGE_KEYS.DELETED_CUTTING_IDS, mergedArr);
     setDeletedCuttingIdsList(mergedArr);
 
     if (db) {
@@ -677,11 +597,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const idList = Array.from(new Set(Array.from(ids).map(i => (i || '').trim()).filter(Boolean)));
     if (idList.length === 0) return;
 
-    const currentLocal = loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []);
-    const mergedSet = new Set<string>([...currentLocal, ...deletedOrderIdsRef.current, ...idList]);
+    const mergedSet = new Set<string>([...deletedOrderIdsRef.current, ...idList]);
     const mergedArr = Array.from(mergedSet);
     deletedOrderIdsRef.current = mergedSet;
-    saveLocal(STORAGE_KEYS.DELETED_ORDER_IDS, mergedArr);
     setDeletedOrderIdsList(mergedArr);
 
     if (db) {
@@ -696,11 +614,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const idList = Array.from(new Set(Array.from(ids).map(i => (i || '').trim()).filter(Boolean)));
     if (idList.length === 0) return;
 
-    const currentLocal = loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, []);
-    const mergedSet = new Set<string>([...currentLocal, ...deletedDeliveryIdsRef.current, ...idList]);
+    const mergedSet = new Set<string>([...deletedDeliveryIdsRef.current, ...idList]);
     const mergedArr = Array.from(mergedSet);
     deletedDeliveryIdsRef.current = mergedSet;
-    saveLocal(STORAGE_KEYS.DELETED_DELIVERY_IDS, mergedArr);
     setDeletedDeliveryIdsList(mergedArr);
 
     if (db) {
@@ -729,7 +645,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const syncFirestoreDoc = async (colName: string, id: string, data: any) => {
     if (!isFirebaseOnline || !db) return;
     try {
-      await setDoc(doc(db, colName, id), data, { merge: true });
+      await setDoc(doc(db, colName, id), stripUndefined(data), { merge: true });
     } catch (e) {
       console.warn(`Firestore sync note (${colName}):`, e);
     }
@@ -807,22 +723,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             };
           });
 
-          // Heal ORD-004 / traders if its customSizes were wiped out or collapsed
-          const isOrd004 = d.id === 'ord-004-traders' || data.orderNo === 'ORD-004' || String(data.customerName || '').toLowerCase().trim() === 'traders';
-          let healedItems = items;
-          if (isOrd004) {
-            const hasProperMg = items.some((i: OrderItem) => (i.title === 'mg' || i.article === 'mg') && i.customSizes && i.customSizes.length >= 2);
-            const hasProperPride = items.some((i: OrderItem) => (i.title === 'pride' || i.article === 'pride') && i.customSizes && i.customSizes.length >= 2);
-            if (!hasProperMg || !hasProperPride) {
-              const ord004Template = initialOrders.find(o => o.orderNo === 'ORD-004');
-              if (ord004Template) {
-                healedItems = ord004Template.items;
-              }
-            }
-          }
-
-          const totalPairs = Number(data.totalPairs) || Number(data.totalQty) || healedItems.reduce((s: number, i: any) => s + i.totalPairs, 0);
-          const originalTotalPairs = Number(data.originalTotalPairs) || healedItems.reduce((s: number, i: any) => s + (i.originalQty || i.totalPairs), 0) || totalPairs;
+          // Auto-link legacy entries without orderNo if matching customer order exists
+          const totalPairs = Number(data.totalPairs) || Number(data.totalQty) || items.reduce((s: number, i: any) => s + i.totalPairs, 0);
+          const originalTotalPairs = Number(data.originalTotalPairs) || items.reduce((s: number, i: any) => s + (i.originalQty || i.totalPairs), 0) || totalPairs;
 
           return {
             ...data,
@@ -831,7 +734,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             customerName: data.customerName || 'Walk-in Customer',
             orderDate: data.orderDate || '',
             deliveryDate: data.deliveryDate || '',
-            items: healedItems,
+            items,
             totalPairs,
             originalTotalPairs,
             totalQty: totalPairs,
@@ -842,18 +745,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } as CustomerOrder;
         });
 
-        // Ensure initialOrders exist only if not explicitly deleted by user
-        initialOrders.forEach(initOrder => {
-          if (deletedOrderIdsRef.current.has(initOrder.id)) return;
-          if (!list.some(o => o.orderNo === initOrder.orderNo || o.id === initOrder.id)) {
-            list.push(initOrder);
-          }
-        });
-
         // Newest orders on top
         list.sort((a, b) => safeStringCompare(b.createdAt, a.createdAt));
         setOrders(list);
-        saveLocal(STORAGE_KEYS.ORDERS, list);
       }, err => {
         console.error('Firestore onSnapshot error (customer_orders):', err);
       }));
@@ -862,87 +756,108 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       unsubs.push(onSnapshot(collection(db, 'parties'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as Party));
         setParties(list);
-        saveLocal(STORAGE_KEYS.PARTIES, list);
       }, err => console.error('Firestore onSnapshot error (parties):', err)));
+
+      // 2b. party_transactions
+      unsubs.push(onSnapshot(collection(db, 'party_transactions'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as PartyTransaction));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
+        setPartyTransactions(list);
+      }, err => console.error('Firestore onSnapshot error (party_transactions):', err)));
+
+      // 2c. staff, staff_ledger, attendance
+      unsubs.push(onSnapshot(collection(db, 'staff'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as Staff));
+        setStaff(list);
+      }, err => console.error('Firestore onSnapshot error (staff):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'staff_ledger'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StaffLedgerEntry));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
+        setStaffLedger(list);
+      }, err => console.error('Firestore onSnapshot error (staff_ledger):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'attendance'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StaffAttendance));
+        setAttendance(list);
+      }, err => console.error('Firestore onSnapshot error (attendance):', err)));
 
       // 3. products
       unsubs.push(onSnapshot(collection(db, 'products'), snap => {
-        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const currentDeleted = deletedProductNamesRef.current;
         const list = snap.docs
           .map(d => ({ ...d.data(), id: d.id } as Product))
-          .filter(p => !currentDeleted.includes((p.gloveName || '').trim().toLowerCase()));
+          .filter(p => !currentDeleted.has((p.gloveName || '').trim().toLowerCase()));
         setProducts(list);
-        saveLocal(STORAGE_KEYS.PRODUCTS, list);
       }, err => console.error('Firestore onSnapshot error (products):', err)));
 
       // 3b. deleted_products blocklist
       unsubs.push(onSnapshot(collection(db, 'deleted_products'), snap => {
-        const remoteList = snap.docs.map(d => {
+        const mergedMap = new Map<string, DeletedProductItem>();
+        snap.docs.forEach(d => {
           const data = d.data();
-          return {
+          const name = (data.name || d.id).trim().toLowerCase();
+          if (!name) return;
+          mergedMap.set(name, {
             id: d.id,
-            name: (data.name || d.id).trim().toLowerCase(),
+            name,
             displayName: data.displayName || data.name || d.id,
             deletedAt: data.deletedAt || new Date().toISOString()
-          } as DeletedProductItem;
+          });
         });
-        const localList = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []);
-        const mergedMap = new Map<string, DeletedProductItem>();
-        localList.forEach(item => { if (item.name) mergedMap.set(item.name.toLowerCase(), item); });
-        remoteList.forEach(item => { if (item.name) mergedMap.set(item.name.toLowerCase(), item); });
         const merged = Array.from(mergedMap.values());
+        const nextSet = new Set(merged.map(m => m.name));
+        deletedProductNamesRef.current = nextSet;
         setDeletedProductsList(merged);
-        saveLocal('gferp_deleted_products_v1', merged);
+        setProducts(prev => prev.filter(p => !nextSet.has((p.gloveName || '').trim().toLowerCase())));
+        setStockManagement(prev => prev.filter(s => !nextSet.has((s.article || s.articleName || '').trim().toLowerCase())));
+        setArticleStock(prev => prev.filter(a => !nextSet.has((a.articleName || '').trim().toLowerCase())));
+        setArticlesMaster(prev => prev.filter(a => !nextSet.has((a.articleName || '').trim().toLowerCase())));
       }, err => console.error('Firestore onSnapshot error (deleted_products):', err)));
 
-      // 3c. deleted_cutting_ids blocklist (prevents deleted rows from resurrecting after Ctrl+R or snapshot races)
+      // 3c. deleted_cutting_ids blocklist (prevents deleted rows from resurrecting across snapshot races)
       unsubs.push(onSnapshot(collection(db, 'deleted_cutting_ids'), snap => {
-        const localIds = loadLocal<string[]>(STORAGE_KEYS.DELETED_CUTTING_IDS, []);
-        const merged = new Set<string>([...localIds, ...deletedCuttingIdsRef.current]);
-        snap.docs.forEach(d => merged.add(d.id));
-        const mergedArr = Array.from(merged);
+        const merged = new Set<string>(snap.docs.map(d => d.id));
         deletedCuttingIdsRef.current = merged;
-        saveLocal(STORAGE_KEYS.DELETED_CUTTING_IDS, mergedArr);
-        setDeletedCuttingIdsList(mergedArr);
+        setDeletedCuttingIdsList(Array.from(merged));
+        if (merged.size > 0) {
+          setCuttings(prev => prev.filter(c => !merged.has(c.id)));
+          setCuttingTransactions(prev => prev.filter(t => !merged.has(t.id)));
+          setCuttingEntries(prev => prev.filter(e => !merged.has(e.id)));
+        }
       }, err => console.error('Firestore onSnapshot error (deleted_cutting_ids):', err)));
 
       // 3d. deleted_order_ids & deleted_delivery_ids blocklists
       unsubs.push(onSnapshot(collection(db, 'deleted_order_ids'), snap => {
-        const localIds = loadLocal<string[]>(STORAGE_KEYS.DELETED_ORDER_IDS, []);
-        const merged = new Set<string>([...localIds, ...deletedOrderIdsRef.current]);
-        snap.docs.forEach(d => merged.add(d.id));
-        const mergedArr = Array.from(merged);
+        const merged = new Set<string>(snap.docs.map(d => d.id));
         deletedOrderIdsRef.current = merged;
-        saveLocal(STORAGE_KEYS.DELETED_ORDER_IDS, mergedArr);
-        setDeletedOrderIdsList(mergedArr);
+        setDeletedOrderIdsList(Array.from(merged));
+        if (merged.size > 0) {
+          setOrders(prev => prev.filter(o => !merged.has(o.id)));
+          setCuttings(prev => prev.filter(c => !merged.has(c.orderId)));
+          setCuttingTransactions(prev => prev.filter(t => !merged.has(t.orderId || '')));
+          setCuttingEntries(prev => prev.filter(e => !merged.has(e.orderId || '')));
+          setDeliveryHistory(prev => prev.filter(d => !merged.has(d.orderId || '') && !merged.has(d.customerOrderId || '')));
+          setOrderDispatchHistory(prev => prev.filter(h => !merged.has(h.orderId)));
+        }
       }, err => console.error('Firestore onSnapshot error (deleted_order_ids):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'deleted_delivery_ids'), snap => {
-        const localIds = loadLocal<string[]>(STORAGE_KEYS.DELETED_DELIVERY_IDS, []);
-        const merged = new Set<string>([...localIds, ...deletedDeliveryIdsRef.current]);
-        snap.docs.forEach(d => merged.add(d.id));
-        const mergedArr = Array.from(merged);
+        const merged = new Set<string>(snap.docs.map(d => d.id));
         deletedDeliveryIdsRef.current = merged;
-        saveLocal(STORAGE_KEYS.DELETED_DELIVERY_IDS, mergedArr);
-        setDeletedDeliveryIdsList(mergedArr);
+        setDeletedDeliveryIdsList(Array.from(merged));
+        if (merged.size > 0) {
+          setDeliveryHistory(prev => prev.filter(d => !merged.has(d.id)));
+          setOrderDispatchHistory(prev => prev.filter(h => !merged.has(h.id)));
+        }
       }, err => console.error('Firestore onSnapshot error (deleted_delivery_ids):', err)));
 
       // 4. cuttings
       unsubs.push(onSnapshot(collection(db, 'cuttings'), snap => {
-        let list = snap.docs
+        const list = snap.docs
           .filter(d => !deletedCuttingIdsRef.current.has(d.id) && !deletedOrderIdsRef.current.has(String(d.data()?.orderId || '')) && !d.data()?.isDeleted)
           .map(d => ({ ...d.data(), id: d.id } as Cutting));
-        if (list.length === 0) {
-          list = initialCuttings.filter(ic => !deletedCuttingIdsRef.current.has(ic.id) && !deletedOrderIdsRef.current.has(ic.orderId));
-        } else if (!list.some(c => c.orderNo === 'ORD-003') && !deletedOrderIdsRef.current.has('ord-003-bestway')) {
-          initialCuttings.forEach(ic => {
-            if (!deletedCuttingIdsRef.current.has(ic.id) && !deletedOrderIdsRef.current.has(ic.orderId) && !list.some(existing => existing.id === ic.id)) {
-              list.push(ic);
-            }
-          });
-        }
         setCuttings(list);
-        saveLocal(STORAGE_KEYS.CUTTINGS, list);
       }, err => console.error('Firestore onSnapshot error (cuttings):', err)));
 
       // 5. cutters
@@ -960,41 +875,18 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             status: data.status || (data.isActive === false ? 'deactive' : 'active')
           } as Cutter;
         });
-        const cleanList = dedupeCuttersList(list);
-        const hasTariq = cleanList.some(
-          c => c.id === 'cutter-tariq' || (c.name || '').trim().toLowerCase() === 'tariq mehmood'
-        );
-        if (!hasTariq) {
-          cleanList.push({
-            id: 'cutter-tariq',
-            name: 'Tariq Mehmood',
-            khataName: 'Tariq Mehmood Cutter',
-            phone: '+92 301 2345678',
-            perPairRate: 12,
-            cutterType: 'cutting_man',
-            totalGiven: 6000,
-            totalReceived: 6000,
-            pendingBalance: 0,
-            isActive: true,
-            status: 'active',
-            createdAt: '2026-11-01T08:00:00.000Z'
-          } as Cutter);
-        }
-        setCutters(cleanList);
-        saveLocal(STORAGE_KEYS.CUTTERS, cleanList);
+        setCutters(dedupeCuttersList(list));
       }, err => console.error('Firestore onSnapshot error (cutters):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stitchers'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id, isActive: d.data().isActive !== false } as Stitcher));
         setStitchers(list);
-        saveLocal(STORAGE_KEYS.STITCHERS, list);
       }, err => console.error('Firestore onSnapshot error (stitchers):', err)));
 
-        unsubs.push(onSnapshot(collection(db, 'stitching_orders'), snap => {
+      unsubs.push(onSnapshot(collection(db, 'stitching_orders'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StitchingOrder));
         list.sort((a, b) => safeStringCompare(b.issueDate || b.createdAt, a.issueDate || a.createdAt));
         setStitchingOrders(list);
-        saveLocal(STORAGE_KEYS.STITCHING_ORDERS, list);
       }, err => console.error('Firestore onSnapshot error (stitching_orders):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stitching_history'), snap => {
@@ -1005,14 +897,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         });
         list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setStitchingHistory(list);
-        saveLocal(STORAGE_KEYS.STITCHING_HISTORY, list);
       }, err => console.error('Firestore onSnapshot error (stitching_history):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stitcher_khata_transactions'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as StitcherKhataTransaction));
         list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setStitcherKhataTransactions(list);
-        saveLocal(STORAGE_KEYS.STITCHER_KHATA, list);
       }, err => console.error('Firestore onSnapshot error (stitcher_khata_transactions):', err)));
 
       // 6. cutting_transactions
@@ -1022,7 +912,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           .map(d => ({ ...d.data(), id: d.id } as CuttingTransaction));
         list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setCuttingTransactions(list);
-        saveLocal(STORAGE_KEYS.CUTTING_TXS, list);
         if (!snapshotReadyRef.current.cuttingTxs) {
           snapshotReadyRef.current.cuttingTxs = true;
           setSnapshotsReadyTick(t => t + 1);
@@ -1112,7 +1001,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           .map(d => ({ ...d.data(), id: d.id } as OrderDispatchHistory));
         list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setOrderDispatchHistory(list);
-        saveLocal(STORAGE_KEYS.ORDER_HISTORY, list);
       }, err => console.error('Firestore onSnapshot error (order_dispatch_history):', err)));
 
       // 9. stock_ledger
@@ -1129,15 +1017,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           })
           .map(d => ({ ...d.data(), id: d.id } as StockLedgerEntry));
         setStockLedger(list);
-        saveLocal(STORAGE_KEYS.STOCK_LEDGER, list);
       }, err => console.error('Firestore onSnapshot error (stock_ledger):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'stock_management'), snap => {
-        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const currentDeleted = deletedProductNamesRef.current;
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const art = String(data.article || data.articleName || '').trim().toLowerCase();
-          if (currentDeleted.includes(art)) return [];
+          if (currentDeleted.has(art)) return [];
           const receiveIds = Array.isArray(data.receiveIds)
             ? data.receiveIds.filter((rId: string) => !deletedCuttingIdsRef.current.has(rId))
             : [];
@@ -1169,11 +1056,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }, err => console.error('Firestore onSnapshot error (stock_management):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'article_stock'), snap => {
-        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const currentDeleted = deletedProductNamesRef.current;
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const art = String(data.articleName || '').trim().toLowerCase();
-          if (currentDeleted.includes(art)) return [];
+          if (currentDeleted.has(art)) return [];
           const cuttingHistory = (Array.isArray(data.cuttingHistory) ? data.cuttingHistory : [])
             .filter((h: any) => !deletedCuttingIdsRef.current.has(h?.receiveId || '') && !deletedOrderIdsRef.current.has(h?.orderId || ''));
           const deliveryHistFiltered = (Array.isArray(data.deliveryHistory) ? data.deliveryHistory : [])
@@ -1204,27 +1091,20 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             if (deletedDeliveryIdsRef.current.has(d.id)) return false;
             if (d.orderId && deletedOrderIdsRef.current.has(d.orderId)) return false;
             if (d.customerOrderId && deletedOrderIdsRef.current.has(d.customerOrderId)) return false;
-            // Strip corrupted combined-string articles like "mg, pride"
             if (d.article && d.article.includes(',')) return false;
-            // Pride was never delivered for ORD-004 / traders
-            const isOrd004 = d.orderId === 'ord-004-traders' || (d.customerName && d.customerName.toLowerCase().trim() === 'traders');
-            if (isOrd004 && d.article && d.article.toLowerCase().trim() === 'pride') {
-              return false;
-            }
             return true;
           });
         list.sort((a, b) => safeStringCompare(b.date, a.date) || safeStringCompare(b.createdAt, a.createdAt));
         setDeliveryHistory(list);
-        saveLocal(STORAGE_KEYS.STOCK_OUT, list);
       }, err => console.error('Firestore onSnapshot error (stock_delivery_history):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'articles_master'), snap => {
-        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const currentDeleted = deletedProductNamesRef.current;
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const articleName = String(data.articleName || data.name || data.title || '').trim();
           const status = String(data.status || '').toLocaleLowerCase();
-          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.includes(articleName.toLowerCase())) return [];
+          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.has(articleName.toLowerCase())) return [];
           return [{
             id: d.id,
             articleName,
@@ -1238,12 +1118,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }, err => console.error('Firestore onSnapshot error (articles_master):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'articles'), snap => {
-        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const currentDeleted = deletedProductNamesRef.current;
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const articleName = String(data.articleName || data.name || data.title || '').trim();
           const status = String(data.status || '').toLocaleLowerCase();
-          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.includes(articleName.toLowerCase())) return [];
+          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.has(articleName.toLowerCase())) return [];
           return [{
             id: d.id,
             articleName,
@@ -1256,12 +1136,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }, err => console.error('Firestore onSnapshot error (articles):', err)));
 
       unsubs.push(onSnapshot(collection(db, 'article_master'), snap => {
-        const currentDeleted = loadLocal<DeletedProductItem[]>('gferp_deleted_products_v1', []).map(d => d.name);
+        const currentDeleted = deletedProductNamesRef.current;
         const list = snap.docs.flatMap(d => {
           const data = d.data();
           const articleName = String(data.articleName || data.article_name || data.name || data.title || '').trim();
           const status = String(data.status || '').toLocaleLowerCase();
-          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.includes(articleName.toLowerCase())) return [];
+          if (!articleName || data.isActive === false || (status && status !== 'active') || currentDeleted.has(articleName.toLowerCase())) return [];
           return [{
             id: d.id,
             articleName,
@@ -1275,17 +1155,48 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       // 10. sales_invoices
       unsubs.push(onSnapshot(collection(db, 'sales_invoices'), snap => {
-        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as SaleInvoice));
+        const list = snap.docs
+          .filter(d => !deletedOrderIdsRef.current.has(String(d.data()?.orderId || '')))
+          .map(d => ({ ...d.data(), id: d.id } as SaleInvoice));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
         setInvoices(list);
-        saveLocal(STORAGE_KEYS.INVOICES, list);
       }, err => console.error('Firestore onSnapshot error (sales_invoices):', err)));
 
       // 11. order_companies
       unsubs.push(onSnapshot(collection(db, 'order_companies'), snap => {
         const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as OrderCompany));
         setOrderCompanies(list);
-        saveLocal(STORAGE_KEYS.ORDER_COMPANIES, list);
       }, err => console.error('Firestore onSnapshot error (order_companies):', err)));
+
+      // 12. purchases, raw_materials, expenses, cashbook, settings
+      unsubs.push(onSnapshot(collection(db, 'purchases'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as Purchase));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
+        setPurchases(list);
+      }, err => console.error('Firestore onSnapshot error (purchases):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'raw_materials'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as RawMaterialStock));
+        setRawMaterials(list);
+      }, err => console.error('Firestore onSnapshot error (raw_materials):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'expenses'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as Expense));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
+        setExpenses(list);
+      }, err => console.error('Firestore onSnapshot error (expenses):', err)));
+
+      unsubs.push(onSnapshot(collection(db, 'cashbook'), snap => {
+        const list = snap.docs.map(d => ({ ...d.data(), id: d.id } as CashbookEntry));
+        list.sort((a, b) => safeStringCompare(b.date || b.createdAt, a.date || a.createdAt));
+        setCashbook(list);
+      }, err => console.error('Firestore onSnapshot error (cashbook):', err)));
+
+      unsubs.push(onSnapshot(doc(db, 'settings', 'factory'), snap => {
+        if (snap.exists()) {
+          setSettings({ ...defaultFactorySettings, ...snap.data() } as FactorySettings);
+        }
+      }, err => console.error('Firestore onSnapshot error (settings):', err)));
     } catch (e) {
       console.warn('Firestore onSnapshot setup notice:', e);
     }
@@ -1316,7 +1227,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }>();
 
     cuttingEntries.forEach(e => {
-      if (e.isDeleted || deletedCuttingIdsRef.current.has(e.id)) return;
+      if (e.isDeleted || deletedCuttingIdsRef.current.has(e.id) || deletedOrderIdsRef.current.has(e.orderId || '')) return;
       if (e.type !== 'RECEIVE') return;
       const qty = Math.abs(Number(e.pairs ?? e.totalQty ?? 0));
       const article = (e.articleTitle || e.article || '').trim();
@@ -1337,7 +1248,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
 
     cuttingTransactions.forEach(tx => {
-      if (tx.isDeleted || deletedCuttingIdsRef.current.has(tx.id) || candidatesMap.has(tx.id)) return;
+      if (tx.isDeleted || deletedCuttingIdsRef.current.has(tx.id) || deletedOrderIdsRef.current.has(tx.orderId || '') || candidatesMap.has(tx.id)) return;
       if (tx.type !== 'RECEIVE') return;
       const qty = Math.abs(Number(tx.qty ?? tx.totalQty ?? 0));
       const article = (tx.articleTitle || tx.article || '').trim();
@@ -1497,8 +1408,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     const next = [newParty, ...parties];
     setParties(next);
-    saveLocal(STORAGE_KEYS.PARTIES, next);
-    syncFirestoreDoc('parties', id, newParty);
+    void syncFirestoreDoc('parties', id, newParty);
     showToast(`Party "${data.name}" added successfully`);
     return newParty;
   };
@@ -1507,17 +1417,127 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const now = new Date().toISOString();
     const next = parties.map(p => p.id === id ? { ...p, ...updates, updatedAt: now } : p);
     setParties(next);
-    saveLocal(STORAGE_KEYS.PARTIES, next);
     const updatedDoc = next.find(p => p.id === id);
-    if (updatedDoc) syncFirestoreDoc('parties', id, updatedDoc);
+    if (updatedDoc) void syncFirestoreDoc('parties', id, updatedDoc);
     showToast('Party details updated');
   };
 
-  const deleteParty = (id: string) => {
-    const next = parties.filter(p => p.id !== id);
-    setParties(next);
-    saveLocal(STORAGE_KEYS.PARTIES, next);
-    showToast('Party deleted', 'info');
+  const deleteParty = async (id: string): Promise<void> => {
+    let targetParty = parties.find(p => p.id === id);
+    if (!targetParty && db) {
+      try {
+        const snap = await getDoc(doc(db, 'parties', id));
+        if (snap.exists()) {
+          targetParty = { ...snap.data(), id: snap.id } as Party;
+        }
+      } catch {
+        // ignore lookup fallback error
+      }
+    }
+    const targetNameNorm = (targetParty?.name || '').trim().toLowerCase();
+
+    try {
+      // 1. Cascade delete all Customer Orders belonging to this party first
+      const matchingOrders = orders.filter(
+        o => o.customerId === id || (targetNameNorm && (o.customerName || '').trim().toLowerCase() === targetNameNorm)
+      );
+      for (const ord of matchingOrders) {
+        await deleteCustomerOrder(ord.id);
+      }
+
+      const deletedPtxIds = new Set<string>();
+      const deletedInvIds = new Set<string>();
+      const deletedPurIds = new Set<string>();
+      const deletedCompIds = new Set<string>();
+      const deletedCbIds = new Set<string>();
+
+      if (db) {
+        const [ptxSnap, invSnap, purSnap, compSnap, cbSnap, ordSnap] = await Promise.all([
+          getDocs(collection(db, 'party_transactions')),
+          getDocs(collection(db, 'sales_invoices')),
+          getDocs(collection(db, 'purchases')),
+          getDocs(collection(db, 'order_companies')),
+          getDocs(collection(db, 'cashbook')),
+          getDocs(collection(db, 'customer_orders'))
+        ]);
+
+        // Catch any extra Firestore orders matching this party not in local state
+        for (const oDoc of ordSnap.docs) {
+          const data = oDoc.data();
+          const nameNorm = String(data.customerName || '').trim().toLowerCase();
+          if (data.customerId === id || (targetNameNorm && nameNorm === targetNameNorm)) {
+            if (!deletedOrderIdsRef.current.has(oDoc.id)) {
+              await deleteCustomerOrder(oDoc.id);
+            }
+          }
+        }
+
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        ops.push(b => b.delete(doc(db!, 'parties', id)));
+
+        ptxSnap.docs.forEach(d => {
+          const data = d.data();
+          const pNameNorm = String(data.partyName || '').trim().toLowerCase();
+          if (data.partyId === id || (targetNameNorm && pNameNorm === targetNameNorm)) {
+            deletedPtxIds.add(d.id);
+            ops.push(b => b.delete(doc(db!, 'party_transactions', d.id)));
+          }
+        });
+
+        invSnap.docs.forEach(d => {
+          const data = d.data();
+          const cNameNorm = String(data.customerName || '').trim().toLowerCase();
+          if (data.customerId === id || (targetNameNorm && cNameNorm === targetNameNorm)) {
+            deletedInvIds.add(d.id);
+            ops.push(b => b.delete(doc(db!, 'sales_invoices', d.id)));
+          }
+        });
+
+        purSnap.docs.forEach(d => {
+          const data = d.data();
+          const sNameNorm = String(data.supplierName || '').trim().toLowerCase();
+          if (data.supplierId === id || (targetNameNorm && sNameNorm === targetNameNorm)) {
+            deletedPurIds.add(d.id);
+            ops.push(b => b.delete(doc(db!, 'purchases', d.id)));
+          }
+        });
+
+        compSnap.docs.forEach(d => {
+          const data = d.data();
+          const compNorm = String(data.normalizedName || data.name || '').trim().toLowerCase();
+          if ((targetNameNorm && compNorm === targetNameNorm) || (targetNameNorm && d.id === `comp-${targetNameNorm}`)) {
+            deletedCompIds.add(d.id);
+            ops.push(b => b.delete(doc(db!, 'order_companies', d.id)));
+          }
+        });
+
+        cbSnap.docs.forEach(d => {
+          const refId = String(d.data()?.referenceId || '');
+          if (refId && (deletedInvIds.has(refId) || deletedPurIds.has(refId) || deletedPtxIds.has(refId))) {
+            deletedCbIds.add(d.id);
+            ops.push(b => b.delete(doc(db!, 'cashbook', d.id)));
+          }
+        });
+
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
+      }
+
+      setParties(prev => prev.filter(p => p.id !== id));
+      setPartyTransactions(prev => prev.filter(t => !deletedPtxIds.has(t.id) && t.partyId !== id));
+      setInvoices(prev => prev.filter(inv => !deletedInvIds.has(inv.id) && inv.customerId !== id));
+      setPurchases(prev => prev.filter(pur => !deletedPurIds.has(pur.id) && pur.supplierId !== id));
+      setOrderCompanies(prev => prev.filter(c => !deletedCompIds.has(c.id) && (!targetNameNorm || (c.normalizedName || c.name || '').trim().toLowerCase() !== targetNameNorm)));
+      setCashbook(prev => prev.filter(cb => !deletedCbIds.has(cb.id) && !deletedInvIds.has(cb.referenceId || '') && !deletedPurIds.has(cb.referenceId || '')));
+      showToast('Party and all linked records deleted permanently', 'info');
+    } catch (err) {
+      console.error('Error deleting party from Firestore:', err);
+      showToast('Failed to delete party permanently. Please check your connection.', 'error');
+      throw err;
+    }
   };
 
   // --- Staff CRUD ---
@@ -1531,8 +1551,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     const next = [newStaff, ...staff];
     setStaff(next);
-    saveLocal(STORAGE_KEYS.STAFF, next);
-    syncFirestoreDoc('staff', id, newStaff);
+    void syncFirestoreDoc('staff', id, newStaff);
     showToast(`Staff member "${data.name}" registered successfully`);
     return newStaff;
   };
@@ -1540,17 +1559,41 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateStaff = (id: string, updates: Partial<Staff>) => {
     const next = staff.map(s => s.id === id ? { ...s, ...updates, updatedAt: new Date().toISOString() } : s);
     setStaff(next);
-    saveLocal(STORAGE_KEYS.STAFF, next);
     const updated = next.find(s => s.id === id);
-    if (updated) syncFirestoreDoc('staff', id, updated);
+    if (updated) void syncFirestoreDoc('staff', id, updated);
     showToast('Staff details updated');
   };
 
-  const deleteStaff = (id: string) => {
-    const next = staff.filter(s => s.id !== id);
-    setStaff(next);
-    saveLocal(STORAGE_KEYS.STAFF, next);
-    showToast('Staff member removed', 'info');
+  const deleteStaff = async (id: string): Promise<void> => {
+    try {
+      if (db) {
+        const [slSnap, attSnap] = await Promise.all([
+          getDocs(collection(db, 'staff_ledger')),
+          getDocs(collection(db, 'attendance'))
+        ]);
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        ops.push(b => b.delete(doc(db!, 'staff', id)));
+        slSnap.docs.forEach(d => {
+          if (d.data()?.staffId === id) ops.push(b => b.delete(doc(db!, 'staff_ledger', d.id)));
+        });
+        attSnap.docs.forEach(d => {
+          if (d.data()?.staffId === id) ops.push(b => b.delete(doc(db!, 'attendance', d.id)));
+        });
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
+      }
+      setStaff(prev => prev.filter(s => s.id !== id));
+      setStaffLedger(prev => prev.filter(sl => sl.staffId !== id));
+      setAttendance(prev => prev.filter(a => a.staffId !== id));
+      showToast('Staff member deleted permanently', 'info');
+    } catch (err) {
+      console.error('Error deleting staff from Firestore:', err);
+      showToast('Failed to delete staff member. Please check your connection.', 'error');
+      throw err;
+    }
   };
 
   const payStaffWage = (staffId: string, amount: number, paymentMode: 'cash' | 'bank', note?: string) => {
@@ -1558,14 +1601,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!st || amount <= 0) return;
 
     const now = new Date().toISOString();
-    // Reduce worker balance
-    const updatedStaff = staff.map(s => s.id === staffId ? { ...s, currentBalance: Math.max(0, s.currentBalance - amount) } : s);
-    setStaff(updatedStaff);
-    saveLocal(STORAGE_KEYS.STAFF, updatedStaff);
+    const updatedWorker = { ...st, currentBalance: Math.max(0, st.currentBalance - amount), updatedAt: now };
+    setStaff(prev => prev.map(s => s.id === staffId ? updatedWorker : s));
+    void syncFirestoreDoc('staff', staffId, updatedWorker);
 
-    // Ledger entry
+    const ledgerId = 'sl-' + Date.now();
     const ledgerEntry: StaffLedgerEntry = {
-      id: 'sl-' + Date.now(),
+      id: ledgerId,
       staffId,
       staffName: st.name,
       type: 'debit',
@@ -1574,24 +1616,23 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       description: note || `Wage payment to ${st.name}`,
       createdAt: now
     };
-    const nextStaffLedger = [ledgerEntry, ...staffLedger];
-    setStaffLedger(nextStaffLedger);
-    saveLocal(STORAGE_KEYS.STAFF_LEDGER, nextStaffLedger);
+    setStaffLedger(prev => [ledgerEntry, ...prev]);
+    void syncFirestoreDoc('staff_ledger', ledgerId, ledgerEntry);
 
-    // Cashbook outflow
+    const cbId = 'cb-' + Date.now();
     const cbEntry: CashbookEntry = {
-      id: 'cb-' + Date.now(),
+      id: cbId,
       type: 'out',
       amount,
       date: now.split('T')[0],
       category: 'Staff Wages',
       paymentMode,
       description: `Wages paid to ${st.name} (${st.role})`,
+      referenceId: ledgerId,
       createdAt: now
     };
-    const nextCb = [cbEntry, ...cashbook];
-    setCashbook(nextCb);
-    saveLocal(STORAGE_KEYS.CASHBOOK, nextCb);
+    setCashbook(prev => [cbEntry, ...prev]);
+    void syncFirestoreDoc('cashbook', cbId, cbEntry);
 
     showToast(`Paid ${settings.currency} ${amount} to ${st.name}`);
   };
@@ -1605,10 +1646,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       currentStock: 0, // Starts at 0 until cutting received / stock ledger
       createdAt: new Date().toISOString()
     };
-    const next = [newProduct, ...products];
-    setProducts(next);
-    saveLocal(STORAGE_KEYS.PRODUCTS, next);
-    syncFirestoreDoc('products', id, newProduct);
+    setProducts(prev => [newProduct, ...prev]);
+    void syncFirestoreDoc('products', id, newProduct);
     showToast(`Glove item "${data.gloveName}" created successfully`);
     return newProduct;
   };
@@ -1616,9 +1655,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateProduct = (id: string, updates: Partial<Product>) => {
     const next = products.map(p => p.id === id ? { ...p, ...updates, updatedAt: new Date().toISOString() } : p);
     setProducts(next);
-    saveLocal(STORAGE_KEYS.PRODUCTS, next);
     const updated = next.find(p => p.id === id);
-    if (updated) syncFirestoreDoc('products', id, updated);
+    if (updated) void syncFirestoreDoc('products', id, updated);
     showToast('Product updated successfully');
   };
 
@@ -1641,11 +1679,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           console.error('Error adding to deleted_products in Firestore:', err);
         }
       }
+      const nextSet = new Set(deletedProductNamesRef.current);
+      nextSet.add(norm);
+      deletedProductNamesRef.current = nextSet;
       setDeletedProductsList(prev => {
         if (prev.some(d => d.name === norm)) return prev;
-        const updated = [blockItem, ...prev];
-        saveLocal('gferp_deleted_products_v1', updated);
-        return updated;
+        return [blockItem, ...prev];
       });
     }
 
@@ -1658,20 +1697,16 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (norm) {
         try {
           const snapProds = await getDocs(collection(db, 'products'));
-          snapProds.docs.forEach(d => {
-            const data = d.data();
-            if (String(data.gloveName || '').trim().toLowerCase() === norm) {
-              void deleteDoc(doc(db, 'products', d.id));
-            }
-          });
+          await Promise.all(
+            snapProds.docs
+              .filter(d => String(d.data().gloveName || '').trim().toLowerCase() === norm)
+              .map(d => deleteDoc(doc(db!, 'products', d.id)))
+          );
         } catch (e) { /* ignore */ }
       }
     }
 
-    const next = products.filter(p => p.id !== id && (p.gloveName || '').trim().toLowerCase() !== norm);
-    setProducts(next);
-    saveLocal(STORAGE_KEYS.PRODUCTS, next);
-
+    setProducts(prev => prev.filter(p => p.id !== id && (p.gloveName || '').trim().toLowerCase() !== norm));
     showToast(`Product "${prodName || 'Item'}" deleted permanently.`, 'info');
   };
 
@@ -1683,9 +1718,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       currentStock: 0,
       createdAt: now
     }));
-    const next = [...created, ...products];
-    setProducts(next);
-    saveLocal(STORAGE_KEYS.PRODUCTS, next);
+    created.forEach(prod => void syncFirestoreDoc('products', prod.id, prod));
+    setProducts(prev => [...created, ...prev]);
     showToast('Factory standard glove templates loaded');
   };
 
@@ -1780,16 +1814,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // Save permanently to Firestore collection "customer_orders"
     if (db) {
       try {
-        await setDoc(doc(db, 'customer_orders', id), newOrder);
+        await setDoc(doc(db, 'customer_orders', id), stripUndefined(newOrder));
       } catch (e) {
         console.error('Error writing customer order to Firestore:', e);
       }
     }
 
     // Local optimistic update
-    const nextOrders = [newOrder, ...orders.filter(o => o.id !== id)];
-    setOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
+    setOrders(prev => [newOrder, ...prev.filter(o => o.id !== id)]);
 
     showToast('Order Saved Successfully');
     return newOrder;
@@ -1897,15 +1929,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     if (db) {
       try {
-        await updateDoc(doc(db, 'customer_orders', orderId), updates);
+        await updateDoc(doc(db, 'customer_orders', orderId), stripUndefined(updates));
       } catch (e) {
         console.error('Error updating customer order in Firestore:', e);
       }
     }
 
-    const nextOrders = orders.map(o => o.id === orderId ? { ...o, ...updates } : o);
-    setOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
+    setOrders(prev => prev.map(o => o.id === orderId ? { ...o, ...updates } : o));
 
     const sizeLabels = updatedItems.flatMap(i => (i.customSizes || []).map(cs => cs.size).filter(Boolean));
     const sizeText = sizeLabels.length > 0 ? sizeLabels.join(', ') : (updatedItems[0]?.size || '');
@@ -1915,9 +1945,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const updateOrderStatus = (orderId: string, status: CustomerOrder['status']) => {
     const next = orders.map(o => o.id === orderId ? { ...o, status, updatedAt: new Date().toISOString() } : o);
     setOrders(next);
-    saveLocal(STORAGE_KEYS.ORDERS, next);
     const updated = next.find(o => o.id === orderId);
-    if (updated) syncFirestoreDoc('customer_orders', orderId, updated);
+    if (updated) void syncFirestoreDoc('customer_orders', orderId, updated);
   };
 
   const deleteCustomerOrder = async (orderId: string): Promise<void> => {
@@ -1943,6 +1972,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const invoiceIdsToDelete = new Set<string>();
     const stockLedgerIdsToDelete = new Set<string>();
     const legacyCuttingIdsToDelete = new Set<string>();
+    const partyTxIdsToDelete = new Set<string>();
+    const cashbookIdsToDelete = new Set<string>();
+    const partyBalanceAdjustments = new Map<string, number>();
 
     // Gather matching IDs from local state first
     cuttingEntries.filter(matchesOrder).forEach(e => cuttingIdsToDelete.add(e.id));
@@ -1977,7 +2009,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           invoicesSnap,
           articleStockSnap,
           stockMgmtSnap,
-          orderHistSubSnap
+          orderHistSubSnap,
+          partyTxSnap,
+          cashbookSnap
         ] = await Promise.all([
           getDocs(collection(db, 'cuttingEntries')),
           getDocs(collection(db, 'cutting_transactions')),
@@ -1991,7 +2025,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           getDocs(collection(db, 'sales_invoices')),
           getDocs(collection(db, 'article_stock')),
           getDocs(collection(db, 'stock_management')),
-          getDocs(collection(db, 'customer_orders', orderId, 'order_history'))
+          getDocs(collection(db, 'customer_orders', orderId, 'order_history')),
+          getDocs(collection(db, 'party_transactions')),
+          getDocs(collection(db, 'cashbook'))
         ]);
 
         entriesSnap.docs.forEach(d => { if (matchesOrder(d.data())) cuttingIdsToDelete.add(d.id); });
@@ -2024,7 +2060,17 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             khataIdsToDelete.add(d.id);
           }
         });
-        invoicesSnap.docs.forEach(d => { if (matchesOrder(d.data())) invoiceIdsToDelete.add(d.id); });
+        invoicesSnap.docs.forEach(d => {
+          const data = d.data();
+          if (matchesOrder(data)) {
+            invoiceIdsToDelete.add(d.id);
+            const cId = String(data.customerId || '');
+            const rem = Number(data.remaining) || 0;
+            if (cId && rem > 0) {
+              partyBalanceAdjustments.set(cId, (partyBalanceAdjustments.get(cId) || 0) + rem);
+            }
+          }
+        });
         stockLedgerSnap.docs.forEach(d => {
           const data = d.data();
           const refId = String(data.referenceId || '');
@@ -2034,6 +2080,18 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             cuttingIdsToDelete.has(d.id.replace(/^stk-/, ''))
           ) {
             stockLedgerIdsToDelete.add(d.id);
+          }
+        });
+        partyTxSnap.docs.forEach(d => {
+          const refId = String(d.data()?.referenceId || '');
+          if (refId && (invoiceIdsToDelete.has(refId) || cuttingIdsToDelete.has(refId) || legacyCuttingIdsToDelete.has(refId))) {
+            partyTxIdsToDelete.add(d.id);
+          }
+        });
+        cashbookSnap.docs.forEach(d => {
+          const refId = String(d.data()?.referenceId || '');
+          if (refId && (invoiceIdsToDelete.has(refId) || deliveryIdsToDelete.has(refId))) {
+            cashbookIdsToDelete.add(d.id);
           }
         });
 
@@ -2072,9 +2130,26 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         stockLedgerIdsToDelete.forEach(slId => {
           ops.push(b => b.delete(doc(db!, 'stock_ledger', slId)));
         });
+        partyTxIdsToDelete.forEach(ptId => {
+          ops.push(b => b.delete(doc(db!, 'party_transactions', ptId)));
+        });
+        cashbookIdsToDelete.forEach(cbId => {
+          ops.push(b => b.delete(doc(db!, 'cashbook', cbId)));
+        });
         orderHistSubSnap.docs.forEach(subDoc => {
           ops.push(b => b.delete(doc(db!, 'customer_orders', orderId, 'order_history', subDoc.id)));
         });
+
+        for (const [pId, deductAmt] of partyBalanceAdjustments.entries()) {
+          const pSnap = await getDoc(doc(db, 'parties', pId));
+          if (pSnap.exists()) {
+            const cur = Number(pSnap.data()?.currentBalance) || 0;
+            ops.push(b => b.update(doc(db!, 'parties', pId), {
+              currentBalance: cur - deductAmt,
+              updatedAt: new Date().toISOString()
+            }));
+          }
+        }
 
         // Clean matching entries from article_stock
         articleStockSnap.docs.forEach(aDoc => {
@@ -2207,55 +2282,32 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ]);
     }
 
-    // Update all React state & localStorage immediately so UI updates without refresh
-    const nextOrders = orders.filter(o => o.id !== orderId);
-    setOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
-
-    const nextCuttingEntries = cuttingEntries.filter(e => !matchesOrder(e) && !cuttingIdsToDelete.has(e.id));
-    setCuttingEntries(nextCuttingEntries);
-
-    const nextCuttingTxs = cuttingTransactions.filter(t => !matchesOrder(t) && !cuttingIdsToDelete.has(t.id));
-    setCuttingTransactions(nextCuttingTxs);
-    saveLocal(STORAGE_KEYS.CUTTING_TXS, nextCuttingTxs);
-
-    const nextCuttings = cuttings.filter(c => !matchesOrder(c) && !legacyCuttingIdsToDelete.has(c.id));
-    setCuttings(nextCuttings);
-    saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
-
-    const nextDeliveries = deliveryHistory.filter(d => !matchesOrder(d) && !deliveryIdsToDelete.has(d.id));
-    setDeliveryHistory(nextDeliveries);
-    saveLocal(STORAGE_KEYS.STOCK_OUT, nextDeliveries);
-
-    const nextDispatchHistory = orderDispatchHistory.filter(h => !matchesOrder(h) && !dispatchHistoryIdsToDelete.has(h.id));
-    setOrderDispatchHistory(nextDispatchHistory);
-    saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextDispatchHistory);
-
-    const nextStitchOrders = stitchingOrders.filter(so => !matchesOrder(so) && !stitchingOrderIdsToDelete.has(so.id));
-    setStitchingOrders(nextStitchOrders);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextStitchOrders);
-
-    const nextStitchHist = stitchingHistory.filter(h => !matchesOrder(h) && !stitchingHistoryIdsToDelete.has(h.id));
-    setStitchingHistory(nextStitchHist);
-    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextStitchHist);
-
-    const nextKhata = stitcherKhataTransactions.filter(k => !matchesOrder(k) && !khataIdsToDelete.has(k.id));
-    setStitcherKhataTransactions(nextKhata);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextKhata);
-
-    const nextInvoices = invoices.filter(inv => !matchesOrder(inv) && !invoiceIdsToDelete.has(inv.id));
-    setInvoices(nextInvoices);
-    saveLocal(STORAGE_KEYS.INVOICES, nextInvoices);
-
-    const nextStockLedger = stockLedger.filter(sl =>
+    // Update all React state immediately so UI updates without refresh
+    setOrders(prev => prev.filter(o => o.id !== orderId));
+    setCuttingEntries(prev => prev.filter(e => !matchesOrder(e) && !cuttingIdsToDelete.has(e.id)));
+    setCuttingTransactions(prev => prev.filter(t => !matchesOrder(t) && !cuttingIdsToDelete.has(t.id)));
+    setCuttings(prev => prev.filter(c => !matchesOrder(c) && !legacyCuttingIdsToDelete.has(c.id)));
+    setDeliveryHistory(prev => prev.filter(d => !matchesOrder(d) && !deliveryIdsToDelete.has(d.id)));
+    setOrderDispatchHistory(prev => prev.filter(h => !matchesOrder(h) && !dispatchHistoryIdsToDelete.has(h.id)));
+    setStitchingOrders(prev => prev.filter(so => !matchesOrder(so) && !stitchingOrderIdsToDelete.has(so.id)));
+    setStitchingHistory(prev => prev.filter(h => !matchesOrder(h) && !stitchingHistoryIdsToDelete.has(h.id)));
+    setStitcherKhataTransactions(prev => prev.filter(k => !matchesOrder(k) && !khataIdsToDelete.has(k.id)));
+    setInvoices(prev => prev.filter(inv => !matchesOrder(inv) && !invoiceIdsToDelete.has(inv.id)));
+    setPartyTransactions(prev => prev.filter(pt => !partyTxIdsToDelete.has(pt.id) && !invoiceIdsToDelete.has(pt.referenceId || '') && !cuttingIdsToDelete.has(pt.referenceId || '')));
+    setCashbook(prev => prev.filter(cb => !cashbookIdsToDelete.has(cb.id) && !invoiceIdsToDelete.has(cb.referenceId || '') && !deliveryIdsToDelete.has(cb.referenceId || '')));
+    if (partyBalanceAdjustments.size > 0) {
+      setParties(prev => prev.map(p => {
+        const deduct = partyBalanceAdjustments.get(p.id);
+        return deduct ? { ...p, currentBalance: p.currentBalance - deduct } : p;
+      }));
+    }
+    setStockLedger(prev => prev.filter(sl =>
       !matchesOrder(sl) &&
       !stockLedgerIdsToDelete.has(sl.id) &&
       !cuttingIdsToDelete.has(sl.referenceId || '') &&
       !deliveryIdsToDelete.has(sl.referenceId || '') &&
       !invoiceIdsToDelete.has(sl.referenceId || '')
-    );
-    setStockLedger(nextStockLedger);
-    saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextStockLedger);
+    ));
 
     setArticleStock(prev => prev.map(a => {
       const nextCut = (a.cuttingHistory || []).filter(h => !matchesOrder(h) && !cuttingIdsToDelete.has(h.receiveId || ''));
@@ -2283,7 +2335,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const totalCuttingRemoved = cuttingIdsToDelete.size + legacyCuttingIdsToDelete.size;
     const totalStockOutRemoved = deliveryIdsToDelete.size + dispatchHistoryIdsToDelete.size;
-    console.log(`Deleted Order ID: ${orderId}, Deleted related: Cutting: ${totalCuttingRemoved}, Stock Out: ${totalStockOutRemoved}`);
 
     if (selectedOrderId === orderId) setSelectedOrderId(null);
     showToast(`Order & all related records deleted (Cutting: ${totalCuttingRemoved}, Stock Out: ${totalStockOutRemoved})`, 'info');
@@ -2320,9 +2371,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       throw new Error('Firestore is not available. The cutter was not saved.');
     }
 
-    const next = [...cutters, newCutter];
-    setCutters(next);
-    saveLocal(STORAGE_KEYS.CUTTERS, next);
+    setCutters(prev => [...prev, newCutter]);
     showToast(`Cutter "${newCutter.name}" added successfully`);
     return newCutter;
   };
@@ -2360,27 +2409,44 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const deleteCutter = async (id: string, deleteLedgerData = false): Promise<void> => {
     if (!db) throw new Error('Firestore is not available. The cutter was not deleted.');
+    const targetCutter = cutters.find(c => c.id === id);
     if (deleteLedgerData) {
-      const [entrySnap, transactionSnap] = await Promise.all([
+      const [entrySnap, transactionSnap, cuttingsSnap, nasimPaySnap] = await Promise.all([
         getDocs(collection(db, 'cuttingEntries')),
-        getDocs(collection(db, 'cutting_transactions'))
+        getDocs(collection(db, 'cutting_transactions')),
+        getDocs(collection(db, 'cuttings')),
+        getDocs(collection(db, 'nasim_ledger_payments'))
       ]);
       const entryIds = entrySnap.docs.filter(item => item.data().cutterId === id).map(item => item.id);
       const transactionIds = transactionSnap.docs.filter(item => item.data().cutterId === id).map(item => item.id);
-      await Promise.all([
-        ...entryIds.map(entryId => deleteDoc(doc(db, 'cuttingEntries', entryId))),
-        ...transactionIds.map(transactionId => deleteDoc(doc(db, 'cutting_transactions', transactionId)))
-      ]);
+      const legacyCuttingIds = cuttingsSnap.docs.filter(item => item.data().personId === id).map(item => item.id);
+      const allIds = [...entryIds, ...transactionIds, ...legacyCuttingIds];
+      await markCuttingIdsDeleted(allIds);
+
+      const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+      entryIds.forEach(entryId => ops.push(b => b.delete(doc(db!, 'cuttingEntries', entryId))));
+      transactionIds.forEach(txId => ops.push(b => b.delete(doc(db!, 'cutting_transactions', txId))));
+      legacyCuttingIds.forEach(cId => ops.push(b => b.delete(doc(db!, 'cuttings', cId))));
+
+      if (id === 'cutter-nasim' || (targetCutter?.name || '').trim().toLowerCase().includes('nasim')) {
+        nasimPaySnap.docs.forEach(d => ops.push(b => b.delete(doc(db!, 'nasim_ledger_payments', d.id))));
+      }
+      ops.push(b => b.delete(doc(db!, 'cutters', id)));
+      for (let i = 0; i < ops.length; i += 450) {
+        const batch = writeBatch(db);
+        ops.slice(i, i + 450).forEach(fn => fn(batch));
+        await batch.commit();
+      }
+    } else {
+      await deleteDoc(doc(db, 'cutters', id));
     }
-    await deleteDoc(doc(db, 'cutters', id));
-    const next = cutters.filter(c => c.id !== id);
-    setCutters(next);
-    saveLocal(STORAGE_KEYS.CUTTERS, next);
+    setCutters(previous => previous.filter(c => c.id !== id));
     if (deleteLedgerData) {
       setCuttingEntries(previous => previous.filter(entry => entry.cutterId !== id));
       setCuttingTransactions(previous => previous.filter(tx => tx.cutterId !== id));
+      setCuttings(previous => previous.filter(c => c.personId !== id));
     }
-    showToast('Cutter ledger deleted successfully.', 'info');
+    showToast('Cutter ledger deleted permanently.', 'info');
   };
 
   const saveCuttingTransaction = async (data: {
@@ -2786,7 +2852,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    // Immediate Local state & localStorage updates (no manual refresh required)
+    // Immediate Local state updates (no manual refresh required)
     const nextCutters = cutters.map(c => c.id === data.cutterId ? {
       ...c,
       totalGiven: newGiven,
@@ -2796,11 +2862,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       updatedAt: now
     } : c);
     setCutters(nextCutters);
-    saveLocal(STORAGE_KEYS.CUTTERS, nextCutters);
 
     const nextTxs = [txDoc, ...cuttingTransactions];
     setCuttingTransactions(nextTxs);
-    saveLocal(STORAGE_KEYS.CUTTING_TXS, nextTxs);
     setCuttingEntries([...balancedEntries].sort((a, b) => safeStringCompare(b.date, a.date)));
 
     if (data.type === 'RECEIVE') {
@@ -2876,7 +2940,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           notes: `Cutting received from ${data.cutterName}${data.billNo ? ` (Bill #${data.billNo})` : ''}`,
           createdAt: now
         }, ...prev];
-        saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextLedger);
         return nextLedger;
       });
     }
@@ -2904,7 +2967,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           notes: data.notes || '',
           createdAt: now
         }, ...prev];
-        saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
         return nextCuttings;
       });
 
@@ -2922,7 +2984,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           notes: data.notes || '',
           createdAt: now
         }, ...prev];
-        saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextHist);
         return nextHist;
       });
 
@@ -2938,7 +2999,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return ord;
       });
       setOrders(nextOrders);
-      saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
     }
 
     showToast('Cutting entry saved successfully.');
@@ -3211,16 +3271,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ...previous.filter(entry => entry.cutterId !== current.cutterId),
       ...balancedEntries
     ].sort((a, b) => safeStringCompare(b.date, a.date)));
-    setCutters(previous => {
-      const next = previous.map(cutter => cutter.id === current.cutterId ? {
-        ...cutter,
-        totalGiven,
-        totalReceived,
-        pendingBalance: Math.max(0, totalGiven - totalReceived)
-      } : cutter);
-      saveLocal(STORAGE_KEYS.CUTTERS, next);
-      return next;
-    });
+    setCutters(previous => previous.map(cutter => cutter.id === current.cutterId ? {
+      ...cutter,
+      totalGiven,
+      totalReceived,
+      pendingBalance: Math.max(0, totalGiven - totalReceived)
+    } : cutter));
   };
 
   const updateCuttingEntry = async (
@@ -3577,7 +3633,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     });
 
-    // Persist deleted IDs blocklist immediately in Firestore + localStorage
+    // Persist deleted IDs blocklist immediately in Firestore
     await markCuttingIdsDeleted(allIdsToDelete);
 
     const articleName = (current?.articleTitle || current?.article || '').trim();
@@ -3766,34 +3822,18 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     await batch.commit();
 
-    // 5. Immediately update ALL React states AND localStorage caches so Ctrl+R never resurrects deleted rows
+    // 5. Immediately update ALL React states so deleted rows never reappear
     setCuttingEntries(prev => prev.filter(e => !allIdsToDelete.has(e.id)));
-    setCuttingTransactions(prev => {
-      const next = prev.filter(t => !allIdsToDelete.has(t.id));
-      saveLocal(STORAGE_KEYS.CUTTING_TXS, next);
-      return next;
-    });
-    setCuttings(prev => {
-      const next = prev.filter(c => !allIdsToDelete.has(c.id));
-      saveLocal(STORAGE_KEYS.CUTTINGS, next);
-      return next;
-    });
-    setOrderDispatchHistory(prev => {
-      const next = prev.filter(h => !deletedDispatchHistoryIds.has(h.id) && !allIdsToDelete.has((h as any).cuttingId || ''));
-      saveLocal(STORAGE_KEYS.ORDER_HISTORY, next);
-      return next;
-    });
+    setCuttingTransactions(prev => prev.filter(t => !allIdsToDelete.has(t.id)));
+    setCuttings(prev => prev.filter(c => !allIdsToDelete.has(c.id)));
+    setOrderDispatchHistory(prev => prev.filter(h => !deletedDispatchHistoryIds.has(h.id) && !allIdsToDelete.has((h as any).cuttingId || '')));
     if (entryType === 'RECEIVE') {
-      setStockLedger(prev => {
-        const next = prev.filter(l =>
-          !deletedLedgerIds.has(l.id) &&
-          !allIdsToDelete.has(l.id) &&
-          !allIdsToDelete.has(l.id.replace(/^stk-/, '')) &&
-          !allIdsToDelete.has(l.referenceId || '')
-        );
-        saveLocal(STORAGE_KEYS.STOCK_LEDGER, next);
-        return next;
-      });
+      setStockLedger(prev => prev.filter(l =>
+        !deletedLedgerIds.has(l.id) &&
+        !allIdsToDelete.has(l.id) &&
+        !allIdsToDelete.has(l.id.replace(/^stk-/, '')) &&
+        !allIdsToDelete.has(l.referenceId || '')
+      ));
       setStockManagement(prev =>
         prev
           .filter(s => !removedStockIds.has(s.id))
@@ -3804,40 +3844,32 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       );
     }
     if (orderIdToClean) {
-      setOrders(prev => {
-        const next = prev.map(ord => {
-          if (ord.id !== orderIdToClean) return ord;
-          const updatedItems = ord.items.map(itm => {
-            if (
-              (itm.title || '').toLowerCase() === articleName.toLowerCase() ||
-              (itm.gloveType || '').toLowerCase() === articleName.toLowerCase() ||
-              (itm.article || '').toLowerCase() === articleName.toLowerCase()
-            ) {
-              return {
-                ...itm,
-                cuttingGivenQty: entryType === 'GIVE' ? Math.max(0, (Number(itm.cuttingGivenQty) || 0) - pairs) : (Number(itm.cuttingGivenQty) || 0),
-                stockReceivedQty: entryType === 'RECEIVE' ? Math.max(0, (Number(itm.stockReceivedQty) || 0) - pairs) : (Number(itm.stockReceivedQty) || 0)
-              };
-            }
-            return itm;
-          });
-          return { ...ord, items: updatedItems, updatedAt: now };
+      setOrders(prev => prev.map(ord => {
+        if (ord.id !== orderIdToClean) return ord;
+        const updatedItems = ord.items.map(itm => {
+          if (
+            (itm.title || '').toLowerCase() === articleName.toLowerCase() ||
+            (itm.gloveType || '').toLowerCase() === articleName.toLowerCase() ||
+            (itm.article || '').toLowerCase() === articleName.toLowerCase()
+          ) {
+            return {
+              ...itm,
+              cuttingGivenQty: entryType === 'GIVE' ? Math.max(0, (Number(itm.cuttingGivenQty) || 0) - pairs) : (Number(itm.cuttingGivenQty) || 0),
+              stockReceivedQty: entryType === 'RECEIVE' ? Math.max(0, (Number(itm.stockReceivedQty) || 0) - pairs) : (Number(itm.stockReceivedQty) || 0)
+            };
+          }
+          return itm;
         });
-        saveLocal(STORAGE_KEYS.ORDERS, next);
-        return next;
-      });
+        return { ...ord, items: updatedItems, updatedAt: now };
+      }));
     }
     if (targetCutterId) {
-      setCutters(prev => {
-        const next = prev.map(c => c.id === targetCutterId ? {
-          ...c,
-          totalGiven,
-          totalReceived,
-          pendingBalance: Math.max(0, totalGiven - totalReceived)
-        } : c);
-        saveLocal(STORAGE_KEYS.CUTTERS, next);
-        return next;
-      });
+      setCutters(prev => prev.map(c => c.id === targetCutterId ? {
+        ...c,
+        totalGiven,
+        totalReceived,
+        pendingBalance: Math.max(0, totalGiven - totalReceived)
+      } : c));
     }
   };
 
@@ -4012,11 +4044,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (db) {
       void deleteDoc(doc(db, 'deleted_products', norm)).catch(() => {});
     }
-    setDeletedProductsList(prev => {
-      const next = prev.filter(d => d.name !== norm);
-      saveLocal('gferp_deleted_products_v1', next);
-      return next;
-    });
+    setDeletedProductsList(prev => prev.filter(d => d.name !== norm));
 
     const createdAt = new Date().toISOString();
     const articleRef = await addDoc(collection(db, 'articles_master'), { articleName, sizes, createdAt });
@@ -4235,7 +4263,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const nextDeliveries = [delivery, ...deliveryHistory.filter(d => d.id !== delivery.id)];
     setDeliveryHistory(nextDeliveries);
-    saveLocal(STORAGE_KEYS.STOCK_OUT, nextDeliveries);
     setOrderDispatchHistory(prev => [{
       id: dispatchHistoryId,
       orderId: order.id,
@@ -4421,7 +4448,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const nextUpdatedDeliveries = deliveryHistory.map(d => d.id === id ? updatedDelivery : d);
     setDeliveryHistory(nextUpdatedDeliveries);
-    saveLocal(STORAGE_KEYS.STOCK_OUT, nextUpdatedDeliveries);
   };
 
   const deleteStockInEntry = async (id: string): Promise<void> => {
@@ -4455,11 +4481,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     // 3. Update local states
     setCuttingEntries(prev => prev.filter(e => e.id !== id));
-    setCuttingTransactions(prev => {
-      const next = prev.filter(t => t.id !== id);
-      saveLocal(STORAGE_KEYS.CUTTING_TXS, next);
-      return next;
-    });
+    setCuttingTransactions(prev => prev.filter(t => t.id !== id));
     setArticleStock(prev => prev.map(stock => ({
       ...stock,
       cuttingHistory: (stock.cuttingHistory || []).filter((h, i) => h.receiveId !== id && `art-hist-${i}-${h.date}` !== id && (h as any).id !== id)
@@ -4538,9 +4560,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     setDeletedProductsList(prev => {
       if (prev.some(d => d.name === norm)) return prev;
-      const updated = [blockItem, ...prev];
-      saveLocal('gferp_deleted_products_v1', updated);
-      return updated;
+      return [blockItem, ...prev];
     });
 
     // 2. Perform backend deletions across all stock & article collections
@@ -4636,11 +4656,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setLegacyArticleMaster(prev => prev.filter(a => a.articleName.trim().toLowerCase() !== norm));
     setArticleStock(prev => prev.filter(a => (a.articleName || '').trim().toLowerCase() !== norm));
     setStockManagement(prev => prev.filter(s => (s.article || s.articleName || '').trim().toLowerCase() !== norm));
-    setProducts(prev => {
-      const nextProds = prev.filter(p => (p.gloveName || '').trim().toLowerCase() !== norm);
-      saveLocal(STORAGE_KEYS.PRODUCTS, nextProds);
-      return nextProds;
-    });
+    setProducts(prev => prev.filter(p => (p.gloveName || '').trim().toLowerCase() !== norm));
 
     showToast(`${rawTrimmed} deleted permanently.`);
   };
@@ -4658,11 +4674,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     }
 
-    setDeletedProductsList(prev => {
-      const next = prev.filter(d => d.name !== norm);
-      saveLocal('gferp_deleted_products_v1', next);
-      return next;
-    });
+    setDeletedProductsList(prev => prev.filter(d => d.name !== norm));
 
     // Recreate clean entry in articles_master and products with 0 stock
     try {
@@ -4819,12 +4831,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const nextDeliveries = deliveryHistory.filter(d => d.id !== id);
     setDeliveryHistory(nextDeliveries);
-    saveLocal(STORAGE_KEYS.STOCK_OUT, nextDeliveries);
 
     if (dispatchHistoryId) {
       const nextDispatch = orderDispatchHistory.filter(h => h.id !== dispatchHistoryId && h.id !== id);
       setOrderDispatchHistory(nextDispatch);
-      saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextDispatch);
     }
 
     setArticleStock(prev => prev.map(art => {
@@ -4945,13 +4955,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       await markDeliveriesDeleted(allDelIds);
     }
 
-    // Clear all Stock Out keys from localStorage
-    localStorage.removeItem(STORAGE_KEYS.STOCK_OUT);
-    saveLocal(STORAGE_KEYS.STOCK_OUT, []);
     const remainingDispatch = orderDispatchHistory.filter(h => h.actionType !== 'dispatched_to_customer');
-    saveLocal(STORAGE_KEYS.ORDER_HISTORY, remainingDispatch);
     const remainingLedger = stockLedger.filter(s => s.type !== 'sale' && s.type !== 'out' && !allDelIds.has(s.referenceId || ''));
-    saveLocal(STORAGE_KEYS.STOCK_LEDGER, remainingLedger);
 
     setDeliveryHistory([]);
     setOrderDispatchHistory(remainingDispatch);
@@ -5649,7 +5654,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       } else {
         list.push(updated);
       }
-      saveLocal(STORAGE_KEYS.ORDER_COMPANIES, list);
       return list;
     });
 
@@ -5732,7 +5736,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       } else {
         list.push(updated);
       }
-      saveLocal(STORAGE_KEYS.ORDER_COMPANIES, list);
       return list;
     });
 
@@ -5740,44 +5743,37 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const deleteCuttingTransaction = async (id: string): Promise<void> => {
-    if (db) {
-      try {
-        await deleteDoc(doc(db, 'cutting_transactions', id));
-      } catch (e) {
-        console.error('Error deleting cutting transaction:', e);
-      }
-    }
-    const next = cuttingTransactions.filter(t => t.id !== id);
-    setCuttingTransactions(next);
-    saveLocal(STORAGE_KEYS.CUTTING_TXS, next);
+    await deleteCuttingEntry(id);
     showToast('Transaction removed', 'info');
   };
 
   const clearCuttingData = async (): Promise<void> => {
     if (db) {
       try {
-        const cSnap = await getDocs(collection(db, 'cutters'));
-        for (const d of cSnap.docs) {
-          await deleteDoc(doc(db, 'cutters', d.id));
-        }
-        const txSnap = await getDocs(collection(db, 'cutting_transactions'));
-        for (const d of txSnap.docs) {
-          await deleteDoc(doc(db, 'cutting_transactions', d.id));
-        }
-        const entriesSnap = await getDocs(collection(db, 'cuttingEntries'));
-        for (const d of entriesSnap.docs) {
-          await deleteDoc(doc(db, 'cuttingEntries', d.id));
+        const collections = ['cutters', 'cutting_transactions', 'cuttingEntries', 'cutting_return_totals', 'cuttings', 'nasim_ledger_payments'];
+        const snaps = await Promise.all(collections.map(col => getDocs(collection(db!, col))));
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        snaps.forEach((snap, idx) => {
+          const colName = collections[idx];
+          snap.docs.forEach(d => {
+            ops.push(b => b.delete(doc(db!, colName, d.id)));
+          });
+        });
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
         }
       } catch (e) {
         console.error('Error clearing cutting data:', e);
+        throw e;
       }
     }
     setCutters([]);
     setCuttingTransactions([]);
     setCuttingEntries([]);
-    saveLocal(STORAGE_KEYS.CUTTERS, []);
-    saveLocal(STORAGE_KEYS.CUTTING_TXS, []);
-    showToast('All cutting management sample and demo data deleted successfully');
+    setCuttings([]);
+    showToast('All cutting management records permanently deleted');
   };
 
   const addStitcher = async (data: { name: string; phone?: string; city?: string; perPairRate?: number; stitcherType?: Stitcher['stitcherType']; isActive?: boolean }): Promise<Stitcher> => {
@@ -5798,7 +5794,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (db) await setDoc(doc(db, 'stitchers', id), stitcher);
     const next = [stitcher, ...stitchers];
     setStitchers(next);
-    saveLocal(STORAGE_KEYS.STITCHERS, next);
     return stitcher;
   };
 
@@ -5819,12 +5814,10 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (db) await updateDoc(doc(db, 'stitchers', id), updated);
     const next = stitchers.map(item => item.id === id ? updated : item);
     setStitchers(next);
-    saveLocal(STORAGE_KEYS.STITCHERS, next);
     const nextOrders = stitchingOrders.map(order => order.stitcherId === id
       ? { ...order, stitcherName: updated.name, stitcherPhone: updated.phone, updatedAt: updated.updatedAt }
       : order);
     setStitchingOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
   };
 
   const deleteStitcher = async (id: string): Promise<void> => {
@@ -5832,7 +5825,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (db) await deleteDoc(doc(db, 'stitchers', id));
     const next = stitchers.filter(item => item.id !== id);
     setStitchers(next);
-    saveLocal(STORAGE_KEYS.STITCHERS, next);
   };
 
   const createStitchingOrder = async (
@@ -5992,9 +5984,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setStitcherKhataTransactions(nextTransactions);
     const nextHistory = [historyEntry, ...stitchingHistory];
     setStitchingHistory(nextHistory);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextTransactions);
-    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextHistory);
     return stitchingOrder;
   };
 
@@ -6032,8 +6021,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const nextHistory = [historyEntry, ...stitchingHistory];
     setStitchingOrders(next);
     setStitchingHistory(nextHistory);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, next);
-    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextHistory);
   };
 
   const receiveStitchingOrder = async (data: {
@@ -6100,8 +6087,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const nextHistory = [historyEntry, ...stitchingHistory];
     setStitchingOrders(nextOrders);
     setStitchingHistory(nextHistory);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
-    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextHistory);
   };
 
   const updateStitchingHistoryEntry = async (
@@ -6187,9 +6172,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setStitchingHistory(nextHistory);
     setStitchingOrders(nextOrders);
     setStitcherKhataTransactions(updatedTransactions);
-    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextHistory);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, updatedTransactions);
   };
 
   const deleteStitchingHistoryEntry = async (id: string): Promise<void> => {
@@ -6244,9 +6226,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setStitchingHistory(nextHistory);
     setStitchingOrders(nextOrders);
     setStitcherKhataTransactions(nextTransactions);
-    saveLocal(STORAGE_KEYS.STITCHING_HISTORY, nextHistory);
-    saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextTransactions);
   };
 
   const addStitcherKhataPayment = async (data: {
@@ -6300,11 +6279,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     const nextTransactions = [tx, ...stitcherKhataTransactions];
     setStitcherKhataTransactions(nextTransactions);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextTransactions);
     if (updatedOrder) {
       const nextOrders = stitchingOrders.map(item => item.id === updatedOrder.id ? updatedOrder : item);
       setStitchingOrders(nextOrders);
-      saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
     }
     return tx;
   };
@@ -6349,11 +6326,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     const nextTransactions = stitcherKhataTransactions.map(item => item.id === id ? updated : item);
     setStitcherKhataTransactions(nextTransactions);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextTransactions);
     if (updatedOrder) {
       const nextOrders = stitchingOrders.map(item => item.id === updatedOrder?.id ? updatedOrder : item);
       setStitchingOrders(nextOrders);
-      saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
     }
   };
 
@@ -6385,11 +6360,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
     const nextTransactions = stitcherKhataTransactions.filter(item => item.id !== id);
     setStitcherKhataTransactions(nextTransactions);
-    saveLocal(STORAGE_KEYS.STITCHER_KHATA, nextTransactions);
     if (updatedOrder) {
       const nextOrders = stitchingOrders.map(item => item.id === updatedOrder?.id ? updatedOrder : item);
       setStitchingOrders(nextOrders);
-      saveLocal(STORAGE_KEYS.STITCHING_ORDERS, nextOrders);
     }
   };
 
@@ -6419,9 +6392,9 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const worker = staff.find(s => s.id === data.personId);
       personName = worker ? `${worker.name} (Factory Worker)` : 'Factory Cutter';
 
-      // AUTO LOGIC: Create doc in staff_ledger with debit/payable work done
+      const slId = 'sl-' + Date.now();
       const slEntry: StaffLedgerEntry = {
-        id: 'sl-' + Date.now(),
+        id: slId,
         staffId: data.personId,
         staffName: worker?.name || 'Worker',
         type: 'credit', // Credit means wage payable to worker
@@ -6432,22 +6405,23 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         cuttingId: id,
         createdAt: now
       };
-      const nextStaffLedger = [slEntry, ...staffLedger];
-      setStaffLedger(nextStaffLedger);
-      saveLocal(STORAGE_KEYS.STAFF_LEDGER, nextStaffLedger);
+      setStaffLedger(prev => [slEntry, ...prev]);
+      void syncFirestoreDoc('staff_ledger', slId, slEntry);
 
       // Increase worker unpaid balance
-      const updatedStaff = staff.map(s => s.id === data.personId ? { ...s, currentBalance: s.currentBalance + totalAmount } : s);
+      const updatedStaff = staff.map(s => s.id === data.personId ? { ...s, currentBalance: s.currentBalance + totalAmount, updatedAt: now } : s);
       setStaff(updatedStaff);
-      saveLocal(STORAGE_KEYS.STAFF, updatedStaff);
+      const changedWorker = updatedStaff.find(s => s.id === data.personId);
+      if (changedWorker) void syncFirestoreDoc('staff', data.personId, changedWorker);
     } else {
       // Outside Contractor / Cutter Maker
       const party = parties.find(p => p.id === data.personId);
       personName = party ? `${party.name} (Outside Cutter Maker)` : 'Outside Maker';
 
       // AUTO LOGIC: Create doc in party_transactions with credit (payable to cutter maker)
+      const ptxId = 'ptx-' + Date.now();
       const ptx: PartyTransaction = {
-        id: 'ptx-' + Date.now(),
+        id: ptxId,
         partyId: data.personId,
         partyName: party?.name || 'Cutter Maker',
         type: 'credit', // Credit means we owe them
@@ -6458,14 +6432,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         referenceId: id,
         createdAt: now
       };
-      const nextPtx = [ptx, ...partyTransactions];
-      setPartyTransactions(nextPtx);
-      saveLocal(STORAGE_KEYS.PARTY_TXS, nextPtx);
+      setPartyTransactions(prev => [ptx, ...prev]);
+      void syncFirestoreDoc('party_transactions', ptxId, ptx);
 
       // Update party currentBalance (decreases because negative = payable we owe)
-      const updatedParties = parties.map(p => p.id === data.personId ? { ...p, currentBalance: p.currentBalance - totalAmount } : p);
+      const updatedParties = parties.map(p => p.id === data.personId ? { ...p, currentBalance: p.currentBalance - totalAmount, updatedAt: now } : p);
       setParties(updatedParties);
-      saveLocal(STORAGE_KEYS.PARTIES, updatedParties);
+      const changedParty = updatedParties.find(p => p.id === data.personId);
+      if (changedParty) void syncFirestoreDoc('parties', data.personId, changedParty);
     }
 
     const newCutting: Cutting = {
@@ -6501,7 +6475,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           return itm;
         });
 
-        // Auto update order status
         let newStatus = ord.status;
         if (ord.status === 'Pending') {
           newStatus = 'Cutting-Given';
@@ -6518,15 +6491,11 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     });
 
     setOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
+    setCuttings(prev => [newCutting, ...prev]);
 
-    const nextCuttings = [newCutting, ...cuttings];
-    setCuttings(nextCuttings);
-    saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
-
-    syncFirestoreDoc('cuttings', id, newCutting);
+    void syncFirestoreDoc('cuttings', id, newCutting);
     const updatedOrder = nextOrders.find(o => o.id === data.orderId);
-    if (updatedOrder) syncFirestoreDoc('customer_orders', data.orderId, updatedOrder);
+    if (updatedOrder) void syncFirestoreDoc('customer_orders', data.orderId, updatedOrder);
 
     showToast(`Cutting of ${data.qty} pairs assigned to ${personName}`);
     return newCutting;
@@ -6544,7 +6513,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const now = new Date().toISOString();
     const today = now.split('T')[0];
 
-    // Find linked order & item
     const targetOrder = orders.find(o => o.id === cut.orderId);
     const targetItem = targetOrder?.items.find(i => i.id === cut.orderItemId);
     const productId = (targetItem && targetItem.productId) ? targetItem.productId : (products.find(p => p.gloveName === cut.gloveType)?.id || 'unknown-prod');
@@ -6565,8 +6533,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     const nextStockLedger = [stockEntry, ...stockLedger];
     setStockLedger(nextStockLedger);
-    saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextStockLedger);
-    syncFirestoreDoc('stock_ledger', stockEntry.id, stockEntry);
+    void syncFirestoreDoc('stock_ledger', stockEntry.id, stockEntry);
 
     // 2. Recalculate and update product currentStock
     const updatedProducts = products.map(prod => {
@@ -6581,16 +6548,14 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return prod;
     });
     setProducts(updatedProducts);
-    saveLocal(STORAGE_KEYS.PRODUCTS, updatedProducts);
     const updatedProd = updatedProducts.find(p => p.id === productId);
-    if (updatedProd) syncFirestoreDoc('products', productId, updatedProd);
+    if (updatedProd) void syncFirestoreDoc('products', productId, updatedProd);
 
     // 3. Update cuttings status to Received
     const nextCuttings = cuttings.map(c => c.id === cuttingId ? { ...c, status: 'Received' as const, receivedDate: today } : c);
     setCuttings(nextCuttings);
-    saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
     const updatedCut = nextCuttings.find(c => c.id === cuttingId);
-    if (updatedCut) syncFirestoreDoc('cuttings', cuttingId, updatedCut);
+    if (updatedCut) void syncFirestoreDoc('cuttings', cuttingId, updatedCut);
 
     // 4. Update customer_orders items stockReceivedQty += qty & order status
     const nextOrders = orders.map(ord => {
@@ -6605,14 +6570,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
           return itm;
         });
 
-        // If all items have stockReceivedQty >= qty, order is 'Stock-Ready', else 'In-Production'
         const allStockReady = updatedItems.every(itm => itm.stockReceivedQty >= itm.qty);
-        let newStatus = ord.status;
-        if (allStockReady) {
-          newStatus = 'Stock-Ready';
-        } else {
-          newStatus = 'In-Production';
-        }
+        const newStatus: CustomerOrder['status'] = allStockReady ? 'Stock-Ready' : 'In-Production';
 
         return {
           ...ord,
@@ -6624,40 +6583,153 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return ord;
     });
     setOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
     const updatedOrder = nextOrders.find(o => o.id === cut.orderId);
-    if (updatedOrder) syncFirestoreDoc('customer_orders', cut.orderId, updatedOrder);
+    if (updatedOrder) void syncFirestoreDoc('customer_orders', cut.orderId, updatedOrder);
 
     showToast(`Received ${cut.qty} pairs from ${cut.personName}. Stock increased & order updated!`);
   };
 
-  const deleteCutting = (cuttingId: string) => {
-    const cut = cuttings.find(c => c.id === cuttingId);
+  const deleteCutting = async (cuttingId: string): Promise<void> => {
+    let cut = cuttings.find(c => c.id === cuttingId);
+    if (!cut && db) {
+      const snap = await getDoc(doc(db, 'cuttings', cuttingId));
+      if (snap.exists()) cut = { ...snap.data(), id: snap.id } as Cutting;
+    }
     if (!cut) return;
 
-    // Rollback cuttingGivenQty on order
-    const nextOrders = orders.map(ord => {
-      if (ord.id === cut.orderId) {
-        const updatedItems = ord.items.map(itm => {
-          if (itm.id === cut.orderItemId) {
-            return {
-              ...itm,
-              cuttingGivenQty: Math.max(0, itm.cuttingGivenQty - cut.qty)
-            };
-          }
-          return itm;
-        });
-        return { ...ord, items: updatedItems };
-      }
-      return ord;
-    });
-    setOrders(nextOrders);
-    saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
+    await markCuttingIdsDeleted([cuttingId]);
 
-    const nextCuttings = cuttings.filter(c => c.id !== cuttingId);
-    setCuttings(nextCuttings);
-    saveLocal(STORAGE_KEYS.CUTTINGS, nextCuttings);
-    showToast('Cutting entry removed', 'info');
+    const now = new Date().toISOString();
+    const removedLedgerIds = new Set<string>();
+    const staffReversals = new Map<string, number>();
+    const partyReversals = new Map<string, number>();
+    const removedStaffLedgerIds = new Set<string>();
+    const removedPartyTxIds = new Set<string>();
+
+    if (db) {
+      try {
+        const [slSnap, ptxSnap, ledgerSnap, orderSnap] = await Promise.all([
+          getDocs(collection(db, 'staff_ledger')),
+          getDocs(collection(db, 'party_transactions')),
+          getDocs(collection(db, 'stock_ledger')),
+          cut.orderId ? getDoc(doc(db, 'customer_orders', cut.orderId)) : Promise.resolve(null)
+        ]);
+
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        ops.push(b => b.delete(doc(db!, 'cuttings', cuttingId)));
+        ops.push(b => b.delete(doc(db!, 'cuttingEntries', cuttingId)));
+        ops.push(b => b.delete(doc(db!, 'cutting_transactions', cuttingId)));
+
+        ledgerSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.referenceId === cuttingId || d.id === `stk-${cuttingId}`) {
+            removedLedgerIds.add(d.id);
+            ops.push(b => b.delete(doc(db!, 'stock_ledger', d.id)));
+          }
+        });
+
+        slSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.cuttingId === cuttingId) {
+            removedStaffLedgerIds.add(d.id);
+            if (data.staffId && data.type === 'credit') {
+              staffReversals.set(data.staffId, (staffReversals.get(data.staffId) || 0) + (Number(data.amount) || 0));
+            }
+            ops.push(b => b.delete(doc(db!, 'staff_ledger', d.id)));
+          }
+        });
+
+        ptxSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.referenceType === 'cutting' && data.referenceId === cuttingId) {
+            removedPartyTxIds.add(d.id);
+            if (data.partyId && data.type === 'credit') {
+              partyReversals.set(data.partyId, (partyReversals.get(data.partyId) || 0) + (Number(data.amount) || 0));
+            }
+            ops.push(b => b.delete(doc(db!, 'party_transactions', d.id)));
+          }
+        });
+
+        staffReversals.forEach((amt, sId) => {
+          const st = staff.find(s => s.id === sId);
+          if (st) {
+            ops.push(b => b.set(doc(db!, 'staff', sId), stripUndefined({
+              currentBalance: Math.max(0, st.currentBalance - amt),
+              updatedAt: now
+            }), { merge: true }));
+          }
+        });
+
+        partyReversals.forEach((amt, pId) => {
+          const p = parties.find(pt => pt.id === pId);
+          if (p) {
+            ops.push(b => b.set(doc(db!, 'parties', pId), stripUndefined({
+              currentBalance: p.currentBalance + amt,
+              updatedAt: now
+            }), { merge: true }));
+          }
+        });
+
+        if (orderSnap && orderSnap.exists()) {
+          const remoteItems: OrderItem[] = Array.isArray(orderSnap.data().items) ? orderSnap.data().items : [];
+          const updatedItems = remoteItems.map(itm => {
+            if (itm.id === cut!.orderItemId) {
+              return {
+                ...itm,
+                cuttingGivenQty: Math.max(0, (Number(itm.cuttingGivenQty) || 0) - cut!.qty),
+                stockReceivedQty: cut!.status === 'Received'
+                  ? Math.max(0, (Number(itm.stockReceivedQty) || 0) - cut!.qty)
+                  : (Number(itm.stockReceivedQty) || 0)
+              };
+            }
+            return itm;
+          });
+          ops.push(b => b.update(doc(db!, 'customer_orders', cut!.orderId), { items: updatedItems, updatedAt: now }));
+        }
+
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
+      } catch (err) {
+        console.error('Error permanently deleting cutting in Firestore:', err);
+        showToast('Failed to permanently delete cutting entry.', 'error');
+        throw err;
+      }
+    }
+
+    setOrders(prev => prev.map(ord => {
+      if (ord.id !== cut!.orderId) return ord;
+      const updatedItems = ord.items.map(itm => {
+        if (itm.id === cut!.orderItemId) {
+          return {
+            ...itm,
+            cuttingGivenQty: Math.max(0, itm.cuttingGivenQty - cut!.qty),
+            stockReceivedQty: cut!.status === 'Received'
+              ? Math.max(0, itm.stockReceivedQty - cut!.qty)
+              : itm.stockReceivedQty
+          };
+        }
+        return itm;
+      });
+      return { ...ord, items: updatedItems, updatedAt: now };
+    }));
+    setCuttings(prev => prev.filter(c => c.id !== cuttingId));
+    setStockLedger(prev => prev.filter(s => !removedLedgerIds.has(s.id) && s.referenceId !== cuttingId));
+    setStaffLedger(prev => prev.filter(sl => !removedStaffLedgerIds.has(sl.id) && sl.cuttingId !== cuttingId));
+    setPartyTransactions(prev => prev.filter(pt => !removedPartyTxIds.has(pt.id) && !(pt.referenceType === 'cutting' && pt.referenceId === cuttingId)));
+    if (staffReversals.size > 0) {
+      setStaff(prev => prev.map(s => staffReversals.has(s.id)
+        ? { ...s, currentBalance: Math.max(0, s.currentBalance - (staffReversals.get(s.id) || 0)), updatedAt: now }
+        : s));
+    }
+    if (partyReversals.size > 0) {
+      setParties(prev => prev.map(p => partyReversals.has(p.id)
+        ? { ...p, currentBalance: p.currentBalance + (partyReversals.get(p.id) || 0), updatedAt: now }
+        : p));
+    }
+    showToast('Cutting entry permanently deleted', 'info');
   };
 
   // --- 3. SALES INVOICES (Billing with automatic stock deduction and ledger updates) ---
@@ -6738,7 +6810,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     const nextStockLedger = [...newStockEntries, ...stockLedger];
     setStockLedger(nextStockLedger);
-    saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextStockLedger);
+    newStockEntries.forEach(entry => void syncFirestoreDoc('stock_ledger', entry.id, entry));
 
     // 2. AUTO LOGIC: Recalculate currentStock for affected products
     const updatedProducts = products.map(prod => {
@@ -6754,12 +6826,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return prod;
     });
     setProducts(updatedProducts);
-    saveLocal(STORAGE_KEYS.PRODUCTS, updatedProducts);
+    updatedProducts.forEach(prod => {
+      if (lineItems.some(i => i.productId === prod.id)) {
+        void syncFirestoreDoc('products', prod.id, prod);
+      }
+    });
 
     // 3. AUTO LOGIC: Update customer_orders items billedQty += qty & order status
-    let nextOrders = orders;
     if (targetOrder) {
-      nextOrders = orders.map(ord => {
+      const nextOrders = orders.map(ord => {
         if (ord.id === invoiceData.orderId) {
           const updatedItems = ord.items.map(itm => {
             const invoicedLine = lineItems.find(li => li.productId === itm.productId && li.size === itm.size && li.color === itm.color);
@@ -6774,7 +6849,6 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
             return itm;
           });
 
-          // Check if order is fully billed
           const allBilled = updatedItems.every(itm => itm.billedQty >= itm.qty);
           const anyBilled = updatedItems.some(itm => itm.billedQty > 0);
 
@@ -6788,13 +6862,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return ord;
       });
       setOrders(nextOrders);
-      saveLocal(STORAGE_KEYS.ORDERS, nextOrders);
+      const updatedOrd = nextOrders.find(o => o.id === invoiceData.orderId);
+      if (updatedOrd) void syncFirestoreDoc('customer_orders', invoiceData.orderId, updatedOrd);
     }
 
     // 4. Create a customer ledger transaction.
     if (invoiceData.customerId) {
+      const ptxId = 'ptx-' + Date.now();
       const ptx: PartyTransaction = {
-        id: 'ptx-' + Date.now(),
+        id: ptxId,
         partyId: invoiceData.customerId,
         partyName: invoiceData.customerName,
         type: 'debit', // Customer owes us (Receivable)
@@ -6805,9 +6881,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         referenceId: id,
         createdAt: now
       };
-      const nextPtx = [ptx, ...partyTransactions];
-      setPartyTransactions(nextPtx);
-      saveLocal(STORAGE_KEYS.PARTY_TXS, nextPtx);
+      setPartyTransactions(prev => [ptx, ...prev]);
+      void syncFirestoreDoc('party_transactions', ptxId, ptx);
 
       // 5. Update parties currentBalance (increases receivable)
       const nextParties = parties.map(p => {
@@ -6821,13 +6896,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return p;
       });
       setParties(nextParties);
-      saveLocal(STORAGE_KEYS.PARTIES, nextParties);
+      const changedParty = nextParties.find(p => p.id === invoiceData.customerId);
+      if (changedParty) void syncFirestoreDoc('parties', invoiceData.customerId, changedParty);
     }
 
     // 6. AUTO LOGIC: If paidAmount > 0 and cash/bank paid, log to Cashbook
     if (paidAmount > 0 && (invoiceData.paymentMode === 'cash' || invoiceData.paymentMode === 'bank')) {
+      const cbId = 'cb-' + Date.now();
       const cbEntry: CashbookEntry = {
-        id: 'cb-' + Date.now(),
+        id: cbId,
         type: 'in',
         amount: paidAmount,
         date: invoiceData.date,
@@ -6837,16 +6914,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         referenceId: id,
         createdAt: now
       };
-      const nextCb = [cbEntry, ...cashbook];
-      setCashbook(nextCb);
-      saveLocal(STORAGE_KEYS.CASHBOOK, nextCb);
+      setCashbook(prev => [cbEntry, ...prev]);
+      void syncFirestoreDoc('cashbook', cbId, cbEntry);
     }
 
-    const nextInvoices = [newInvoice, ...invoices];
-    setInvoices(nextInvoices);
-    saveLocal(STORAGE_KEYS.INVOICES, nextInvoices);
-
-    syncFirestoreDoc('sales_invoices', id, newInvoice);
+    setInvoices(prev => [newInvoice, ...prev]);
+    void syncFirestoreDoc('sales_invoices', id, newInvoice);
 
     // AUTO LOGIC: Record in order_dispatch_history for this order (Immutable PO)
     if (invoiceData.orderId) {
@@ -6864,15 +6937,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         remainingBalance,
         createdAt: now
       };
-      const nextHistory = [dispatchHistoryEntry, ...orderDispatchHistory];
-      setOrderDispatchHistory(nextHistory);
-      saveLocal(STORAGE_KEYS.ORDER_HISTORY, nextHistory);
-      syncFirestoreDoc('order_dispatch_history', dispatchHistoryEntry.id, dispatchHistoryEntry);
+      setOrderDispatchHistory(prev => [dispatchHistoryEntry, ...prev]);
+      void syncFirestoreDoc('order_dispatch_history', dispatchHistoryEntry.id, dispatchHistoryEntry);
 
       if (db) {
         try {
           const subHistoryRef = doc(collection(db, 'customer_orders', invoiceData.orderId, 'order_history'));
-          setDoc(subHistoryRef, dispatchHistoryEntry);
+          void setDoc(subHistoryRef, stripUndefined(dispatchHistoryEntry));
         } catch (e) {
           console.error('Error logging order dispatch history:', e);
         }
@@ -6883,50 +6954,127 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return newInvoice;
   };
 
-  const deleteSaleInvoice = (invoiceId: string) => {
-    const inv = invoices.find(i => i.id === invoiceId);
+  const deleteSaleInvoice = async (invoiceId: string): Promise<void> => {
+    let inv = invoices.find(i => i.id === invoiceId);
+    if (!inv && db) {
+      const snap = await getDoc(doc(db, 'sales_invoices', invoiceId));
+      if (snap.exists()) inv = { ...snap.data(), id: snap.id } as SaleInvoice;
+    }
     if (!inv) return;
 
-    // Rollback stock ledger entries for this invoice
+    const now = new Date().toISOString();
     const nextStockLedger = stockLedger.filter(s => s.referenceId !== invoiceId);
-    setStockLedger(nextStockLedger);
-    saveLocal(STORAGE_KEYS.STOCK_LEDGER, nextStockLedger);
-
-    // Recalculate stock
     const updatedProducts = products.map(prod => {
-      const sold = inv.items.find(i => i.productId === prod.id);
+      const sold = inv!.items.find(i => i.productId === prod.id);
       if (sold) {
         return {
           ...prod,
           currentStock: recalculateStockForProduct(prod.id, nextStockLedger),
-          updatedAt: new Date().toISOString()
+          updatedAt: now
         };
       }
       return prod;
     });
-    setProducts(updatedProducts);
-    saveLocal(STORAGE_KEYS.PRODUCTS, updatedProducts);
 
-    // Rollback party balance
-    if (inv.customerId && inv.remaining > 0) {
-      const nextParties = parties.map(p => {
-        if (p.id === inv.customerId) {
-          return {
-            ...p,
-            currentBalance: p.currentBalance - inv.remaining
-          };
+    if (db) {
+      try {
+        const [ledgerSnap, ptxSnap, cbSnap, dispatchSnap, orderSnap] = await Promise.all([
+          getDocs(collection(db, 'stock_ledger')),
+          getDocs(collection(db, 'party_transactions')),
+          getDocs(collection(db, 'cashbook')),
+          getDocs(collection(db, 'order_dispatch_history')),
+          inv.orderId ? getDoc(doc(db, 'customer_orders', inv.orderId)) : Promise.resolve(null)
+        ]);
+
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        ops.push(b => b.delete(doc(db!, 'sales_invoices', invoiceId)));
+
+        ledgerSnap.docs.forEach(d => {
+          if (d.data()?.referenceId === invoiceId) ops.push(b => b.delete(doc(db!, 'stock_ledger', d.id)));
+        });
+        ptxSnap.docs.forEach(d => {
+          if (d.data()?.referenceId === invoiceId) ops.push(b => b.delete(doc(db!, 'party_transactions', d.id)));
+        });
+        cbSnap.docs.forEach(d => {
+          if (d.data()?.referenceId === invoiceId) ops.push(b => b.delete(doc(db!, 'cashbook', d.id)));
+        });
+        dispatchSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data?.orderId === inv!.orderId && String(data?.notes || '').includes(inv!.invoiceNo)) {
+            ops.push(b => b.delete(doc(db!, 'order_dispatch_history', d.id)));
+          }
+        });
+
+        updatedProducts.forEach(prod => {
+          if (inv!.items.some(i => i.productId === prod.id)) {
+            ops.push(b => b.set(doc(db!, 'products', prod.id), stripUndefined(prod), { merge: true }));
+          }
+        });
+
+        if (inv.customerId && inv.remaining > 0) {
+          const partySnap = await getDoc(doc(db, 'parties', inv.customerId));
+          if (partySnap.exists()) {
+            const currentBal = Number(partySnap.data().currentBalance) || 0;
+            ops.push(b => b.update(doc(db!, 'parties', inv!.customerId), {
+              currentBalance: currentBal - inv!.remaining,
+              updatedAt: now
+            }));
+          }
         }
-        return p;
-      });
-      setParties(nextParties);
-      saveLocal(STORAGE_KEYS.PARTIES, nextParties);
+
+        if (orderSnap && orderSnap.exists()) {
+          const remoteItems: OrderItem[] = Array.isArray(orderSnap.data().items) ? orderSnap.data().items : [];
+          const updatedItems = remoteItems.map(itm => {
+            const invoicedLine = inv!.items.find(li => li.productId === itm.productId && li.size === itm.size && li.color === itm.color);
+            if (invoicedLine) {
+              const newBilled = Math.max(0, (Number(itm.billedQty) || 0) - invoicedLine.qty);
+              return {
+                ...itm,
+                billedQty: newBilled,
+                pendingQty: Math.max(0, itm.qty - newBilled)
+              };
+            }
+            return itm;
+          });
+          ops.push(b => b.update(doc(db!, 'customer_orders', inv!.orderId), { items: updatedItems, updatedAt: now }));
+        }
+
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
+      } catch (err) {
+        console.error('Error permanently deleting sale invoice in Firestore:', err);
+        showToast('Failed to permanently delete sale invoice.', 'error');
+        throw err;
+      }
     }
 
-    const nextInvoices = invoices.filter(i => i.id !== invoiceId);
-    setInvoices(nextInvoices);
-    saveLocal(STORAGE_KEYS.INVOICES, nextInvoices);
-
-    showToast(`Invoice #${inv.invoiceNo} cancelled and stock restored`, 'info');
+    setStockLedger(nextStockLedger);
+    setProducts(updatedProducts);
+    setPartyTransactions(prev => prev.filter(pt => pt.referenceId !== invoiceId));
+    setCashbook(prev => prev.filter(cb => cb.referenceId !== invoiceId));
+    setOrderDispatchHistory(prev => prev.filter(h => !(h.orderId === inv!.orderId && String(h.notes || '').includes(inv!.invoiceNo))));
+    if (inv.customerId && inv.remaining > 0) {
+      setParties(prev => prev.map(p => p.id === inv!.customerId ? { ...p, currentBalance: p.currentBalance - inv!.remaining, updatedAt: now } : p));
+    }
+    if (inv.orderId) {
+      setOrders(prev => prev.map(ord => {
+        if (ord.id !== inv!.orderId) return ord;
+        const updatedItems = ord.items.map(itm => {
+          const invoicedLine = inv!.items.find(li => li.productId === itm.productId && li.size === itm.size && li.color === itm.color);
+          if (invoicedLine) {
+            const newBilled = Math.max(0, itm.billedQty - invoicedLine.qty);
+            return { ...itm, billedQty: newBilled, pendingQty: Math.max(0, itm.qty - newBilled) };
+          }
+          return itm;
+        });
+        return { ...ord, items: updatedItems, updatedAt: now };
+      }));
+    }
+    setInvoices(prev => prev.filter(i => i.id !== invoiceId));
+    showToast(`Invoice #${inv.invoiceNo} permanently deleted and stock restored`, 'info');
   };
 
   // --- 4. Raw Material Purchase (Leather Buying) ---
@@ -6967,33 +7115,34 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // 1. Update Raw Material Stock
     const existingRaw = rawMaterials.find(r => r.material.toLowerCase() === data.material.toLowerCase());
     let nextRawMaterials: RawMaterialStock[];
+    let syncedRaw: RawMaterialStock;
     if (existingRaw) {
-      nextRawMaterials = rawMaterials.map(r => r.id === existingRaw.id ? {
-        ...r,
-        currentStock: r.currentStock + data.qty,
+      syncedRaw = {
+        ...existingRaw,
+        currentStock: existingRaw.currentStock + data.qty,
         lastPurchaseRate: data.rate,
         updatedAt: now
-      } : r);
+      };
+      nextRawMaterials = rawMaterials.map(r => r.id === existingRaw.id ? syncedRaw : r);
     } else {
-      nextRawMaterials = [
-        ...rawMaterials,
-        {
-          id: 'raw-' + Date.now(),
-          material: data.material,
-          unit: data.unit,
-          currentStock: data.qty,
-          lastPurchaseRate: data.rate,
-          updatedAt: now
-        }
-      ];
+      syncedRaw = {
+        id: 'raw-' + Date.now(),
+        material: data.material,
+        unit: data.unit,
+        currentStock: data.qty,
+        lastPurchaseRate: data.rate,
+        updatedAt: now
+      };
+      nextRawMaterials = [...rawMaterials, syncedRaw];
     }
     setRawMaterials(nextRawMaterials);
-    saveLocal(STORAGE_KEYS.RAW_MATERIALS, nextRawMaterials);
+    void syncFirestoreDoc('raw_materials', syncedRaw.id, syncedRaw);
 
     // 2. Add supplier ledger transactions.
     if (data.supplierId) {
+      const ptxId = 'ptx-' + Date.now();
       const ptx: PartyTransaction = {
-        id: 'ptx-' + Date.now(),
+        id: ptxId,
         partyId: data.supplierId,
         partyName: data.supplierName,
         type: 'credit', // We owe supplier
@@ -7004,9 +7153,8 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         referenceId: id,
         createdAt: now
       };
-      const nextPtx = [ptx, ...partyTransactions];
-      setPartyTransactions(nextPtx);
-      saveLocal(STORAGE_KEYS.PARTY_TXS, nextPtx);
+      setPartyTransactions(prev => [ptx, ...prev]);
+      void syncFirestoreDoc('party_transactions', ptxId, ptx);
 
       // Update supplier currentBalance (more negative = we owe more)
       const nextParties = parties.map(p => {
@@ -7020,13 +7168,15 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         return p;
       });
       setParties(nextParties);
-      saveLocal(STORAGE_KEYS.PARTIES, nextParties);
+      const changedParty = nextParties.find(p => p.id === data.supplierId);
+      if (changedParty) void syncFirestoreDoc('parties', data.supplierId, changedParty);
     }
 
     // 3. If paid > 0, log cash out in Cashbook
     if (data.paid > 0 && (data.paymentMode === 'cash' || data.paymentMode === 'bank')) {
+      const cbId = 'cb-' + Date.now();
       const cbEntry: CashbookEntry = {
-        id: 'cb-' + Date.now(),
+        id: cbId,
         type: 'out',
         amount: data.paid,
         date: data.date,
@@ -7036,14 +7186,12 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
         referenceId: id,
         createdAt: now
       };
-      const nextCb = [cbEntry, ...cashbook];
-      setCashbook(nextCb);
-      saveLocal(STORAGE_KEYS.CASHBOOK, nextCb);
+      setCashbook(prev => [cbEntry, ...prev]);
+      void syncFirestoreDoc('cashbook', cbId, cbEntry);
     }
 
-    const nextPurchases = [newPurchase, ...purchases];
-    setPurchases(nextPurchases);
-    saveLocal(STORAGE_KEYS.PURCHASES, nextPurchases);
+    setPurchases(prev => [newPurchase, ...prev]);
+    void syncFirestoreDoc('purchases', id, newPurchase);
 
     showToast(`Leather purchase recorded: ${data.qty} ${data.unit} added to raw material stock`);
     return newPurchase;
@@ -7058,13 +7206,13 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       id,
       createdAt: now
     };
-    const nextExpenses = [newExpense, ...expenses];
-    setExpenses(nextExpenses);
-    saveLocal(STORAGE_KEYS.EXPENSES, nextExpenses);
+    setExpenses(prev => [newExpense, ...prev]);
+    void syncFirestoreDoc('expenses', id, newExpense);
 
     // Auto debit cashbook
+    const cbId = 'cb-' + Date.now();
     const cbEntry: CashbookEntry = {
-      id: 'cb-' + Date.now(),
+      id: cbId,
       type: 'out',
       amount: data.amount,
       date: data.date,
@@ -7074,22 +7222,34 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       referenceId: id,
       createdAt: now
     };
-    const nextCb = [cbEntry, ...cashbook];
-    setCashbook(nextCb);
-    saveLocal(STORAGE_KEYS.CASHBOOK, nextCb);
+    setCashbook(prev => [cbEntry, ...prev]);
+    void syncFirestoreDoc('cashbook', cbId, cbEntry);
 
     showToast(`Expense of ${settings.currency} ${data.amount} recorded`);
     return newExpense;
   };
 
-  const deleteExpense = (id: string) => {
-    const next = expenses.filter(e => e.id !== id);
-    setExpenses(next);
-    saveLocal(STORAGE_KEYS.EXPENSES, next);
-    const nextCb = cashbook.filter(cb => cb.referenceId !== id);
-    setCashbook(nextCb);
-    saveLocal(STORAGE_KEYS.CASHBOOK, nextCb);
-    showToast('Expense removed', 'info');
+  const deleteExpense = async (id: string): Promise<void> => {
+    if (db) {
+      try {
+        const cbSnap = await getDocs(collection(db, 'cashbook'));
+        const batch = writeBatch(db);
+        batch.delete(doc(db, 'expenses', id));
+        cbSnap.docs.forEach(d => {
+          if (d.data()?.referenceId === id) {
+            batch.delete(doc(db!, 'cashbook', d.id));
+          }
+        });
+        await batch.commit();
+      } catch (err) {
+        console.error('Error permanently deleting expense in Firestore:', err);
+        showToast('Failed to permanently delete expense.', 'error');
+        throw err;
+      }
+    }
+    setExpenses(prev => prev.filter(e => e.id !== id));
+    setCashbook(prev => prev.filter(cb => cb.referenceId !== id));
+    showToast('Expense permanently deleted', 'info');
   };
 
   const addCashbookEntry = (data: Omit<CashbookEntry, 'id' | 'createdAt'>): CashbookEntry => {
@@ -7100,45 +7260,143 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
       id,
       createdAt: now
     };
-    const next = [newEntry, ...cashbook];
-    setCashbook(next);
-    saveLocal(STORAGE_KEYS.CASHBOOK, next);
+    setCashbook(prev => [newEntry, ...prev]);
+    void syncFirestoreDoc('cashbook', id, newEntry);
     showToast(`Cashbook ${data.type === 'in' ? 'Cash Inflow' : 'Cash Outflow'} recorded`);
     return newEntry;
   };
 
-  const deleteCashbookEntry = (id: string) => {
-    const next = cashbook.filter(c => c.id !== id);
-    setCashbook(next);
-    saveLocal(STORAGE_KEYS.CASHBOOK, next);
-    showToast('Cashbook entry removed', 'info');
+  const deleteCashbookEntry = async (id: string): Promise<void> => {
+    if (db) {
+      try {
+        await deleteDoc(doc(db, 'cashbook', id));
+      } catch (err) {
+        console.error('Error permanently deleting cashbook entry in Firestore:', err);
+        showToast('Failed to permanently delete cashbook entry.', 'error');
+        throw err;
+      }
+    }
+    setCashbook(prev => prev.filter(c => c.id !== id));
+    showToast('Cashbook entry permanently deleted', 'info');
   };
 
   // --- 6. Staff Attendance ---
   const markAttendance = (record: Omit<StaffAttendance, 'id'>) => {
     const id = 'att-' + Date.now();
     const newRecord: StaffAttendance = { ...record, id };
-    const next = [newRecord, ...attendance];
-    setAttendance(next);
-    saveLocal(STORAGE_KEYS.ATTENDANCE, next);
+    setAttendance(prev => [newRecord, ...prev]);
+    void syncFirestoreDoc('attendance', id, newRecord);
     showToast(`Attendance marked for ${record.staffName}`);
   };
 
   const updateSettings = (newSettings: Partial<FactorySettings>) => {
     const next = { ...settings, ...newSettings };
     setSettings(next);
-    saveLocal(STORAGE_KEYS.SETTINGS, next);
+    if (db) {
+      void setDoc(doc(db, 'settings', 'factory'), stripUndefined(next), { merge: true }).catch(err => {
+        console.error('Error saving factory settings to Firestore:', err);
+      });
+    }
     showToast('Factory settings saved successfully');
   };
 
-  const clearAllFactoryData = () => {
-    Object.values(STORAGE_KEYS).forEach(k => localStorage.removeItem(k));
+  const clearAllFactoryData = async (): Promise<void> => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      LEGACY_STORAGE_KEYS.forEach(k => window.localStorage.removeItem(k));
+    }
+
+    if (db) {
+      try {
+        const ordersSnap = await getDocs(collection(db, 'customer_orders'));
+        const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+        for (const oDoc of ordersSnap.docs) {
+          const histSnap = await getDocs(collection(db, 'customer_orders', oDoc.id, 'order_history'));
+          histSnap.docs.forEach(h => {
+            ops.push(b => b.delete(doc(db!, 'customer_orders', oDoc.id, 'order_history', h.id)));
+          });
+        }
+
+        const allCollections = [
+          'customer_orders',
+          'parties',
+          'party_transactions',
+          'staff',
+          'staff_ledger',
+          'attendance',
+          'products',
+          'deleted_products',
+          'cuttings',
+          'cutters',
+          'cutting_transactions',
+          'cuttingEntries',
+          'cutting_return_totals',
+          'deleted_cutting_ids',
+          'deleted_order_ids',
+          'deleted_delivery_ids',
+          'order_dispatch_history',
+          'order_companies',
+          'stock_ledger',
+          'stock_management',
+          'article_stock',
+          'stock_delivery_history',
+          'articles_master',
+          'articles',
+          'article_master',
+          'sales_invoices',
+          'purchases',
+          'raw_materials',
+          'expenses',
+          'cashbook',
+          'stitchers',
+          'stitching_orders',
+          'stitching_history',
+          'stitcher_khata_transactions',
+          'nasim_ledger_payments'
+        ];
+
+        const snaps = await Promise.all(allCollections.map(col => getDocs(collection(db!, col))));
+        snaps.forEach((snap, idx) => {
+          const colName = allCollections[idx];
+          snap.docs.forEach(d => {
+            ops.push(b => b.delete(doc(db!, colName, d.id)));
+          });
+        });
+
+        for (let i = 0; i < ops.length; i += 450) {
+          const batch = writeBatch(db);
+          ops.slice(i, i + 450).forEach(fn => fn(batch));
+          await batch.commit();
+        }
+      } catch (err) {
+        console.error('Error clearing all factory data from Firestore:', err);
+        showToast('Failed to permanently clear all factory data.', 'error');
+        throw err;
+      }
+    }
+
+    deletedOrderIdsRef.current = new Set();
+    deletedCuttingIdsRef.current = new Set();
+    deletedDeliveryIdsRef.current = new Set();
+    deletedProductNamesRef.current = new Set();
+
     setParties([]);
     setStaff([]);
     setProducts([]);
     setOrders([]);
     setCuttings([]);
+    setCutters([]);
+    setCuttingTransactions([]);
+    setCuttingEntries([]);
+    setOrderDispatchHistory([]);
+    setOrderCompanies([]);
     setStockLedger([]);
+    setStockManagement([]);
+    setArticleStock([]);
+    setDeliveryHistory([]);
+    setArticlesMaster([]);
+    setArticleCatalog([]);
+    setLegacyArticleMaster([]);
+    setDeletedProductsList([]);
     setInvoices([]);
     setPartyTransactions([]);
     setStaffLedger([]);
@@ -7151,7 +7409,7 @@ export const FactoryProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setStitchingOrders([]);
     setStitcherKhataTransactions([]);
     setStitchingHistory([]);
-    showToast('All factory records reset to clean slate', 'info');
+    showToast('All factory records permanently deleted', 'info');
   };
 
   return (

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Search, Plus, DollarSign, Calendar, CheckCircle2, Trash2, Edit, X, Wallet, ArrowLeft } from 'lucide-react';
+import { Users, Search, Plus, DollarSign, Calendar, CheckCircle2, Trash2, Edit, X, Wallet, ArrowLeft, AlertCircle } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate } from '../utils/factoryFormatters';
 import { Staff } from '../types/factory';
@@ -21,20 +21,23 @@ export const StaffPage: React.FC = () => {
   const [isAddStaffOpen, setIsAddStaffOpen] = useState(false);
   const [isPayWageOpen, setIsPayWageOpen] = useState(false);
   const [selectedStaffForPay, setSelectedStaffForPay] = useState<Staff | null>(null);
+  const [staffToDelete, setStaffToDelete] = useState<Staff | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Close on Escape key
   useEffect(() => {
-    if (!isAddStaffOpen && !isPayWageOpen) return;
+    if (!isAddStaffOpen && !isPayWageOpen && !staffToDelete) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsAddStaffOpen(false);
         setIsPayWageOpen(false);
         setSelectedStaffForPay(null);
+        if (!isDeleting) setStaffToDelete(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAddStaffOpen, isPayWageOpen]);
+  }, [isAddStaffOpen, isPayWageOpen, staffToDelete, isDeleting]);
 
   // Form states for staff
   const [name, setName] = useState('');
@@ -240,7 +243,11 @@ export const StaffPage: React.FC = () => {
                             <Wallet className="w-3.5 h-3.5" />
                             <span>Pay Wages</span>
                           </button>
-                          <button onClick={() => deleteStaff(st.id)} className="p-1 rounded text-slate-400 hover:text-rose-600">
+                          <button
+                            onClick={() => setStaffToDelete(st)}
+                            className="p-1 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
+                            title="Delete Staff Permanently"
+                          >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
@@ -448,6 +455,63 @@ export const StaffPage: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Permanent Delete Staff Confirmation Modal */}
+      {staffToDelete && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isDeleting) setStaffToDelete(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-100 text-rose-600 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Delete Staff "{staffToDelete.name}"?</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Are you sure you want to permanently delete this? This cannot be undone. All linked staff ledger and attendance records will also be permanently deleted.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setStaffToDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold border border-slate-300 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                No
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={async () => {
+                  if (!staffToDelete) return;
+                  setIsDeleting(true);
+                  try {
+                    await deleteStaff(staffToDelete.id);
+                    if (selectedStaffForPay?.id === staffToDelete.id) {
+                      setIsPayWageOpen(false);
+                      setSelectedStaffForPay(null);
+                    }
+                    setStaffToDelete(null);
+                  } finally {
+                    setIsDeleting(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting...' : 'Yes'}
+              </button>
+            </div>
           </div>
         </div>
       )}

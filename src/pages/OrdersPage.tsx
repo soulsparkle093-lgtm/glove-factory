@@ -118,6 +118,11 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
     setActiveModule
   } = useFactory();
 
+  // Dual View Mode: Default is 'all_orders' (Mixed All Orders); can toggle to 'by_companies'
+  const [ordersViewMode, setOrdersViewMode] = useState<'all_orders' | 'by_companies'>('all_orders');
+  const [allOrdersSearch, setAllOrdersSearch] = useState('');
+  const [allOrdersFilterTab, setAllOrdersFilterTab] = useState<'all' | 'active' | 'completed'>('all');
+
   // Step 1 & 2 search / filters
   const [companySearch, setCompanySearch] = useState('');
   const [companyFilterTab, setCompanyFilterTab] = useState<'all' | 'active' | 'completed'>('all');
@@ -153,15 +158,19 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
   useEffect(() => {
     if (initialCompanyName && !selectedCompanyName) {
       setSelectedCompanyName(initialCompanyName);
+      setOrdersViewMode('by_companies');
     }
   }, [initialCompanyName, selectedCompanyName, setSelectedCompanyName]);
 
-  // Listen for sidebar reset event -> go back to Step 1 (Companies List)
+  // Listen for sidebar reset event -> go back to Default View (All Orders Mixed)
   useEffect(() => {
     const handleReset = () => {
+      setOrdersViewMode('all_orders');
       setExpandedOrderId(null);
       setOrderSearch('');
       setOrderStatusFilter('all');
+      setAllOrdersSearch('');
+      setAllOrdersFilterTab('all');
     };
     window.addEventListener('factory:reset-orders-view', handleReset);
     return () => window.removeEventListener('factory:reset-orders-view', handleReset);
@@ -340,16 +349,64 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
     );
   }, [orders, companySearch]);
 
+  // Order Completion Helper: Completed / Delivered orders go to bottom; Active/Running/In-Progress/Pending stay on top
+  const isOrderDone = (ord: CustomerOrder, live?: ReturnType<typeof getOrderLiveMetrics>) => {
+    const metrics = live || getOrderLiveMetrics(ord);
+    return (
+      ord.status === 'Completed' ||
+      (metrics.totalOriginal > 0 && metrics.dispatched >= metrics.totalOriginal)
+    );
+  };
+
+  // Mixed All Orders sorted: Active on TOP (newest first), Completed/Delivered at BOTTOM (newest first)
+  const sortedAllOrders = useMemo(() => {
+    return [...orders].sort((a, b) => {
+      const aDone = isOrderDone(a) ? 1 : 0;
+      const bDone = isOrderDone(b) ? 1 : 0;
+      if (aDone !== bDone) return aDone - bDone;
+      const dateCmp = safeStringCompare(b.orderDate || b.createdAt, a.orderDate || a.createdAt);
+      if (dateCmp !== 0) return dateCmp;
+      const createdCmp = safeStringCompare(b.createdAt, a.createdAt);
+      if (createdCmp !== 0) return createdCmp;
+      return safeStringCompare(b.orderNo, a.orderNo);
+    });
+  }, [orders, liveCuttingByOrderId, liveDeliveriesByOrderId, stitchingHistory, stitchingOrders, stockLedger]);
+
+  const activeOrdersTotalCount = useMemo(
+    () => sortedAllOrders.filter(o => !isOrderDone(o)).length,
+    [sortedAllOrders]
+  );
+
+  const filteredAllOrders = useMemo(() => {
+    const q = allOrdersSearch.trim().toLowerCase();
+    return sortedAllOrders.filter(ord => {
+      const done = isOrderDone(ord);
+      if (allOrdersFilterTab === 'active' && done) return false;
+      if (allOrdersFilterTab === 'completed' && !done) return false;
+      if (!q) return true;
+      const matchOrderNo = ord.orderNo?.toLowerCase().includes(q);
+      const matchCompany = ord.customerName?.toLowerCase().includes(q);
+      const matchArticles = ord.items?.some(
+        i =>
+          i.title?.toLowerCase().includes(q) ||
+          i.gloveType?.toLowerCase().includes(q) ||
+          i.article?.toLowerCase().includes(q)
+      );
+      return matchOrderNo || matchCompany || matchArticles;
+    });
+  }, [sortedAllOrders, allOrdersSearch, allOrdersFilterTab]);
+
   // Aggregate KPI totals
   const totalCompaniesCount = allCompanyStats.length;
   const activeCompaniesCount = allCompanyStats.filter(c => !c.isCompleted).length;
   const grandTotalPairs = allCompanyStats.reduce((s, c) => s + c.totalPairsLifetime, 0);
   const grandDispatchedPairs = allCompanyStats.reduce((s, c) => s + c.totalDeliveredPairs, 0);
 
-  // Handlers for Step navigation
+  // Handlers for navigation
   const handleSelectCompany = (name: string) => {
     setSelectedOrderId(null);
     setSelectedCompanyName(name);
+    setOrdersViewMode('by_companies');
     setExpandedOrderId(null);
     setOrderSearch('');
     setOrderStatusFilter('all');
@@ -365,6 +422,15 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
   const handleBackToCompanies = () => {
     setSelectedOrderId(null);
     setSelectedCompanyName(null);
+    setOrdersViewMode('by_companies');
+    setExpandedOrderId(null);
+    setActiveModule('orders');
+  };
+
+  const handleBackToAllOrders = () => {
+    setSelectedOrderId(null);
+    setSelectedCompanyName(null);
+    setOrdersViewMode('all_orders');
     setExpandedOrderId(null);
     setActiveModule('orders');
   };
@@ -462,11 +528,19 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={handleBackToCompanies}
+              onClick={handleBackToAllOrders}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back to Companies</span>
+              <span>All Orders</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleBackToCompanies}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition cursor-pointer"
+            >
+              <Building2 className="w-3.5 h-3.5 text-blue-600" />
+              <span>By Companies</span>
             </button>
             <ChevronRight className="w-4 h-4 text-slate-300" />
             <button
@@ -510,12 +584,16 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
       o => normalizeKey(o.customerName) === normalizeKey(selectedCompanyName)
     );
 
-    // Sort Active on top, Completed at bottom, then newest date first
+    // Sort Active on top, Completed/Delivered at bottom, newest first
     const companyOrdersSorted = [...companyOrdersRaw].sort((a, b) => {
-      const aComp = a.status === 'Completed' ? 1 : 0;
-      const bComp = b.status === 'Completed' ? 1 : 0;
-      if (aComp !== bComp) return aComp - bComp;
-      return safeStringCompare(b.orderDate || b.createdAt, a.orderDate || a.createdAt);
+      const aDone = isOrderDone(a) ? 1 : 0;
+      const bDone = isOrderDone(b) ? 1 : 0;
+      if (aDone !== bDone) return aDone - bDone;
+      const dateCmp = safeStringCompare(b.orderDate || b.createdAt, a.orderDate || a.createdAt);
+      if (dateCmp !== 0) return dateCmp;
+      const createdCmp = safeStringCompare(b.createdAt, a.createdAt);
+      if (createdCmp !== 0) return createdCmp;
+      return safeStringCompare(b.orderNo, a.orderNo);
     });
 
     const filteredCompanyOrders = companyOrdersSorted.filter(ord => {
@@ -545,18 +623,28 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
         <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-4 sm:p-6">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1.5">
-              <button
-                type="button"
-                onClick={handleBackToCompanies}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-700 transition cursor-pointer"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back to Companies</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleBackToCompanies}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-xs sm:text-sm font-bold text-slate-800 transition cursor-pointer"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Back to Companies</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBackToAllOrders}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-xs sm:text-sm font-bold text-blue-700 transition cursor-pointer"
+                >
+                  <FileText className="w-4 h-4" />
+                  <span>All Orders</span>
+                </button>
+              </div>
 
               <div className="flex flex-wrap items-center gap-2.5 pt-1">
                 <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-                  {compStats?.name || selectedCompanyName} &mdash; All Orders
+                  {compStats?.name || selectedCompanyName} &mdash; Orders List
                 </h1>
                 {compStats?.isCompleted ? (
                   <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-200 text-slate-700">
@@ -641,10 +729,10 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
               <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
               <div>
                 <span className="font-bold">
-                  Order #{orderToDelete.orderNo} ({orderToDelete.customerName}): Deleting this order will permanently delete all linked Cutting, Stitching, Stock, and Stock Out records. Are you sure you want to continue?
+                  Order #{orderToDelete.orderNo} ({orderToDelete.customerName}): Are you sure you want to permanently delete this? This cannot be undone.
                 </span>
                 <p className="text-[11px] text-rose-700 mt-0.5">
-                  {(orderToDelete.totalPairs || orderToDelete.totalQty || 0).toLocaleString()} pairs and all related records will be permanently deleted.
+                  All linked Cutting, Stitching, Stock, Stock Out, and {(orderToDelete.totalPairs || orderToDelete.totalQty || 0).toLocaleString()} pairs will be permanently deleted.
                 </p>
               </div>
             </div>
@@ -653,9 +741,9 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                 type="button"
                 onClick={() => setOrderToDelete(null)}
                 disabled={isDeleting}
-                className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50 cursor-pointer"
+                className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50 cursor-pointer"
               >
-                Cancel
+                No
               </button>
               <button
                 type="button"
@@ -663,7 +751,7 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                 disabled={isDeleting}
                 className="px-4 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 cursor-pointer disabled:opacity-50"
               >
-                {isDeleting ? 'Deleting...' : 'Yes, Delete All'}
+                {isDeleting ? 'Deleting...' : 'Yes'}
               </button>
             </div>
           </div>
@@ -688,10 +776,8 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
               {filteredCompanyOrders.map(ord => {
                 const isExpanded = expandedOrderId === ord.id;
                 const live = getOrderLiveMetrics(ord);
-                const isOrdFulfilled =
-                  ord.status === 'Completed' ||
-                  (live.totalOriginal > 0 && live.cuttingReceived >= live.totalOriginal && live.cuttingRemaining === 0);
-                const badge = isOrdFulfilled
+                const isOrdCompleted = isOrderDone(ord, live);
+                const badge = isOrdCompleted
                   ? { label: 'Completed', bg: 'bg-emerald-100 text-emerald-800 border-emerald-300' }
                   : getOrderStatusBadge(ord.status);
                 const sizeRows = extractOrderSizeRows(ord);
@@ -796,12 +882,12 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                   live.totalOriginal > 0 ? Math.min(100, Math.round((live.remaining / live.totalOriginal) * 100)) : 0;
 
                 return (
-                  <div key={ord.id} className="bg-white">
-                    {/* Collapsed Order Summary Row */}
+                  <div key={ord.id} className={isOrdCompleted ? 'bg-slate-50/50' : 'bg-white'}>
+                    {/* Order Summary Row — Clicking opens Full Order Details */}
                     <div
-                      onClick={() => setExpandedOrderId(isExpanded ? null : ord.id)}
+                      onClick={() => handleOpenFullOrder(ord)}
                       className={`px-4 sm:px-6 py-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 cursor-pointer transition ${
-                        isExpanded ? 'bg-blue-50/50 border-b border-blue-100' : 'hover:bg-slate-50'
+                        isExpanded ? 'bg-blue-50/50 border-b border-blue-100' : 'hover:bg-blue-50/40'
                       }`}
                     >
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 min-w-0">
@@ -812,15 +898,27 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                           {formatDate(ord.orderDate)}
                         </span>
                         <span className="text-xs font-semibold text-slate-700 truncate max-w-[320px]">
-                          Detail: {articleCount} {articleCount === 1 ? 'Article' : 'Articles'}
+                          {articleCount} {articleCount === 1 ? 'Article' : 'Articles'}
                           {uniqueArticles.length > 0 ? ` (${uniqueArticles.join(', ')})` : ''}
                         </span>
                       </div>
 
                       <div className="flex flex-wrap items-center justify-between lg:justify-end gap-3 shrink-0">
-                        <span className="font-mono tabular-nums font-black text-sm text-slate-900">
-                          {live.totalOriginal.toLocaleString()} Pairs
-                        </span>
+                        <div className="flex items-center gap-2.5">
+                          <span className="font-mono tabular-nums font-black text-sm text-slate-900">
+                            {live.totalOriginal.toLocaleString()} Pairs
+                          </span>
+                          <div className="hidden sm:flex items-center gap-1.5 min-w-[100px]">
+                            <div className="w-16 h-2 rounded-full bg-slate-200 overflow-hidden">
+                              <div
+                                style={{ width: `${dispatchedPct}%` }}
+                                className={`h-full rounded-full ${isOrdCompleted ? 'bg-emerald-600' : 'bg-blue-600'}`}
+                              />
+                            </div>
+                            <span className="text-[11px] font-mono font-bold text-slate-600">{dispatchedPct}%</span>
+                          </div>
+                        </div>
+
                         {live.extraCutting > 0 && (
                           <span className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-100 px-2 py-0.5 font-mono tabular-nums text-[11px] font-black text-rose-700">
                             <span className="rounded bg-rose-600 px-1 py-0.5 text-[9px] font-black uppercase text-white">Extra</span>
@@ -862,14 +960,23 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
                           <button
                             type="button"
                             onClick={() => setExpandedOrderId(isExpanded ? null : ord.id)}
-                            className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
                               isExpanded
-                                ? 'bg-blue-600 text-white'
+                                ? 'bg-slate-800 text-white'
                                 : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
                             }`}
+                            title="Toggle Quick Summary"
                           >
-                            <span>{isExpanded ? 'Hide Detail' : 'View Detail'}</span>
+                            <span>{isExpanded ? 'Hide' : 'Summary'}</span>
                             {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenFullOrder(ord)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white transition cursor-pointer"
+                          >
+                            <span>Details</span>
+                            <ChevronRight className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -1249,7 +1356,7 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
   }
 
   // =========================================================================
-  // STEP 1 (DEFAULT): COMPANIES WISE LIST INSIDE CUSTOMER ORDERS
+  // DUAL VIEW: ALL ORDERS MIXED (DEFAULT) OR BY COMPANIES
   // =========================================================================
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
@@ -1257,10 +1364,11 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-xs">
           <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            Total Companies
+            Total Orders / Active
           </span>
           <div className="text-2xl font-black text-slate-900 mt-1 font-mono tabular-nums">
-            {totalCompaniesCount}
+            {sortedAllOrders.length}{' '}
+            <span className="text-sm font-bold text-blue-700">/ {activeOrdersTotalCount} Active</span>
           </div>
         </div>
         <div className="bg-white rounded-2xl p-4 sm:p-5 border border-emerald-200 shadow-xs">
@@ -1268,7 +1376,7 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
             Active Companies
           </span>
           <div className="text-2xl font-black text-emerald-700 mt-1 font-mono tabular-nums">
-            {activeCompaniesCount}
+            {activeCompaniesCount} <span className="text-sm font-bold text-slate-500">/ {totalCompaniesCount}</span>
           </div>
         </div>
         <div className="bg-white rounded-2xl p-4 sm:p-5 border border-blue-200 shadow-xs">
@@ -1289,23 +1397,82 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
         </div>
       </div>
 
-      {/* Main Directory Card */}
+      {/* Main Container Card */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-4 sm:p-6 space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        {/* Top Header + Dual View Switcher + Primary Actions */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-              Customer Orders &mdash; Companies
+              {ordersViewMode === 'all_orders'
+                ? 'Customer Orders — All Orders'
+                : 'Customer Orders — By Companies'}
             </h1>
-            <p className="text-xs text-slate-500">
-              Click any company card to view its orders, expandable summaries, and full order details
+            <p className="text-xs text-slate-500 mt-0.5">
+              {ordersViewMode === 'all_orders'
+                ? 'Active orders appear at the top (newest first); completed & delivered orders automatically move to the bottom. Click any order for full details.'
+                : 'Click any company card to open its dedicated orders list.'}
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Dual View Toggle Buttons */}
+            <div className="inline-flex items-center gap-1.5 p-1 rounded-xl bg-slate-100 border border-slate-200">
+              <button
+                type="button"
+                onClick={() => {
+                  setOrdersViewMode('all_orders');
+                  setSelectedCompanyName(null);
+                  setExpandedOrderId(null);
+                }}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs sm:text-sm font-bold transition cursor-pointer ${
+                  ordersViewMode === 'all_orders'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-700 hover:bg-white hover:text-blue-700'
+                }`}
+              >
+                <FileText className="w-4 h-4" />
+                <span>All Orders</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono ${
+                    ordersViewMode === 'all_orders'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {sortedAllOrders.length}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setOrdersViewMode('by_companies');
+                  setSelectedCompanyName(null);
+                  setExpandedOrderId(null);
+                }}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs sm:text-sm font-bold transition cursor-pointer ${
+                  ordersViewMode === 'by_companies'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-700 hover:bg-white hover:text-blue-700'
+                }`}
+              >
+                <Building2 className="w-4 h-4" />
+                <span>By Companies</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono ${
+                    ordersViewMode === 'by_companies'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {allCompanyStats.length}
+                </span>
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={() => setIsAddCompanyOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-bold border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 transition cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 transition cursor-pointer"
             >
               <Building2 className="w-4 h-4 text-blue-600" />
               <span>+ Add Company</span>
@@ -1321,192 +1488,447 @@ export const OrdersPage: React.FC<OrdersPageProps> = ({
           </div>
         </div>
 
-        {/* Search & Filter Bar */}
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-slate-100">
-          <div className="relative flex-1 w-full">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
-            <input
-              type="text"
-              placeholder="Search Company or Search by Order No (e.g. traders, BESTWAY, ORD-004)..."
-              value={companySearch}
-              onChange={e => setCompanySearch(e.target.value)}
-              className="w-full pl-10 pr-4 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 bg-white"
-            />
-          </div>
-
-          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl w-full sm:w-auto">
-            {(
-              [
-                ['all', `All (${allCompanyStats.length})`],
-                ['active', `Active (${activeCompaniesCount})`],
-                ['completed', `Completed (${allCompanyStats.length - activeCompaniesCount})`]
-              ] as const
-            ).map(([key, label]) => (
+        {/* Delete Order Confirmation Banner (works in All Orders view too) */}
+        {orderToDelete && (
+          <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-rose-900">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+              <div>
+                <span className="font-bold">
+                  Order #{orderToDelete.orderNo} ({orderToDelete.customerName}): Are you sure you want to permanently delete this? This cannot be undone.
+                </span>
+                <p className="text-[11px] text-rose-700 mt-0.5">
+                  All linked Cutting, Stitching, Stock, Stock Out, and {(orderToDelete.totalPairs || orderToDelete.totalQty || 0).toLocaleString()} pairs will be permanently deleted.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
               <button
-                key={key}
                 type="button"
-                onClick={() => setCompanyFilterTab(key)}
-                className={`flex-1 sm:flex-none px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
-                  companyFilterTab === key
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
+                onClick={() => setOrderToDelete(null)}
+                disabled={isDeleting}
+                className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50 cursor-pointer"
               >
-                {label}
+                No
               </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Quick Order Matches when searching by Order No */}
-        {companySearch.trim() && matchingOrdersFromSearch.length > 0 && (
-          <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3 space-y-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 block">
-              Matching Orders ({matchingOrdersFromSearch.length})
-            </span>
-            <div className="flex flex-wrap gap-2">
-              {matchingOrdersFromSearch.slice(0, 8).map(ord => (
-                <button
-                  key={ord.id}
-                  type="button"
-                  onClick={() => handleOpenFullOrder(ord)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-blue-200 hover:border-blue-400 text-xs font-bold text-slate-800 shadow-2xs transition cursor-pointer"
-                >
-                  <span className="font-mono text-blue-700">{ord.orderNo}</span>
-                  <span className="text-slate-400">&middot;</span>
-                  <span>{ord.customerName}</span>
-                  <span className="text-slate-400">&middot;</span>
-                  <span className="font-mono text-slate-600">{(ord.totalPairs || ord.totalQty || 0).toLocaleString()} Pairs</span>
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={handleConfirmDeleteOrder}
+                disabled={isDeleting}
+                className="px-4 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 cursor-pointer disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting...' : 'Yes'}
+              </button>
             </div>
           </div>
         )}
 
-        {/* Company Cards Grid */}
-        {filteredCompanies.length === 0 ? (
-          <div className="py-16 text-center text-slate-400 text-sm">
-            <Building2 className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-            <p>No companies found matching your search.</p>
-            <button
-              type="button"
-              onClick={() => onOpenCreateOrder()}
-              className="mt-3 text-xs font-bold text-blue-600 hover:underline cursor-pointer"
-            >
-              + Create Customer Order
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {filteredCompanies.map(comp => (
-              <div
-                key={comp.normalizedName}
-                onClick={() => handleSelectCompany(comp.name)}
-                className={`rounded-xl border p-4 sm:p-5 transition cursor-pointer flex flex-col justify-between gap-4 ${
-                  comp.isCompleted
-                    ? 'border-slate-200 bg-slate-50/70 hover:border-slate-300'
-                    : 'border-slate-200 bg-white hover:border-blue-400 hover:shadow-sm'
-                }`}
-              >
-                <div className="space-y-2">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h2 className="text-base sm:text-lg font-black text-slate-900 truncate">
-                        {comp.name}
-                      </h2>
-                      {(comp.company.contactPerson || comp.company.phone) && (
-                        <p className="text-xs text-slate-500 mt-0.5 truncate">
-                          {[comp.company.contactPerson, comp.company.phone].filter(Boolean).join(' · ')}
-                        </p>
-                      )}
-                    </div>
+        {/* =============================================================== */}
+        {/* VIEW 1 (DEFAULT): ALL ORDERS MIXED                              */}
+        {/* =============================================================== */}
+        {ordersViewMode === 'all_orders' ? (
+          <div className="space-y-4">
+            {/* Search & Filter Bar */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-slate-100">
+              <div className="relative flex-1 w-full">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                <input
+                  type="text"
+                  placeholder="Search by Order No, Company Name, or Article (e.g. ORD-006, BESTWAY)..."
+                  value={allOrdersSearch}
+                  onChange={e => setAllOrdersSearch(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 bg-white"
+                />
+              </div>
 
-                    <span
-                      className={`shrink-0 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                        comp.isCompleted
-                          ? 'bg-slate-200 text-slate-700'
-                          : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl w-full sm:w-auto">
+                {(
+                  [
+                    ['all', `All (${sortedAllOrders.length})`],
+                    ['active', `Active (${activeOrdersTotalCount})`],
+                    ['completed', `Completed (${sortedAllOrders.length - activeOrdersTotalCount})`]
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setAllOrdersFilterTab(key)}
+                    className={`flex-1 sm:flex-none px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                      allOrdersFilterTab === key
+                        ? 'bg-white text-blue-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Mixed Orders List */}
+            {filteredAllOrders.length === 0 ? (
+              <div className="py-16 text-center text-slate-400 text-sm border border-dashed border-slate-200 rounded-xl">
+                <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                <p>No customer orders found matching your criteria.</p>
+                <button
+                  type="button"
+                  onClick={() => onOpenCreateOrder()}
+                  className="mt-3 text-xs font-bold text-blue-600 hover:underline cursor-pointer"
+                >
+                  + Create New Customer Order
+                </button>
+              </div>
+            ) : (
+              <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-200">
+                {/* Desktop Table Column Header */}
+                <div className="hidden lg:grid lg:grid-cols-[130px_minmax(150px,1.2fr)_110px_125px_150px_minmax(180px,1.1fr)_auto] gap-3 px-5 py-3 bg-slate-50 text-[11px] font-extrabold uppercase tracking-wider text-slate-500">
+                  <span>Order No</span>
+                  <span>Company Name</span>
+                  <span>Order Date</span>
+                  <span className="text-right">Total Pairs</span>
+                  <span>Status</span>
+                  <span>Progress</span>
+                  <span className="text-right">Actions</span>
+                </div>
+
+                {filteredAllOrders.map(ord => {
+                  const live = getOrderLiveMetrics(ord);
+                  const isCompleted = isOrderDone(ord, live);
+                  const badge = isCompleted
+                    ? { label: 'Completed', bg: 'bg-emerald-100 text-emerald-800 border-emerald-300' }
+                    : getOrderStatusBadge(ord.status);
+                  const dispatchedPct =
+                    live.totalOriginal > 0
+                      ? Math.min(100, Math.round((live.dispatched / live.totalOriginal) * 100))
+                      : 0;
+                  const cuttingPct =
+                    live.totalOriginal > 0
+                      ? Math.min(100, Math.round((live.cuttingReceived / live.totalOriginal) * 100))
+                      : 0;
+                  const sizeRows = extractOrderSizeRows(ord);
+                  const uniqueArticles = Array.from(new Set(sizeRows.map(r => r.article)));
+
+                  return (
+                    <div
+                      key={ord.id}
+                      onClick={() => handleOpenFullOrder(ord)}
+                      className={`px-4 sm:px-5 py-4 cursor-pointer transition grid grid-cols-1 lg:grid-cols-[130px_minmax(150px,1.2fr)_110px_125px_150px_minmax(180px,1.1fr)_auto] gap-3 lg:items-center ${
+                        isCompleted
+                          ? 'bg-slate-50/70 hover:bg-slate-100/80'
+                          : 'bg-white hover:bg-blue-50/50'
                       }`}
                     >
-                      {comp.isCompleted ? 'Completed' : 'Active'}
-                    </span>
-                  </div>
+                      {/* Order No */}
+                      <div className="flex items-center justify-between lg:block">
+                        <span className="font-mono font-black text-sm sm:text-base text-blue-700">
+                          {ord.orderNo}
+                        </span>
+                        <span className={`lg:hidden rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${badge.bg}`}>
+                          {badge.label}
+                        </span>
+                      </div>
 
-                  {/* Clean unboxed summary metadata */}
-                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-mono tabular-nums text-slate-600 pt-1">
-                    <span>
-                      <strong className="text-slate-900">{comp.totalOrdersCount}</strong> Orders
-                    </span>
-                    <span className="text-slate-300">&middot;</span>
-                    <span>
-                      <strong className="text-blue-700">{comp.totalPairsLifetime.toLocaleString()}</strong> Total Pairs
-                    </span>
-                    <span className="text-slate-300">&middot;</span>
-                    <span>
-                      <strong className="text-emerald-700">{comp.companyInStock.toLocaleString()}</strong> In Stock
-                    </span>
-                    <span className="text-slate-300">&middot;</span>
-                    <span>
-                      <strong className="text-slate-900">{comp.totalDeliveredPairs.toLocaleString()}</strong> Fulfilled
-                    </span>
-                  </div>
-                </div>
+                      {/* Company Name & Article Info */}
+                      <div className="min-w-0">
+                        <div className="font-black text-sm text-slate-900 truncate flex items-center gap-1.5">
+                          <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                          <span className="truncate">{ord.customerName}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                          {uniqueArticles.length > 0
+                            ? uniqueArticles.join(', ')
+                            : 'Customer Order'}
+                        </div>
+                      </div>
 
-                {/* Card Actions */}
-                <div
-                  className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2"
-                  onClick={e => e.stopPropagation()}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenEditCompany(comp.company)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
-                      title="Edit Company"
-                    >
-                      <Pencil className="w-3.5 h-3.5 text-slate-500" />
-                      <span>Edit</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleCompanyComplete(comp.name, !comp.isCompleted)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
-                      title={comp.isCompleted ? 'Reopen Company' : 'Mark Company Complete'}
-                    >
-                      {comp.isCompleted ? (
-                        <>
-                          <RotateCcw className="w-3.5 h-3.5 text-blue-600" />
-                          <span>Reopen</span>
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>Complete</span>
-                        </>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onOpenCreateOrder(comp.name)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-xs font-bold text-blue-700 cursor-pointer"
-                      title={`New Order for ${comp.name}`}
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>New Order</span>
-                    </button>
-                  </div>
+                      {/* Order Date */}
+                      <div className="text-xs font-mono tabular-nums text-slate-600 flex items-center justify-between lg:block">
+                        <span className="lg:hidden font-sans font-semibold text-slate-400">Order Date:</span>
+                        <span>{formatDate(ord.orderDate)}</span>
+                      </div>
 
+                      {/* Total Pairs */}
+                      <div className="text-left lg:text-right flex items-center justify-between lg:block">
+                        <span className="lg:hidden text-xs font-semibold text-slate-400">Total Pairs:</span>
+                        <span className="font-mono tabular-nums font-black text-sm text-slate-900">
+                          {live.totalOriginal.toLocaleString()}{' '}
+                          <span className="text-[11px] font-semibold text-slate-500">Pairs</span>
+                        </span>
+                      </div>
+
+                      {/* Status */}
+                      <div className="hidden lg:flex flex-col items-start gap-1">
+                        <span className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${badge.bg}`}>
+                          {badge.label}
+                        </span>
+                        {live.extraCutting > 0 && (
+                          <span className="rounded border border-rose-300 bg-rose-100 px-1.5 py-0.5 font-mono text-[10px] font-black text-rose-700">
+                            Extra Cutting: {live.extraCutting.toLocaleString()} Pairs
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Progress */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] font-mono font-bold">
+                          <span className="text-slate-700">
+                            {live.dispatched.toLocaleString()} / {live.totalOriginal.toLocaleString()}
+                          </span>
+                          <span className={isCompleted ? 'text-emerald-700' : 'text-blue-700'}>
+                            {dispatchedPct}% Delivered
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+                          <div
+                            style={{ width: `${dispatchedPct}%` }}
+                            className={`h-full rounded-full transition-all ${
+                              isCompleted ? 'bg-emerald-600' : 'bg-blue-600'
+                            }`}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                          <span>Cutting: {cuttingPct}% ({live.cuttingReceived.toLocaleString()})</span>
+                          {live.extraCutting > 0 && (
+                            <span className="lg:hidden font-black text-rose-700">
+                              Extra: {live.extraCutting.toLocaleString()}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Actions */}
+                      <div
+                        className="flex items-center justify-end gap-1.5 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-100"
+                        onClick={e => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => onEditOrder?.(ord)}
+                          className="p-2 rounded-lg text-blue-700 hover:bg-blue-100 transition cursor-pointer"
+                          title="Edit Order"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setOrderToDelete(ord)}
+                          className="p-2 rounded-lg text-rose-600 hover:bg-rose-100 transition cursor-pointer"
+                          title="Delete Order"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenCuttingForOrder(ord.id)}
+                          className="p-2 rounded-lg text-amber-700 hover:bg-amber-100 transition cursor-pointer"
+                          title="Assign Cutting"
+                        >
+                          <Scissors className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenFullOrder(ord)}
+                          className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs transition cursor-pointer"
+                        >
+                          <span>View Order</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : (
+          /* =============================================================== */
+          /* VIEW 2: BY COMPANIES CARDS VIEW                                 */
+          /* =============================================================== */
+          <div className="space-y-5">
+            {/* Search & Filter Bar */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-slate-100">
+              <div className="relative flex-1 w-full">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                <input
+                  type="text"
+                  placeholder="Search Company or Search by Order No e.g. BESTWAY ORD-006"
+                  value={companySearch}
+                  onChange={e => setCompanySearch(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/20 bg-white"
+                />
+              </div>
+
+              <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl w-full sm:w-auto">
+                {(
+                  [
+                    ['all', `All (${allCompanyStats.length})`],
+                    ['active', `Active (${activeCompaniesCount})`],
+                    ['completed', `Completed (${allCompanyStats.length - activeCompaniesCount})`]
+                  ] as const
+                ).map(([key, label]) => (
                   <button
+                    key={key}
                     type="button"
-                    onClick={() => handleSelectCompany(comp.name)}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs transition cursor-pointer"
+                    onClick={() => setCompanyFilterTab(key)}
+                    className={`flex-1 sm:flex-none px-3.5 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${
+                      companyFilterTab === key
+                        ? 'bg-white text-blue-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
                   >
-                    <span>View Orders</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
+                    {label}
                   </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Quick Order Matches when searching by Order No */}
+            {companySearch.trim() && matchingOrdersFromSearch.length > 0 && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3 space-y-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 block">
+                  Matching Orders ({matchingOrdersFromSearch.length})
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {matchingOrdersFromSearch.slice(0, 8).map(ord => (
+                    <button
+                      key={ord.id}
+                      type="button"
+                      onClick={() => handleOpenFullOrder(ord)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-blue-200 hover:border-blue-400 text-xs font-bold text-slate-800 shadow-2xs transition cursor-pointer"
+                    >
+                      <span className="font-mono text-blue-700">{ord.orderNo}</span>
+                      <span className="text-slate-400">&middot;</span>
+                      <span>{ord.customerName}</span>
+                      <span className="text-slate-400">&middot;</span>
+                      <span className="font-mono text-slate-600">{(ord.totalPairs || ord.totalQty || 0).toLocaleString()} Pairs</span>
+                    </button>
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
+
+            {/* Company Cards Grid */}
+            {filteredCompanies.length === 0 ? (
+              <div className="py-16 text-center text-slate-400 text-sm">
+                <Building2 className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+                <p>No companies found matching your search.</p>
+                <button
+                  type="button"
+                  onClick={() => onOpenCreateOrder()}
+                  className="mt-3 text-xs font-bold text-blue-600 hover:underline cursor-pointer"
+                >
+                  + Create Customer Order
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {filteredCompanies.map(comp => (
+                  <div
+                    key={comp.normalizedName}
+                    onClick={() => handleSelectCompany(comp.name)}
+                    className={`rounded-xl border p-4 sm:p-5 transition cursor-pointer flex flex-col justify-between gap-4 ${
+                      comp.isCompleted
+                        ? 'border-slate-200 bg-slate-50/70 hover:border-slate-300'
+                        : 'border-slate-200 bg-white hover:border-blue-400 hover:shadow-sm'
+                    }`}
+                  >
+                    <div className="space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <h2 className="text-base sm:text-lg font-black text-slate-900 truncate">
+                            {comp.name}
+                          </h2>
+                          {(comp.company.contactPerson || comp.company.phone) && (
+                            <p className="text-xs text-slate-500 mt-0.5 truncate">
+                              {[comp.company.contactPerson, comp.company.phone].filter(Boolean).join(' · ')}
+                            </p>
+                          )}
+                        </div>
+
+                        <span
+                          className={`shrink-0 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                            comp.isCompleted
+                              ? 'bg-slate-200 text-slate-700'
+                              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          }`}
+                        >
+                          {comp.isCompleted ? 'Completed' : 'Active'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 pt-1 text-xs">
+                        <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+                          <span className="text-[10px] font-bold uppercase text-slate-500 block">Total Orders</span>
+                          <span className="font-mono font-black text-sm text-slate-900">{comp.totalOrdersCount}</span>
+                        </div>
+                        <div className="rounded-lg bg-blue-50 border border-blue-200 px-3 py-2">
+                          <span className="text-[10px] font-bold uppercase text-blue-700 block">Total Pairs</span>
+                          <span className="font-mono font-black text-sm text-blue-800">{comp.totalPairsLifetime.toLocaleString()}</span>
+                        </div>
+                        <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2">
+                          <span className="text-[10px] font-bold uppercase text-emerald-700 block">In Stock</span>
+                          <span className="font-mono font-black text-sm text-emerald-800">{comp.companyInStock.toLocaleString()}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Card Actions */}
+                    <div
+                      className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditCompany(comp.company)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
+                          title="Edit Company"
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Edit</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleCompanyComplete(comp.name, !comp.isCompleted)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer"
+                          title={comp.isCompleted ? 'Reopen Company' : 'Mark Company Complete'}
+                        >
+                          {comp.isCompleted ? (
+                            <>
+                              <RotateCcw className="w-3.5 h-3.5 text-blue-600" />
+                              <span>Reopen</span>
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>Complete</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenCreateOrder(comp.name)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-xs font-bold text-blue-700 cursor-pointer"
+                          title={`New Order for ${comp.name}`}
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>New Order</span>
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSelectCompany(comp.name)}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs transition cursor-pointer"
+                      >
+                        <span>View Orders</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

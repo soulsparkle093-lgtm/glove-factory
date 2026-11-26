@@ -23,6 +23,7 @@ export const SettingsPage: React.FC = () => {
   });
 
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -328,22 +329,31 @@ export const SettingsPage: React.FC = () => {
 
             {showClearConfirm ? (
               <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl space-y-2 text-xs text-rose-900">
-                <p className="font-bold">Are you sure you want to delete all factory records?</p>
+                <p className="font-bold">Are you sure you want to permanently delete this? This cannot be undone.</p>
                 <div className="flex gap-2">
                   <button
+                    type="button"
+                    disabled={isClearing}
                     onClick={() => setShowClearConfirm(false)}
-                    className="px-3 py-1 rounded bg-white border border-slate-300 font-semibold"
+                    className="px-3 py-1 rounded bg-white border border-slate-300 font-semibold cursor-pointer"
                   >
-                    Cancel
+                    No
                   </button>
                   <button
-                    onClick={() => {
-                      clearAllFactoryData();
-                      setShowClearConfirm(false);
+                    type="button"
+                    disabled={isClearing}
+                    onClick={async () => {
+                      setIsClearing(true);
+                      try {
+                        await clearAllFactoryData();
+                        setShowClearConfirm(false);
+                      } finally {
+                        setIsClearing(false);
+                      }
                     }}
-                    className="px-3 py-1 rounded bg-rose-600 text-white font-bold hover:bg-rose-700"
+                    className="px-3 py-1 rounded bg-rose-600 text-white font-bold hover:bg-rose-700 cursor-pointer disabled:opacity-50"
                   >
-                    Yes, Delete All
+                    {isClearing ? 'Deleting...' : 'Yes'}
                   </button>
                 </div>
               </div>

@@ -303,28 +303,21 @@ export const StockManagement: React.FC = () => {
 
   // Debug Console Log: inspect where Stock Out data is coming from
   useEffect(() => {
-    try {
-      const localStockOutRaw = typeof window !== 'undefined' ? localStorage.getItem('gferp_stock_out_v1') : null;
-      const localStockOutArr = localStockOutRaw ? JSON.parse(localStockOutRaw) : [];
-      const articleStockDeliveryCount = (articleStock || []).reduce(
-        (sum, a) => sum + (Array.isArray(a.deliveryHistory) ? a.deliveryHistory.length : 0),
-        0
-      );
-      console.log('[StockManagement Debug] Stock Out Data Sources:', {
-        firestore_stock_delivery_history_count: (deliveryHistory || []).length,
-        firestore_article_stock_deliveryHistory_count: articleStockDeliveryCount,
-        localStorage_gferp_stock_out_v1_count: Array.isArray(localStockOutArr) ? localStockOutArr.length : 0,
-        sampleEntries: (deliveryHistory || []).slice(0, 5).map(d => ({
-          id: d.id,
-          customer: d.customerName,
-          article: d.article,
-          qty: d.quantity,
-          orderId: d.orderId
-        }))
-      });
-    } catch {
-      // ignore storage parse error in debug logger
-    }
+    const articleStockDeliveryCount = (articleStock || []).reduce(
+      (sum, a) => sum + (Array.isArray(a.deliveryHistory) ? a.deliveryHistory.length : 0),
+      0
+    );
+    console.log('[StockManagement Debug] Stock Out Data Sources:', {
+      firestore_stock_delivery_history_count: (deliveryHistory || []).length,
+      firestore_article_stock_deliveryHistory_count: articleStockDeliveryCount,
+      sampleEntries: (deliveryHistory || []).slice(0, 5).map(d => ({
+        id: d.id,
+        customer: d.customerName,
+        article: d.article,
+        qty: d.quantity,
+        orderId: d.orderId
+      }))
+    });
   }, [deliveryHistory, articleStock]);
 
   // Sync URL hash with selected article (/stock-management/[article_name])

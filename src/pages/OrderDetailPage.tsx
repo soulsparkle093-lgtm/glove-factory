@@ -191,6 +191,65 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
   const cuttingTableScrollRef = useDragToScroll<HTMLDivElement>();
   const poTableScrollRef = useDragToScroll<HTMLDivElement>();
 
+  // Auto-adjusting top header on scroll (Full Big at top -> <=40px single line on scroll down)
+  const [isHeaderCompact, setIsHeaderCompact] = useState(false);
+  const isHeaderCompactRef = useRef(false);
+  const headerCardRef = useRef<HTMLDivElement>(null);
+  const expandedHeaderHeightRef = useRef<number>(180);
+
+  useEffect(() => {
+    isHeaderCompactRef.current = isHeaderCompact;
+  }, [isHeaderCompact]);
+
+  useEffect(() => {
+    isHeaderCompactRef.current = false;
+    setIsHeaderCompact(false);
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [orderId]);
+
+  useEffect(() => {
+    let rafId: number | null = null;
+
+    const updateHeaderCompactState = () => {
+      rafId = null;
+      const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+
+      if (!isHeaderCompactRef.current && headerCardRef.current) {
+        const rect = headerCardRef.current.getBoundingClientRect();
+        if (rect.height > 60) {
+          expandedHeaderHeightRef.current = rect.height;
+        }
+      }
+
+      if (!isHeaderCompactRef.current) {
+        if (scrollY >= 72) {
+          const scrollable = document.documentElement.scrollHeight - window.innerHeight;
+          const shrinkDelta = Math.max(120, expandedHeaderHeightRef.current - 40);
+          if (scrollable > shrinkDelta + 40) {
+            isHeaderCompactRef.current = true;
+            setIsHeaderCompact(true);
+          }
+        }
+      } else if (scrollY <= 12) {
+        isHeaderCompactRef.current = false;
+        setIsHeaderCompact(false);
+      }
+    };
+
+    const handleScroll = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(updateHeaderCompactState);
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', handleScroll, { passive: true });
+    return () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleScroll);
+    };
+  }, [orderId]);
+
   // Close on Escape key
   useEffect(() => {
     if (!isAddArticleSizeOpen && !selectedGatePass && !selectedCutterHistory && !isDeliverModalOpen) return;
@@ -974,120 +1033,188 @@ export const OrderDetailPage: React.FC<OrderDetailPageProps> = ({
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
       {/* =========================================================================
-          STICKY TOP HEADER: TOTAL ORIGINAL PAIRS IN BIG BOLD BLUE & PROGRESS BAR
+          STICKY TOP HEADER: AUTO-ADJUSTS FROM FULL HEADER TO <=40PX SINGLE LINE ON SCROLL
           ========================================================================= */}
-      <div className="sticky top-0 z-30 bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/90 shadow-md p-4 sm:p-5 transition-all">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          {/* Back & Order Meta */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={onBack}
-              className="p-2 rounded-xl text-slate-600 hover:text-blue-700 hover:bg-slate-100 transition shrink-0 cursor-pointer"
-              title="Back to Customer Orders"
-            >
-              <ArrowLeft className="w-5 h-5" />
-            </button>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono font-black text-lg text-blue-700">
-                  #{order.orderNo}
-                </span>
-                <span
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
-                    isOrderCompleted
-                      ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
-                      : 'bg-amber-100 text-amber-800 border-amber-300'
-                  }`}
-                >
-                  {isOrderCompleted ? 'Completed' : 'In Progress'}
-                </span>
-                {extraCuttingPairs > 0 && (
-                  <span className="px-2.5 py-0.5 rounded-md text-xs font-black font-mono tabular-nums bg-rose-100 text-rose-700 border border-rose-300">
-                    Extra Cutting: {extraCuttingPairs.toLocaleString()} Pairs
-                  </span>
-                )}
-              </div>
-              <h1 className="text-base sm:text-lg font-black text-slate-900 truncate">
+      <div
+        ref={headerCardRef}
+        className={`sticky top-[73px] z-20 bg-white/95 backdrop-blur-md border border-slate-200/90 transition-all duration-200 ease-out ${
+          isHeaderCompact
+            ? 'rounded-xl shadow-sm px-2.5 sm:px-4 py-0 max-h-[40px]'
+            : 'rounded-2xl shadow-md p-4 sm:p-5'
+        }`}
+      >
+        {/* COMPACT SINGLE-LINE MODE (<= 40px HEIGHT) WHEN SCROLLED DOWN */}
+        <div
+          className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out print:hidden ${
+            isHeaderCompact
+              ? 'grid-rows-[1fr] opacity-100'
+              : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <div className="h-[38px] max-h-[38px] flex items-center gap-1.5 sm:gap-2 overflow-x-auto whitespace-nowrap text-[10.5px] sm:text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <button
+                type="button"
+                onClick={onBack}
+                className="p-1 rounded-md text-slate-500 hover:text-blue-700 hover:bg-slate-100 transition shrink-0 cursor-pointer"
+                title="Back to Customer Orders"
+                aria-label="Back to Customer Orders"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+              </button>
+              <span className="font-mono font-black text-blue-700 shrink-0">
+                #{order.orderNo}
+              </span>
+              <span className="text-slate-300 select-none shrink-0">|</span>
+              <span className="font-bold text-slate-900 max-w-[100px] sm:max-w-[240px] truncate shrink-0">
                 {order.customerName}
-              </h1>
-            </div>
-          </div>
-
-          {/* TOTAL ORIGINAL PAIRS, TOTAL CUTTING RECEIVED & DISPATCHED SUMMARY */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-5 bg-blue-50/70 border border-blue-200/80 px-4 py-2.5 rounded-xl">
-            <div className="flex flex-wrap items-center gap-4 sm:gap-5">
-              <div className="text-left sm:text-right">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-blue-600 block">
-                  Total Original Pairs
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-blue-700 font-mono tracking-tight">
-                  {totalOriginalPairs.toLocaleString()} <span className="text-xs font-bold text-blue-600">Pairs</span>
-                </span>
-              </div>
-
-              <div className="h-8 w-px bg-blue-200 hidden sm:block" />
-
-              <div className="text-left sm:text-right">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700 block">
-                  Total Cutting Received
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-amber-700 font-mono tracking-tight">
-                  {cuttingReceivedPairs.toLocaleString()} <span className="text-xs font-bold text-amber-600">Pairs</span>
-                </span>
-              </div>
-
-              <div className="h-8 w-px bg-blue-200 hidden sm:block" />
-
-              <div className="text-left sm:text-right">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700 block">
-                  Dispatched to Customer
-                </span>
-                <span className="text-xl sm:text-2xl font-black text-emerald-700 font-mono tracking-tight">
-                  {dispatchedPairs.toLocaleString()} <span className="text-xs font-bold text-emerald-600">Pairs</span>
-                </span>
-              </div>
-            </div>
-
-            <div className="h-8 w-px bg-blue-200 hidden sm:block" />
-
-            {/* Quick Action Buttons */}
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => onOpenCuttingModalForOrder(order.id)}
-                className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+              </span>
+              <span className="text-slate-300 select-none shrink-0">|</span>
+              <span
+                className={`font-bold shrink-0 ${
+                  isOrderCompleted ? 'text-emerald-700' : 'text-amber-700'
+                }`}
               >
-                <Scissors className="w-4 h-4" />
-                <span>+ Give Cutting</span>
-              </button>
-              <button
-                onClick={() => onOpenInvoiceModalForOrder(order.id)}
-                className="px-3.5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
-              >
-                <Receipt className="w-4 h-4" />
-                <span>+ Create Bill / Dispatch</span>
-              </button>
+                {isOrderCompleted ? 'Completed' : 'In Progress'}
+              </span>
+              <span className="text-slate-300 select-none shrink-0">|</span>
+              <span className="font-mono font-bold text-blue-700 shrink-0">
+                Total: {totalOriginalPairs.toLocaleString()}
+              </span>
+              <span className="text-slate-300 select-none shrink-0">|</span>
+              <span className="font-mono font-bold text-amber-700 shrink-0">
+                Cutting: {cuttingReceivedPairs.toLocaleString()}
+              </span>
+              <span className="text-slate-300 select-none shrink-0">|</span>
+              <span className="font-mono font-bold text-emerald-700 shrink-0">
+                Dispatched: {dispatchedPairs.toLocaleString()}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Real-time Order Progress Bar: Dispatched / Original */}
-        <div className="mt-3.5 pt-3 border-t border-slate-100">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold mb-1.5">
-            <span className="text-slate-700 flex items-center gap-1.5">
-              <PackageCheck className="w-4 h-4 text-emerald-600" />
-              <span>Dispatched to Customer:</span>
-              <span className="text-emerald-700 font-mono font-black">{dispatchedPairs.toLocaleString()} / {totalOriginalPairs.toLocaleString()} Pairs</span>
-            </span>
-            <span className="text-slate-500 text-[11px] font-mono font-semibold">
-              {dispatchedPct}% Fulfilled &bull; Cutting Balance: {cuttingBalancePairs.toLocaleString()} Pairs &bull; Pending Dispatch: {pendingPairs.toLocaleString()} Pairs
-            </span>
-          </div>
-          <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
-            <div 
-              style={{ width: `${dispatchedPct}%` }}
-              className="h-full bg-emerald-500 transition-all duration-500 rounded-full"
-              title={`Dispatched: ${dispatchedPairs} Pairs (${dispatchedPct}%)`}
-            />
+        {/* FULL BIG HEADER MODE (SHOWN AT TOP OF PAGE) */}
+        <div
+          className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out print:!grid-rows-[1fr] print:!opacity-100 ${
+            isHeaderCompact
+              ? 'grid-rows-[0fr] opacity-0 pointer-events-none'
+              : 'grid-rows-[1fr] opacity-100'
+          }`}
+        >
+          <div className="overflow-hidden">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              {/* Back & Order Meta */}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={onBack}
+                  className="p-2 rounded-xl text-slate-600 hover:text-blue-700 hover:bg-slate-100 transition shrink-0 cursor-pointer"
+                  title="Back to Customer Orders"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-black text-lg text-blue-700">
+                      #{order.orderNo}
+                    </span>
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${
+                        isOrderCompleted
+                          ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                          : 'bg-amber-100 text-amber-800 border-amber-300'
+                      }`}
+                    >
+                      {isOrderCompleted ? 'Completed' : 'In Progress'}
+                    </span>
+                    {extraCuttingPairs > 0 && (
+                      <span className="px-2.5 py-0.5 rounded-md text-xs font-black font-mono tabular-nums bg-rose-100 text-rose-700 border border-rose-300">
+                        Extra Cutting: {extraCuttingPairs.toLocaleString()} Pairs
+                      </span>
+                    )}
+                  </div>
+                  <h1 className="text-base sm:text-lg font-black text-slate-900 truncate">
+                    {order.customerName}
+                  </h1>
+                </div>
+              </div>
+
+              {/* TOTAL ORIGINAL PAIRS, TOTAL CUTTING RECEIVED & DISPATCHED SUMMARY */}
+              <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-5 bg-blue-50/70 border border-blue-200/80 px-4 py-2.5 rounded-xl">
+                <div className="flex flex-wrap items-center gap-4 sm:gap-5">
+                  <div className="text-left sm:text-right">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-blue-600 block">
+                      Total Original Pairs
+                    </span>
+                    <span className="text-xl sm:text-2xl font-black text-blue-700 font-mono tracking-tight">
+                      {totalOriginalPairs.toLocaleString()} <span className="text-xs font-bold text-blue-600">Pairs</span>
+                    </span>
+                  </div>
+
+                  <div className="h-8 w-px bg-blue-200 hidden sm:block" />
+
+                  <div className="text-left sm:text-right">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700 block">
+                      Total Cutting Received
+                    </span>
+                    <span className="text-xl sm:text-2xl font-black text-amber-700 font-mono tracking-tight">
+                      {cuttingReceivedPairs.toLocaleString()} <span className="text-xs font-bold text-amber-600">Pairs</span>
+                    </span>
+                  </div>
+
+                  <div className="h-8 w-px bg-blue-200 hidden sm:block" />
+
+                  <div className="text-left sm:text-right">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700 block">
+                      Dispatched to Customer
+                    </span>
+                    <span className="text-xl sm:text-2xl font-black text-emerald-700 font-mono tracking-tight">
+                      {dispatchedPairs.toLocaleString()} <span className="text-xs font-bold text-emerald-600">Pairs</span>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="h-8 w-px bg-blue-200 hidden sm:block" />
+
+                {/* Quick Action Buttons */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => onOpenCuttingModalForOrder(order.id)}
+                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Scissors className="w-4 h-4" />
+                    <span>+ Give Cutting</span>
+                  </button>
+                  <button
+                    onClick={() => onOpenInvoiceModalForOrder(order.id)}
+                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Receipt className="w-4 h-4" />
+                    <span>+ Create Bill / Dispatch</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Real-time Order Progress Bar: Dispatched / Original */}
+            <div className="mt-3.5 pt-3 border-t border-slate-100">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-bold mb-1.5">
+                <span className="text-slate-700 flex items-center gap-1.5">
+                  <PackageCheck className="w-4 h-4 text-emerald-600" />
+                  <span>Dispatched to Customer:</span>
+                  <span className="text-emerald-700 font-mono font-black">{dispatchedPairs.toLocaleString()} / {totalOriginalPairs.toLocaleString()} Pairs</span>
+                </span>
+                <span className="text-slate-500 text-[11px] font-mono font-semibold">
+                  {dispatchedPct}% Fulfilled &bull; Cutting Balance: {cuttingBalancePairs.toLocaleString()} Pairs &bull; Pending Dispatch: {pendingPairs.toLocaleString()} Pairs
+                </span>
+              </div>
+              <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden flex">
+                <div 
+                  style={{ width: `${dispatchedPct}%` }}
+                  className="h-full bg-emerald-500 transition-all duration-500 rounded-full"
+                  title={`Dispatched: ${dispatchedPairs} Pairs (${dispatchedPct}%)`}
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>

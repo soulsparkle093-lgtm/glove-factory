@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Wallet, ArrowDownLeft, ArrowUpRight, Search, Plus, Trash2, X, ArrowLeft } from 'lucide-react';
+import { Wallet, ArrowDownLeft, ArrowUpRight, Search, Plus, Trash2, X, ArrowLeft, AlertCircle } from 'lucide-react';
 import { useFactory } from '../context/FactoryContext';
 import { formatCurrency, formatDate } from '../utils/factoryFormatters';
 import { CashbookEntry } from '../types/factory';
@@ -11,18 +11,21 @@ export const CashbookPage: React.FC = () => {
   const [typeFilter, setTypeFilter] = useState<'all' | 'in' | 'out'>('all');
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [entryType, setEntryType] = useState<'in' | 'out'>('in');
+  const [entryToDelete, setEntryToDelete] = useState<CashbookEntry | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Close on Escape key
   useEffect(() => {
-    if (!isAddOpen) return;
+    if (!isAddOpen && !entryToDelete) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsAddOpen(false);
+        if (!isDeleting) setEntryToDelete(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAddOpen]);
+  }, [isAddOpen, entryToDelete, isDeleting]);
 
   // Form states
   const [amount, setAmount] = useState('');
@@ -172,7 +175,11 @@ export const CashbookPage: React.FC = () => {
                       {entry.type === 'out' ? formatCurrency(entry.amount, settings.currency) : '-'}
                     </td>
                     <td className="py-3.5 px-4 text-center">
-                      <button onClick={() => deleteCashbookEntry(entry.id)} className="p-1 rounded text-slate-400 hover:text-rose-600">
+                      <button
+                        onClick={() => setEntryToDelete(entry)}
+                        className="p-1 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
+                        title="Delete Entry Permanently"
+                      >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </td>
@@ -291,6 +298,59 @@ export const CashbookPage: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Permanent Delete Confirmation Modal */}
+      {entryToDelete && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isDeleting) setEntryToDelete(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-100 text-rose-600 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Delete Cashbook Entry?</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  Are you sure you want to permanently delete this? This cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setEntryToDelete(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold border border-slate-300 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                No
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={async () => {
+                  if (!entryToDelete) return;
+                  setIsDeleting(true);
+                  try {
+                    await deleteCashbookEntry(entryToDelete.id);
+                    setEntryToDelete(null);
+                  } finally {
+                    setIsDeleting(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting...' : 'Yes'}
+              </button>
+            </div>
           </div>
         </div>
       )}
